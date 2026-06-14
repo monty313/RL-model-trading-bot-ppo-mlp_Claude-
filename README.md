@@ -73,9 +73,17 @@ map to importable packages under `quantra/` (digit-prefixed names aren't valid P
 identifiers).
 
 ## Build status
-**M0 + M1 complete**: skeleton, docs in-tree, runtime hardware optimizer, Colab
-notebook (M0); MT5 data loader + lookahead-safe resampler (M1). Then M2→M15 per
-`docs/SOW_2_BUILD_SPEC.md` Section 13.
+**✅ M0→M15 COMPLETE.** The full SOW (`docs/SOW_2_BUILD_SPEC.md` Section 13) is built:
+data pipeline · ~179-scalar feature/state vector · 9 laws + 3 gates (−1e9 masks) ·
+4-symbol true-sequential env with the B5 no-overshoot invariant · four-head PPO agent ·
+layered reward (Layer-0 dominance) · curriculum + two-phase episode rule · trainer
+(GAE + aggression scheduler + G8) · versioned telemetry · the 7 interpreter visuals ·
+read-only LLM Risk Doctor · scoreboard + walk-forward + promotion gate · Optuna HPO ·
+MT5 live bridge + kill switches · end-to-end acceptance. Run `pytest` (97 tests) and
+`python -m quantra.acceptance` to see the whole chain.
+
+Next (operator): point it at the real MT5 bars in Colab and run the 7-seed walk-forward
+to establish a pass rate.
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (just run `pytest`).
 All future tests append there. **Every file carries an IRAC update log** (Issue ·

@@ -79,7 +79,9 @@ docs/
 - [x] **M14** — LiveBridge: MT5 adapter (guarded) + sim fallback, ExecutionAdapter
   (5-slot/pointer-CLOSE), ManualHalt + breach auto-flat, deterministic LiveRunner,
   isolated from diagnostics (`quantra/locked_core/platform_adapter/`, `quantra/live_bridge/`).
-- [ ] M15 acceptance
+- [x] **M15** — End-to-end acceptance: the whole chain (data→features→laws→env→agent→
+  train→telemetry→7 visuals→LLM diagnosis→scoreboard) runs in one call
+  (`quantra/acceptance.py`). **BUILD COMPLETE — M0→M15 all green (97-test master suite).**
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see

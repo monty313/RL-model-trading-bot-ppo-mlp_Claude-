@@ -1385,6 +1385,36 @@ def test_live_bridge_isolated_from_diagnostics():
     assert "quantra.diagnostics" not in src       # no diagnostics coupling at runtime
 
 
+# =============================================================================
+# SECTION R — END-TO-END ACCEPTANCE (M15)
+# FTMO link: proves the whole mission machine composes - a brain trains under faithful
+# physics, is logged, visualised, diagnosed (read-only), and ranked by PASS RATE.
+# =============================================================================
+from quantra.acceptance import run_acceptance  # noqa: E402
+from quantra.diagnostics.llm_risk_doctor import TAXONOMY as _TAX, UNCLASSIFIED as _UNC  # noqa: E402
+
+
+def test_end_to_end_acceptance_runs_the_whole_chain(tmp_path):
+    """data -> features -> laws -> env -> agent -> train -> telemetry -> 7 visuals ->
+    LLM diagnosis -> scoreboard, all in one run, without crashing."""
+    res = run_acceptance(symbols=["EURUSD"], n_train_updates=1, eval_episodes=2,
+                         bars=7000, seed=0, out_dir=tmp_path)
+    # scoreboard produces the 4 ranking metrics
+    s = res.scoreboard.summary()
+    for k in ("pass_rate", "breaches", "target_hit_consistency", "max_drawdown_path"):
+        assert k in s
+    # the 7 required visuals were produced
+    assert len(res.visuals) == 7
+    for path in res.visuals.values():
+        assert path.exists()
+    # an evidence-cited LLM diagnosis following the output template
+    rendered = res.diagnosis.render()
+    assert "DIAGNOSIS" in rendered and "Failure classification" in rendered
+    assert res.diagnosis.classification in _TAX or res.diagnosis.classification == _UNC
+    # a checkpoint was saved (SOW §8.4)
+    assert res.checkpoint.exists()
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -1521,3 +1551,10 @@ if __name__ == "__main__":  # pragma: no cover
 #      live-runner deterministic exec + breach auto-flat + halted-block, no-diagnostics-import. 5 tests.
 #   C: The learned pass-behaviour reproduces live with identical masks/slots, behind two
 #      hard kill switches - so passes get banked without a bad session blowing the account.
+# [2026-06-13] Added Section R - end-to-end acceptance (M15). BUILD COMPLETE (M0-M15).
+#   I: The 14 milestones needed proof they compose into one working mission machine.
+#   R: SOW §11.3 (one run: scoreboard 4 metrics; telemetry -> 7 visuals; LLM diagnosis).
+#   A: Section R - run_acceptance trains a brain, evals deterministically with full-
+#      contract telemetry, emits the 7 visuals + a template diagnosis + the scoreboard. 1 test.
+#   C: The whole chain runs green, so the system can be pointed at real bars + 7 seeds to
+#      establish a real pass rate - the FTMO-passing machine is built and verifiable.
