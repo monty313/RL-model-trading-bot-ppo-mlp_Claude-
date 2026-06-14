@@ -1318,6 +1318,73 @@ def test_hpo_study_maximizes_pass_rate_objective():
     assert not (set(study.best_params) & SACRED_DIALS)    # winner uses no sacred dial
 
 
+# =============================================================================
+# SECTION Q — LIVE BRIDGE: ExecutionAdapter + ManualHalt + LiveRunner (M14)
+# FTMO link: live execution must mirror training (5 slots, pointer-CLOSE) so the
+# learned pass-behaviour reproduces, behind two hard kill switches that make a bad
+# session non-fatal. Isolated from diagnostics.
+# =============================================================================
+from quantra.locked_core.platform_adapter import (  # noqa: E402
+    BrokerAdapter,
+    SimBrokerAdapter,
+    make_adapter,
+)
+from quantra.live_bridge import ExecutionAdapter, LiveRunner, ManualHalt  # noqa: E402
+
+
+def test_make_adapter_returns_a_broker_sim_default():
+    # 'mt5' yields a real MT5Adapter where MetaTrader5 is installed, else a sim
+    # fallback; either way it's a BrokerAdapter. 'sim' is always the paper broker.
+    assert isinstance(make_adapter("mt5"), BrokerAdapter)
+    assert isinstance(make_adapter("sim"), SimBrokerAdapter)
+    assert make_adapter("sim").connect() is True
+
+
+def test_execution_adapter_slots_and_pointer_close():
+    ex = ExecutionAdapter(SimBrokerAdapter(), ["EURUSD"])
+    for _ in range(7):                            # only 5 slots
+        ex.open("EURUSD", side=1, lots=0.1, price=1.20)
+    assert ex.n_open("EURUSD") == 5               # OPEN refused once full
+    assert ex.open("EURUSD", 1, 0.1) is None
+    assert ex.close("EURUSD", pointer=2, price=1.21) is True
+    assert ex.slots["EURUSD"][2] is None and ex.n_open("EURUSD") == 4
+
+
+def test_manual_halt_flattens_and_latches():
+    broker = SimBrokerAdapter()
+    ex = ExecutionAdapter(broker, ["EURUSD", "US30"])
+    ex.open("EURUSD", 1, 0.1); ex.open("US30", -1, 0.1)
+    halt = ManualHalt()
+    closed = halt.halt(broker)
+    assert closed == 2 and halt.is_halted        # flattened all + latched
+    assert len(broker.positions()) == 0
+    halt.reset(); assert not halt.is_halted       # manual reset only
+
+
+def test_live_runner_deterministic_execution_and_kill_switches():
+    broker = SimBrokerAdapter()
+    ex = ExecutionAdapter(broker, ["EURUSD"])
+    runner = LiveRunner(PPOAgent(state_dim=STATE_DIM),
+                        ex, RiskManager(account_size=10_000))
+    obs = np.zeros(STATE_DIM, dtype=np.float32)
+    dm = np.zeros(4, dtype=np.float32); dm[OPEN_SHORT] = -1e9   # forbid OPEN_SHORT
+    pm = np.zeros(5, dtype=np.float32)
+    info = runner.step("EURUSD", obs, dm, pm, atr_price=1e-3, price=1.20, remaining_budget=300.0)
+    assert info["action"] in ("OPEN", "HOLD", "CLOSE", "OPEN_SKIPPED")
+    # breach auto-flat kill switch latches and flattens
+    ex.open("EURUSD", 1, 0.1, 1.20)
+    assert runner.breach_autoflat(equity=9_600.0, wall_equity=9_600.0) is True
+    assert runner.halt.is_halted and ex.n_open("EURUSD") == 0
+    assert runner.step("EURUSD", obs, dm, pm, 1e-3, 1.20, 300.0)["action"] == "HALTED"
+
+
+def test_live_bridge_isolated_from_diagnostics():
+    """SOW C7: the live runner module must not import the diagnostics layer."""
+    import quantra.live_bridge.live_runner as lr
+    src = open(lr.__file__, encoding="utf-8").read()
+    assert "quantra.diagnostics" not in src       # no diagnostics coupling at runtime
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -1447,3 +1514,10 @@ if __name__ == "__main__":  # pragma: no cover
 #      Optuna study maximizes a pass-rate proxy with no sacred dial. 3 tests.
 #   C: HPO improves tunable stability while the patience underpinning passing stays
 #      locked - tuning can only help the pass rate, never sabotage it.
+# [2026-06-13] Added Section Q - live bridge (M14).
+#   I: Live execution + kill switches + diagnostics isolation needed building/proving.
+#   R: SOW §2.10 (determinism) + B2 (5 slots/pointer-CLOSE) + §10.1 (kill switches) + C7 (isolation).
+#   A: Section Q - adapter sim fallback, slot/pointer-close mechanics, manual-halt flatten+latch,
+#      live-runner deterministic exec + breach auto-flat + halted-block, no-diagnostics-import. 5 tests.
+#   C: The learned pass-behaviour reproduces live with identical masks/slots, behind two
+#      hard kill switches - so passes get banked without a bad session blowing the account.

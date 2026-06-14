@@ -11,6 +11,11 @@ Keeping the policy platform-blind (it never sees lots/account size) is what lets
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M14] Export the broker adapters (consumed by the live bridge).
+from .adapters import BrokerAdapter, MT5Adapter, Position, SimBrokerAdapter, make_adapter
+
+__all__ = ["BrokerAdapter", "SimBrokerAdapter", "MT5Adapter", "Position", "make_adapter"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

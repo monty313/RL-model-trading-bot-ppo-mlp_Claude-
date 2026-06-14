@@ -19,6 +19,13 @@ only checkpointed telemetry (SOW §12.3).
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M14] Export the live-bridge API.
+from .execution_adapter import ExecutionAdapter
+from .live_runner import LiveRunner
+from .manual_halt import ManualHalt
+
+__all__ = ["LiveRunner", "ExecutionAdapter", "ManualHalt"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

@@ -76,7 +76,10 @@ docs/
   worse breach) (`quantra/ftmo_passing/validation/`).
 - [x] **M13** — HPO: Optuna over non-sacred dials only, with a hard guard that refuses
   γ/λ/scheduler (`quantra/learning_system/hpo/`).
-- [ ] M14 live bridge · M15 acceptance
+- [x] **M14** — LiveBridge: MT5 adapter (guarded) + sim fallback, ExecutionAdapter
+  (5-slot/pointer-CLOSE), ManualHalt + breach auto-flat, deterministic LiveRunner,
+  isolated from diagnostics (`quantra/locked_core/platform_adapter/`, `quantra/live_bridge/`).
+- [ ] M15 acceptance
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see
