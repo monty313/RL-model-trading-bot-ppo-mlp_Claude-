@@ -23,8 +23,11 @@ BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``
 from .execution_adapter import ExecutionAdapter
 from .live_runner import LiveRunner
 from .manual_halt import ManualHalt
+# [C - 2026-06-13, M14b] The live 1m-bar loop (MT5 + replay feeds).
+from .live_session import LivePortfolio, LiveSession, MT5BarFeed, ReplayBarFeed
 
-__all__ = ["LiveRunner", "ExecutionAdapter", "ManualHalt"]
+__all__ = ["LiveRunner", "ExecutionAdapter", "ManualHalt",
+           "LiveSession", "ReplayBarFeed", "MT5BarFeed", "LivePortfolio"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -82,9 +82,20 @@ class SimBrokerAdapter(BrokerAdapter):
 
 
 class MT5Adapter(BrokerAdapter):
-    """Real MetaTrader5 adapter (Windows + terminal). MetaTrader5 imported lazily."""
+    """Real MetaTrader5 adapter (Windows + terminal). MetaTrader5 imported lazily.
 
-    def __init__(self):
+    Production-capable: connect/login, hardened market_order (symbol_select, live
+    tick price, per-broker filling-mode negotiation, retcode check, magic+deviation),
+    and a REAL close_position (opposite deal referencing the position ticket). Every
+    method that calls the terminal is pragma:no-cover here because it can only be
+    validated against a live MT5 terminal on the operator's machine — never in CI.
+    """
+
+    DEVIATION = 20          # max slippage in points the broker may fill within
+    MAGIC = 909313          # tag Quantra orders so we can identify/manage only ours
+
+    def __init__(self, login: int = 0, password: str = "", server: str = "",
+                 path: str = "", deviation: int = DEVIATION, magic: int = MAGIC):
         try:
             import MetaTrader5 as mt5  # type: ignore
         except Exception as exc:  # pragma: no cover - no terminal in CI
@@ -93,22 +104,78 @@ class MT5Adapter(BrokerAdapter):
                 "(Windows). Use SimBrokerAdapter for paper/testing."
             ) from exc
         self._mt5 = mt5
+        self.login, self.password, self.server, self.path = login, password, server, path
+        self.deviation, self.magic = deviation, magic
 
+    # -- connection --
     def connect(self) -> bool:  # pragma: no cover - needs a live terminal
-        return bool(self._mt5.initialize())
+        m = self._mt5
+        ok = m.initialize(path=self.path) if self.path else m.initialize()
+        if not ok:
+            return False
+        if self.login:
+            ok = m.login(self.login, password=self.password, server=self.server)
+        return bool(ok)
 
+    # -- helpers --
+    def _filling(self, symbol):  # pragma: no cover - broker-dependent
+        """Pick a filling mode the symbol/broker actually supports (IOC -> FOK -> RETURN)."""
+        m = self._mt5
+        info = m.symbol_info(symbol)
+        modes = getattr(info, "filling_mode", 0) if info else 0
+        if modes & m.ORDER_FILLING_IOC:
+            return m.ORDER_FILLING_IOC
+        if modes & m.ORDER_FILLING_FOK:
+            return m.ORDER_FILLING_FOK
+        return m.ORDER_FILLING_RETURN
+
+    def _send(self, req) -> int:  # pragma: no cover
+        """order_send + retcode check. Returns the resulting order/deal ticket or 0."""
+        res = self._mt5.order_send(req)
+        if res is None or res.retcode != self._mt5.TRADE_RETCODE_DONE:
+            return 0
+        return int(getattr(res, "order", 0) or getattr(res, "deal", 0))
+
+    # -- orders --
     def market_order(self, symbol, side, lots, price=0.0) -> int:  # pragma: no cover
         m = self._mt5
-        req = {"action": m.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(lots),
-               "type": m.ORDER_TYPE_BUY if side > 0 else m.ORDER_TYPE_SELL,
-               "deviation": 20, "type_filling": m.ORDER_FILLING_IOC}
-        res = m.order_send(req)
-        return int(getattr(res, "order", 0))
+        m.symbol_select(symbol, True)                       # ensure the symbol is in Market Watch
+        tick = m.symbol_info_tick(symbol)
+        if tick is None:
+            return 0
+        is_buy = side > 0
+        px = price or (tick.ask if is_buy else tick.bid)    # buy at ask, sell at bid
+        req = {
+            "action": m.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(lots),
+            "type": m.ORDER_TYPE_BUY if is_buy else m.ORDER_TYPE_SELL, "price": float(px),
+            "deviation": self.deviation, "magic": self.magic,
+            "type_time": m.ORDER_TIME_GTC, "type_filling": self._filling(symbol),
+            "comment": "quantra",
+        }
+        return self._send(req)
 
     def close_position(self, ticket, price=0.0) -> bool:  # pragma: no cover
-        # Real close requires an opposite deal referencing the position; left to the
-        # operator's terminal config. Returns False here as a safe no-op stub.
-        return False
+        """Close a position with the OPPOSITE deal referencing its ticket."""
+        m = self._mt5
+        found = m.positions_get(ticket=ticket)
+        if not found:
+            return False
+        pos = found[0]
+        m.symbol_select(pos.symbol, True)
+        tick = m.symbol_info_tick(pos.symbol)
+        if tick is None:
+            return False
+        closing_buy = pos.type == m.POSITION_TYPE_SELL     # close a short by buying
+        px = price or (tick.ask if closing_buy else tick.bid)
+        req = {
+            "action": m.TRADE_ACTION_DEAL, "symbol": pos.symbol, "position": int(ticket),
+            "volume": float(pos.volume),
+            "type": m.ORDER_TYPE_BUY if closing_buy else m.ORDER_TYPE_SELL, "price": float(px),
+            "deviation": self.deviation, "magic": self.magic,
+            "type_time": m.ORDER_TIME_GTC, "type_filling": self._filling(pos.symbol),
+            "comment": "quantra-close",
+        }
+        return self._send(req) != 0
 
     def positions(self):  # pragma: no cover
         return [Position(p.ticket, p.symbol, 1 if p.type == 0 else -1, p.volume, p.price_open)
@@ -118,15 +185,35 @@ class MT5Adapter(BrokerAdapter):
         info = self._mt5.account_info()
         return float(info.equity) if info else 0.0
 
+    def recent_bars(self, symbol: str, n: int = 600):  # pragma: no cover
+        """Pull the last n CLOSED 1m bars as a clean OHLCV+spread DataFrame (live feed)."""
+        import pandas as pd
+        m = self._mt5
+        m.symbol_select(symbol, True)
+        # index 1 (not 0) so we never include the still-forming current bar (no lookahead).
+        rates = m.copy_rates_from_pos(symbol, m.TIMEFRAME_M1, 1, n)
+        if rates is None or len(rates) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df = df.set_index("time")
+        out = pd.DataFrame({
+            "open": df["open"], "high": df["high"], "low": df["low"], "close": df["close"],
+            "tick_volume": df.get("tick_volume", 0.0),
+            "spread": df.get("spread", 0.0).astype(float),
+        })
+        out.index.name = "time"
+        return out
+
 
 def make_adapter(kind: str = "sim", **kw) -> BrokerAdapter:
     """Factory: 'sim' (default, paper) or 'mt5' (real). Falls back to sim if MT5 is
     unavailable, so a non-Windows/CI environment always gets a working adapter."""
     if kind == "mt5":
         try:
-            return MT5Adapter()
+            return MT5Adapter(**kw)          # login/password/server/path/deviation/magic
         except RuntimeError:
-            return SimBrokerAdapter(**kw)
+            return SimBrokerAdapter()        # kw was MT5-specific; sim uses its defaults
     return SimBrokerAdapter(**kw)
 
 

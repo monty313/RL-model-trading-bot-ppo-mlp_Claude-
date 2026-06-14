@@ -91,10 +91,12 @@ def main() -> None:  # pragma: no cover - operator entry point (SOW §12.1)
     ap.add_argument("--ftmo_account_size", type=float, default=10_000.0)
     ap.add_argument("--broker", default="sim", choices=["sim", "mt5"])
     args = ap.parse_args()
-    print("Quantra live runner configured (no live data feed wired in this build):")
+    print("Quantra live runner configured:")
     print(f"  symbols={args.symbols} target={args.daily_target_pct}% "
           f"risk={args.daily_risk_pct}% account={args.ftmo_account_size} broker={args.broker}")
-    print("  Connect a live 1m feed + checkpoint to begin. Manual halt + breach auto-flat armed.")
+    print("  Live loop: quantra.live_bridge.LiveSession with an MT5BarFeed (M14b).")
+    print("  Load a trained checkpoint + connect the MT5 terminal to begin. Manual halt +")
+    print("  breach auto-flat armed. Validate on a DEMO account before going funded.")
 
 
 if __name__ == "__main__":  # pragma: no cover

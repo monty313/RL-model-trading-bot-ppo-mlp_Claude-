@@ -81,7 +81,14 @@ docs/
   isolated from diagnostics (`quantra/locked_core/platform_adapter/`, `quantra/live_bridge/`).
 - [x] **M15** — End-to-end acceptance: the whole chain (data→features→laws→env→agent→
   train→telemetry→7 visuals→LLM diagnosis→scoreboard) runs in one call
-  (`quantra/acceptance.py`). **BUILD COMPLETE — M0→M15 all green (97-test master suite).**
+  (`quantra/acceptance.py`).
+- [x] **M14b** — production MT5 path: real `close_position` (opposite deal) + hardened
+  `market_order` (symbol_select, tick price, filling-mode, retcode, magic) + login, and a
+  live 1m-bar loop (`LiveSession` + `MT5BarFeed`/`ReplayBarFeed`) that rebuilds the 179-obs
+  bar-by-bar and drives deterministic execution behind the kill switches.
+  ⚠️ MT5 terminal calls are source-verified only — **validate on a DEMO account** before funded.
+
+**BUILD COMPLETE — M0→M15 (+M14b) all green (100-test master suite).**
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see

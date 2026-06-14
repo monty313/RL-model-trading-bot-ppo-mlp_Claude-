@@ -1415,6 +1415,53 @@ def test_end_to_end_acceptance_runs_the_whole_chain(tmp_path):
     assert res.checkpoint.exists()
 
 
+# =============================================================================
+# SECTION S — PRODUCTION MT5 PATH: real close + hardened order-send + live loop (M14b)
+# FTMO link: a trained brain can only bank a live pass if the live loop faithfully
+# rebuilds the obs/masks/slots bar-by-bar and the MT5 adapter can actually open AND
+# CLOSE. (Terminal-only calls are verified at source level; the loop is tested on sim.)
+# =============================================================================
+from quantra.live_bridge import LiveSession, ReplayBarFeed  # noqa: E402
+from quantra.locked_core.platform_adapter.adapters import MT5Adapter  # noqa: E402
+
+
+def test_mt5_close_and_order_are_implemented_not_stubs():
+    import inspect
+    close_src = inspect.getsource(MT5Adapter.close_position)
+    assert "no-op stub" not in close_src                      # the old stub is GONE
+    assert "position" in close_src and "_send" in close_src    # opposite deal refs the ticket
+    order_src = inspect.getsource(MT5Adapter.market_order)
+    assert "symbol_select" in order_src and "symbol_info_tick" in order_src and "_send" in order_src
+    assert "retcode" in inspect.getsource(MT5Adapter._send)     # order_send result is checked
+
+
+def test_live_session_builds_179_obs_and_decides_on_a_bar_stream(make_1m):
+    df = make_1m(n_bars=6700, seed=3)
+    sym = "EURUSD"
+    ex = ExecutionAdapter(SimBrokerAdapter(), [sym])
+    sess = LiveSession(PPOAgent(state_dim=STATE_DIM), ReplayBarFeed({sym: df}),
+                       ex, RiskManager(account_size=10_000), [sym])
+    obs, price, atr, law = sess._observe(sym)
+    assert obs.shape == (STATE_DIM,) and law.shape == (12,)    # full 179 obs from live bars
+    infos = sess.run_steps(2)                                   # process 2 closed bars
+    assert infos and all("action" in i for i in infos)
+    assert all(i["action"] in ("OPEN", "CLOSE", "HOLD", "OPEN_SKIPPED", "HALTED",
+                               "BREACH_AUTOFLAT") for i in infos)
+
+
+def test_live_session_breach_autoflat_latches(make_1m):
+    df = make_1m(n_bars=6700, seed=4)
+    sym = "EURUSD"
+    ex = ExecutionAdapter(SimBrokerAdapter(), [sym])
+    sess = LiveSession(PPOAgent(state_dim=STATE_DIM), ReplayBarFeed({sym: df}),
+                       ex, RiskManager(account_size=10_000), [sym])
+    slot = ex.open(sym, 1, 5.0, 1.20)                          # big long via broker
+    sess.portfolio.open(sym, slot, 1, entry=1.20, lots=5.0, rpl=150.0)
+    sess.portfolio.mark(sym, 1.10, 1e-3)                        # -0.10 * 100k * 5 = -$50k
+    assert sess._check_breach({sym: 1.10}) is True
+    assert sess.halt.is_halted and sess.portfolio.n_open(sym) == 0   # flattened + latched
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -1558,3 +1605,10 @@ if __name__ == "__main__":  # pragma: no cover
 #      contract telemetry, emits the 7 visuals + a template diagnosis + the scoreboard. 1 test.
 #   C: The whole chain runs green, so the system can be pointed at real bars + 7 seeds to
 #      establish a real pass rate - the FTMO-passing machine is built and verifiable.
+# [2026-06-13] Added Section S - production MT5 path (M14b).
+#   I: M14's MT5 adapter couldn't close + had no live feed; it couldn't actually trade.
+#   R: SOW §2.10/§10 (live determinism + kill switches) + C4 (1m) + no-lookahead.
+#   A: Section S - MT5 close/order-send are real (source-verified, terminal-only), live
+#      session builds the 179 obs from a bar stream + decides + breach-auto-flats. 3 tests.
+#   C: A trained brain can now be driven on MT5 bar-by-bar with faithful obs/masks/slots
+#      behind hard kill switches - the bridge from a trained brain to a banked live pass.
