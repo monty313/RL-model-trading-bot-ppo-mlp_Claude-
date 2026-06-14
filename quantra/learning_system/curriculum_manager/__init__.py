@@ -11,6 +11,11 @@ Structure-first learning (trade only inside the stage's law context) builds a bo
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M7] Export the curriculum API (consumed by the trainer, M8).
+from .curriculum import DEFAULT_STAGES, CurriculumManager, Stage
+
+__all__ = ["CurriculumManager", "Stage", "DEFAULT_STAGES"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

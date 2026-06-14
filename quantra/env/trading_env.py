@@ -344,11 +344,17 @@ class TradingEnv:
         info = self._apply_action(sym, direction, raw_size, pointer)
         self._mark_to_market()  # equity reflects this symbol's cost/realize at bar t
 
-        # Hard wall (Phase A): breach -> force-flatten all + lockout + end episode.
+        # Hard wall: breach -> force-flatten all + lockout + end episode. Else the
+        # two-phase rule: at +2.5% day net, auto-flat ALL and switch to the Phase-B
+        # 1% trailing wall (the episode continues — this is a WIN checkpoint, SOW §2.6).
         if self.account.breached:
             self._force_flatten()
             self._mark_to_market()
             self.done = True
+        elif self.account.should_autoflat:
+            self._force_flatten()
+            self.account.enter_phase_b()
+            self._mark_to_market()
 
         # Advance the within-bar cursor; after the last symbol, advance the bar.
         if not self.done:
@@ -365,6 +371,10 @@ class TradingEnv:
                         self._force_flatten()
                         self._mark_to_market()
                         self.done = True
+                    elif self.account.should_autoflat:
+                        self._force_flatten()
+                        self.account.enter_phase_b()
+                        self._mark_to_market()
 
         reward = self._reward(sym)                                # M6 layered reward
         self._prev_equity = self.account.equity

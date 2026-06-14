@@ -58,11 +58,25 @@ class ChallengeState:
         self.peak_equity = self.account_size
         self.day_start_equity = self.account_size
 
-    # --- wall + buffer (Phase A) ---
+    # --- wall + buffer (two-phase, SOW §2.6) ---
     @property
     def wall_equity(self) -> float:
-        """Trailing wall: peak minus daily_risk_pct% of the account (4% default)."""
-        return self.peak_equity - (self.challenge.daily_risk_pct / 100.0) * self.account_size
+        """Trailing wall. Phase A: peak − 4% of account. Phase B (post +2.5% auto-flat):
+        a fresh 1% trailing anchored at the re-set post-flat peak."""
+        pct = (self.challenge.daily_risk_pct if self.phase == "A"
+               else self.challenge.phase_b_trailing_pct)
+        return self.peak_equity - (pct / 100.0) * self.account_size
+
+    @property
+    def should_autoflat(self) -> bool:
+        """Phase A only: day net hit +2.5% -> auto-flat ALL + switch to Phase B."""
+        return self.phase == "A" and self.target_hit and not self.breached
+
+    def enter_phase_b(self) -> None:
+        """After the +2.5% auto-flat: re-anchor the trailing peak to current equity and
+        switch to the fresh 1% Phase-B wall. The day's target is banked."""
+        self.phase = "B"
+        self.peak_equity = self.equity
 
     @property
     def remaining_buffer(self) -> float:
@@ -134,3 +148,10 @@ class ChallengeState:
 #   C: Every symbol sizes against the SAME live buffer and the wall is enforced
 #      centrally, so the 4 symbols can't collectively overshoot — the core of B5 and
 #      of not breaching, hence of passing.
+# [2026-06-13] M7 — two-phase episode rule.
+#   I: Phase-A-only tracking didn't bank the +2.5% win or switch to the tighter wall.
+#   R: SOW §2.6 (Phase A 4% trailing until +2.5% -> auto-flat ALL -> Phase B 1% trailing).
+#   A: phase-aware wall_equity (4% in A, 1% in B), should_autoflat, enter_phase_b
+#      (re-anchor peak to post-flat equity). The env force-flattens + enters Phase B.
+#   C: Hitting target locks in the day's gain behind a tight 1% wall, exactly the
+#      challenge-style stopping behaviour that turns a good day into a banked pass-day.

@@ -58,8 +58,11 @@ docs/
   (`quantra/learning_system/ppo_agent/`, `.../rollout_buffer/`).
 - [x] **M6** — RewardEngine (L0–L6 + QUAD bonus, 95% ceiling) + **E8 dominance**
   (`quantra/learning_system/reward_engine/`); wired into the env.
-- [ ] M7 curriculum+episode · M8 trainer · M9 telemetry · M10 interpreter ·
-  M11 risk doctor · M12 validation · M13 HPO · M14 live bridge · M15 acceptance
+- [x] **M7** — CurriculumManager (trend→reversion→stationarity+ATR, law-school mode,
+  1m-timing masking) + two-phase episode rule (auto-flat at +2.5% → Phase-B 1% wall)
+  (`quantra/learning_system/curriculum_manager/`, `quantra/ftmo_passing/challenge_state.py`).
+- [ ] M8 trainer · M9 telemetry · M10 interpreter · M11 risk doctor · M12 validation ·
+  M13 HPO · M14 live bridge · M15 acceptance
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see

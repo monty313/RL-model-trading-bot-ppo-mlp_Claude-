@@ -900,6 +900,81 @@ def test_env_uses_layered_reward_engine():
     assert isinstance(reward, float)                 # layered reward returned, no crash
 
 
+# =============================================================================
+# SECTION J — CURRICULUM + TWO-PHASE EPISODE RULE (M7)
+# FTMO link: the two-phase rule banks the +2.5% behind a tight 1% wall (challenge-
+# style stopping); the curriculum teaches structure-first inside law context. Both
+# shape the bot toward consistent passing rather than reckless profit-chasing.
+# =============================================================================
+from quantra.ftmo_passing.challenge_state import ChallengeState as _CS  # noqa: E402
+from quantra.learning_system.curriculum_manager import (  # noqa: E402
+    DEFAULT_STAGES,
+    CurriculumManager,
+    Stage,
+)
+from quantra.market_pipeline.law_mask_engine.engine import MODE_LIVE as _LIVE  # noqa: E402
+from quantra.market_pipeline.law_mask_engine.engine import MODE_SCHOOL as _SCHOOL  # noqa: E402
+
+
+def test_two_phase_wall_tightens_after_target():
+    cs = _CS(account_size=10_000, challenge=ChallengeConfig())
+    assert cs.phase == "A"
+    # Phase A wall = peak − 4% of account
+    assert abs(cs.wall_equity - (10_000 - 0.04 * 10_000)) < 1e-6
+    cs.enter_phase_b()
+    assert cs.phase == "B"
+    # Phase B wall = re-anchored peak − 1%
+    assert abs(cs.wall_equity - (cs.peak_equity - 0.01 * 10_000)) < 1e-6
+
+
+def test_env_auto_flats_and_enters_phase_b_at_target():
+    """A +2.5% day -> auto-flat ALL + switch to Phase B (episode continues)."""
+    # price climbs so a long hits the +2.5% daily target
+    T = 40
+    close = np.linspace(1.20, 1.26, T).astype(float)   # ~5% climb
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0)}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))
+    for _ in range(T - 2):
+        if env.done:
+            break
+        env.step((HOLD, 0.0, 0))
+        if env.account.phase == "B":
+            break
+    assert env.account.phase == "B"                 # target banked, Phase B engaged
+    assert env._n_open("EURUSD") == 0               # all positions auto-flatted
+    assert not env.account.breached
+
+
+def test_curriculum_stages_and_law_school_config():
+    cm = CurriculumManager()
+    assert [s.name for s in cm.stages] == ["trend", "reversion", "stationarity_atr"]
+    cfg = cm.law_school_config()
+    assert cfg["mask_mode"] == _SCHOOL and cfg["required_laws"]   # school mode w/ context
+    # trend stage permits trend/super-trend laws, not pullback
+    assert any("trend" in n for n in cfg["required_laws"])
+    assert all("pullback" not in n for n in cfg["required_laws"])
+
+
+def test_curriculum_feature_mask_zeros_1m_timing_only():
+    cm = CurriculumManager()
+    mask = cm.feature_mask()
+    assert mask.shape == (STATE_DIM,)
+    assert mask[PRECOMPUTED_NAMES.index("candle_return_1m")] == 0.0   # 1m timing masked
+    assert mask[PRECOMPUTED_NAMES.index("z10_1m")] == 0.0
+    assert mask[PRECOMPUTED_NAMES.index("ssma_high_dist_1m")] == 1.0  # law ingredient kept
+    assert mask[PRECOMPUTED_NAMES.index("atr_dev_1m")] == 1.0         # gate ingredient kept
+
+
+def test_curriculum_graduates_to_live_mode():
+    cm = CurriculumManager()
+    cm.graduate(); cm.graduate(); cm.graduate()      # past the 3 stages
+    assert cm.graduated and cm.current_stage() is None
+    assert cm.law_school_config()["mask_mode"] == _LIVE   # live-ban mode after graduation
+    assert (cm.feature_mask() == 1.0).all()              # no 1m masking once graduated
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -980,3 +1055,11 @@ if __name__ == "__main__":  # pragma: no cover
 #      QUAD 95% ceiling + non-pass-day zero + streak reset, env-uses-engine. 6 tests.
 #   C: The training signal provably can't be hijacked by a shaper, so PPO optimizes real
 #      net progress inside the legal/risk-safe space - the objective that passes.
+# [2026-06-13] Added Section J - curriculum + two-phase episode (M7).
+#   I: The +2.5% win needed banking behind a tight wall, and training needed staging.
+#   R: SOW §2.6 (two-phase) + §7 (law-gated curriculum, structure-first).
+#   A: Section J - phase-B wall tightening, env auto-flat+enter-phase-B at target,
+#      stage configs + school mode, 1m-timing feature mask (law ingredients kept),
+#      graduation to live. 5 tests.
+#   C: The bot banks pass-days behind a 1% wall and learns law-respect by habit -
+#      both push it toward consistent passing rather than reckless profit-chasing.
