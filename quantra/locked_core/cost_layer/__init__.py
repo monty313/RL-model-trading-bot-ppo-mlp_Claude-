@@ -11,6 +11,11 @@ No costless world ever exists in training (SOW C8/H2), so the learned edge is re
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M4] Export the CostLayer API (consumed by the env, M4).
+from .costs import CostLayer, FillCosts
+
+__all__ = ["CostLayer", "FillCosts"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

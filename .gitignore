@@ -16,9 +16,11 @@ __pycache__/
 .eggs/
 build/
 dist/
+# Anchor virtualenv dirs to the repo ROOT so they don't match the quantra/env/
+# package (a bare `env/` matches at any depth and silently ignored the env module).
 .venv/
-venv/
-env/
+/venv/
+/env/
 .python-version
 
 # --- Tooling / caches ---

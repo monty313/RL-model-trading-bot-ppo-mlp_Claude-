@@ -1,20 +1,28 @@
-"""quantra.locked_core.risk_manager  —  SOW tier: 01_locked_core/risk_manager  🔴.
+"""quantra.env  —  the Quantra gym environment (supports SOW J2 module: Env).
 
 WHAT THIS PACKAGE DOES
 ----------------------
-Converts raw_size in [0,1] into broker lots against the REMAINING daily-risk buffer, slot-aware across all 5 open slots, with rounding and per-trade caps.
+The real-chart trading environment: 4 symbols stepped TRUE-SEQUENTIALLY each 1m
+bar, 5 trade slots per symbol, ONE shared account block read by every symbol's
+decision, with within-bar account updates so the symbols cannot collectively
+overshoot the daily-risk buffer (SOW B5). Supports a vectorised mode (many parallel
+worlds) so the runtime optimizer can drive ~80% utilisation.
 
 HOW IT SERVES REPEATED FTMO-STYLE PASSING
 -----------------------------------------
-It is the hard guarantee that total open-slot risk can never exceed the remaining buffer — the mechanical reason the bot cannot size its way into a breach (SOW H3, B5).
+The env IS the FTMO challenge made steppable: it enforces the two-phase episode
+rule, applies real costs, exposes the shared-account risk picture, and routes
+CLOSE via the pointer head. Training against faithful challenge physics is what
+makes the learned behaviour transfer to passing real challenges.
 
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
-# [C - 2026-06-13, M4] Export the RiskManager API (consumed by the env, M4).
-from .risk import RiskManager, SizingResult
+# [C - 2026-06-13, M4] Export the env API. trading_env.py wires features (M2), laws
+# (M3), risk + costs (M4) into the steppable challenge. Consumed by the trainer (M8).
+from .trading_env import Slot, SymbolData, TradingEnv, prepare_symbol_data
 
-__all__ = ["RiskManager", "SizingResult"]
+__all__ = ["TradingEnv", "SymbolData", "Slot", "prepare_symbol_data"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

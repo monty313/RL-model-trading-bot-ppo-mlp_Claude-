@@ -17,6 +17,11 @@ so training pressure always points at consistent passing.
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M4] Export the shared-account tracker (consumed by the env, M4).
+from .challenge_state import ChallengeState
+
+__all__ = ["ChallengeState"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

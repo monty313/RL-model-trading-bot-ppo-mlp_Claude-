@@ -49,9 +49,12 @@ docs/
 - [x] **M3** — LawMask: 9 laws + 3 gates, two enforcement modes, −1e9 masking
   (`quantra/locked_core/laws/` + `quantra/market_pipeline/law_mask_engine/`); state
   vector → **179** (added 3 gate ingredients: spread×2, ADF).
-- [ ] M4 Env+Risk+Cost · M5 PPOAgent · M6 RewardEngine · M7 curriculum+episode ·
-  M8 trainer · M9 telemetry · M10 interpreter · M11 risk doctor · M12 validation · M13 HPO ·
-  M14 live bridge · M15 acceptance
+- [x] **M4** — RiskManager + CostLayer + Env (4 symbols true-sequential, 5 slots,
+  shared account, real FTMO costs, Phase-A wall) + **B5 no-overshoot invariant**
+  (`quantra/locked_core/{risk_manager,cost_layer}/`, `quantra/ftmo_passing/challenge_state.py`,
+  `quantra/env/trading_env.py`).
+- [ ] M5 PPOAgent · M6 RewardEngine · M7 curriculum+episode · M8 trainer · M9 telemetry ·
+  M10 interpreter · M11 risk doctor · M12 validation · M13 HPO · M14 live bridge · M15 acceptance
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see
@@ -84,3 +87,8 @@ makes the bot pass FTMO more consistently. Rule: [quantra/constitution/update_ru
   - **R:** THE_TRADING_CODE.md (exact laws/params) + SOW C5 (−1e9) + law-ingredient coverage rule.
   - **A:** Built `laws.py` (12 states) + `law_mask_engine` (masks, both modes); added spread/ADF ingredients; re-pinned snapshot to 179. 40 tests green.
   - **C:** Breach-bound directions are now mechanically blocked before the policy acts — the foundation of not breaching, hence of consistent passing.
+- **[2026-06-13]** M4 complete — Env + RiskManager + CostLayer + B5 invariant.
+  - **I:** The challenge physics needed to exist and be proven overshoot-proof + faithful.
+  - **R:** SOW B5/H3/§10.5/§2.4/§2.7.
+  - **A:** Built RiskManager (round-down, no overshoot), CostLayer ($5 RT forex-only), ChallengeState (buffer+wall), TradingEnv (4-symbol true-sequential, 5 slots, shared account); 12 tests incl. 2000-case sizing fuzz + B5. 52 tests green.
+  - **C:** The bot trains on faithful physics where collective overshoot is impossible by construction — so learned behaviour transfers to passing real challenges.

@@ -62,6 +62,11 @@ from quantra.market_pipeline.resampler import (
     resample_ohlcv,
 )
 from quantra.locked_core.laws import LAW_NAMES, compute_law_states
+from quantra.locked_core.cost_layer import CostLayer
+from quantra.locked_core.risk_manager import RiskManager
+from quantra.ftmo_passing import ChallengeState
+from quantra.runtime.config import ChallengeConfig, RiskConfig
+from quantra.env import SymbolData, TradingEnv
 from quantra.market_pipeline.law_mask_engine import (
     CLOSE,
     HOLD,
@@ -518,6 +523,157 @@ def test_lawmask_wrapper_end_to_end():
     assert res.direction_mask[OPEN_LONG] == 0
 
 
+# =============================================================================
+# SECTION G — ENV + RISKMANAGER + COSTLAYER (M4)
+# FTMO link: this is the challenge physics. The B5 invariant — 4 symbols can't
+# collectively overshoot the daily-risk buffer in one bar — plus real costs and the
+# hard wall are the mechanical reasons the bot can learn to PASS rather than just
+# look profitable. No risk/sizing rule may ever overshoot.
+# =============================================================================
+def _open_gate_matrix(T):
+    """A (T, PRECOMPUTED_DIM) feature matrix with all 3 gates OPEN, no directional
+    law active — so opens are legal in both directions and we can exercise the env."""
+    m = np.zeros((T, PRECOMPUTED_DIM), dtype=np.float32)
+    for name, val in [("atr_dev_1m", 0.1), ("atr_dev_30m", 0.1),
+                      ("spread_range_ratio_1m", 0.3), ("adf_stat_1m", -3.5)]:
+        m[:, PRECOMPUTED_NAMES.index(name)] = val
+    return m
+
+
+def _sym(T=60, price=1.20, atr=0.001, spread=2e-5, drift=0.0):
+    close = (price + drift * np.arange(T)).astype(float)
+    return SymbolData(matrix=_open_gate_matrix(T), close=close,
+                      atr=np.full(T, atr), spread=np.full(T, spread), valid_from=0)
+
+
+# ---- CostLayer ----
+def test_cost_forex_pays_commission_metals_indices_dont():
+    cl = CostLayer()
+    # forex: close pays the $5 RT/lot commission
+    assert cl.close_cost("EURUSD", 2.0).commission == 10.0
+    # metals + indices: no per-trade commission
+    assert cl.close_cost("XAUUSD", 2.0).commission == 0.0
+    assert cl.close_cost("US30", 2.0).commission == 0.0
+    # open cost carries spread + slippage but NO commission (charged once, on close)
+    oc = cl.open_cost("EURUSD", 1.0, spread_price=2e-5)
+    assert oc.commission == 0.0 and oc.spread > 0 and oc.slippage > 0
+
+
+def test_cost_spread_scales_with_lots_and_contract():
+    cl = CostLayer()
+    one = cl.open_cost("EURUSD", 1.0, 2e-5).spread
+    two = cl.open_cost("EURUSD", 2.0, 2e-5).spread
+    assert abs(two - 2 * one) < 1e-9          # linear in lots
+    assert abs(one - 2e-5 * 100_000 * 1.0) < 1e-9  # spread_price * contract * lots
+
+
+# ---- RiskManager (no overshoot) ----
+def test_riskmanager_never_exceeds_available_budget():
+    rm = RiskManager(account_size=10_000)
+    rng = np.random.default_rng(0)
+    for _ in range(2000):
+        raw = float(rng.random())
+        atr = float(rng.uniform(1e-4, 5e-3))
+        budget = float(rng.uniform(0, 500))
+        sr = rm.size("EURUSD", raw, atr, budget)
+        assert sr.committed_risk <= budget + 1e-6   # THE invariant, fuzzed
+        if sr.feasible:
+            assert sr.lots >= rm.cfg.min_lot
+
+
+def test_riskmanager_refuses_when_buffer_too_small():
+    rm = RiskManager(account_size=10_000)
+    sr = rm.size("EURUSD", raw_size=1.0, atr_price=1e-3, available_budget=0.0)
+    assert not sr.feasible and sr.lots == 0.0
+
+
+# ---- B5: 4 symbols cannot collectively overshoot in one bar ----
+def test_b5_four_symbols_cannot_overshoot_buffer_in_one_bar():
+    data = {s: _sym(atr=0.001) for s in ("EURUSD", "XAUUSD", "GBPUSD", "US30")}
+    # Large per-trade cap so each symbol WANTS more than its share -> threading must
+    # be what prevents overshoot, not the per-trade cap.
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    buffer0 = env.account.remaining_buffer
+    # all 4 symbols open max-size long in the same bar
+    for _ in range(4):
+        env.step((OPEN_LONG, 1.0, 0))
+    committed = env._committed_risk()
+    assert committed <= buffer0 + 1e-6          # collective risk never exceeds buffer
+    assert committed > 0                          # at least one symbol got filled
+
+
+def test_true_sequential_buffer_visible_to_later_symbols():
+    data = {s: _sym(atr=0.001) for s in ("EURUSD", "XAUUSD", "GBPUSD", "US30")}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    buf_before = env.account.remaining_buffer - env._committed_risk()
+    env.step((OPEN_LONG, 1.0, 0))               # symbol 0 opens
+    buf_after = env.account.remaining_buffer - env._committed_risk()
+    assert buf_after < buf_before               # symbol 1 sees a reduced buffer
+
+
+# ---- slot mechanics ----
+def test_slot_open_fills_next_free_and_masks_at_five():
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    for _ in range(7):                           # try to open 7 (only 5 slots)
+        env.step((OPEN_LONG, 0.3, 0))
+    assert env._n_open("EURUSD") == 5            # OPEN masked once full
+
+
+def test_close_routes_to_pointer_slot():
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    for _ in range(3):
+        env.step((OPEN_LONG, 0.3, 0))
+    assert env._n_open("EURUSD") == 3
+    env.step((CLOSE, 0.0, 1))                     # close slot index 1
+    assert not env.slots["EURUSD"][1].occupied and env._n_open("EURUSD") == 2
+
+
+# ---- costs reduce equity ----
+def test_round_trip_costs_reduce_equity():
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4, drift=0.0)})  # flat price
+    eq0 = env.account.equity
+    env.step((OPEN_LONG, 0.5, 0))
+    env.step((CLOSE, 0.0, 0))
+    # flat price -> no PnL, only costs -> equity strictly lower (no costless world)
+    assert env.account.equity < eq0
+
+
+# ---- hard wall ----
+def test_hard_wall_force_flattens_and_ends_episode():
+    # price crashes after entry -> equity hits the 4% wall -> breach + flatten + done
+    T = 12
+    close = np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.10, T - 3)]).astype(float)
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0)}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))
+    done = False
+    for _ in range(T):
+        if done:
+            break
+        _, _, done, info = env.step((HOLD, 0.0, 0))
+    assert env.account.breached and done
+    assert env._n_open("EURUSD") == 0            # force-flattened
+
+
+# ---- observation shape + law/mask visibility ----
+def test_env_observation_shape_and_law_block_populated():
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    obs = env.reset()
+    assert obs.shape == (STATE_DIM,)             # full 179
+    law_block = obs[SCHEMA.block_spans["law"][0]:SCHEMA.block_spans["law"][1]]
+    assert law_block.shape == (12,)
+    acct_start = SCHEMA.block_spans["account"][0]
+    assert abs(obs[acct_start] - 1.0) < 1e-5    # equity_norm == 1.0 at reset
+
+
+def test_env_enforces_mask_coerces_forbidden_action():
+    # flat position: CLOSE is illegal (nothing to close) -> env coerces to HOLD
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    _, _, _, info = env.step((CLOSE, 0.0, 0))
+    assert info["coerced"] is True and info["executed"] == "HOLD"
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -568,3 +724,15 @@ if __name__ == "__main__":  # pragma: no cover
 #   C: The legal space is verified exactly per blueprint, so the mask mechanically
 #      blocks breach-bound directions in both training and live - the foundation of
 #      not breaching, which is the foundation of consistent passing.
+# [2026-06-13] Added Section G - Env + RiskManager + CostLayer (M4).
+#   I: The challenge physics (shared account, 5 slots, true-sequential risk, costs,
+#      wall) needed proof that no risk/sizing rule can overshoot and that the loop is
+#      faithful, before any policy trains on it.
+#   R: SOW B5 (no collective overshoot) + H3 (sizing vs buffer) + §10.5 (costs) +
+#      §2.4 (slots) + §2.7 (wall).
+#   A: Section G - CostLayer (forex-only $5 RT, spread/slippage), RiskManager
+#      no-overshoot (2000-case fuzz + refusal), B5 4-symbol one-bar invariant,
+#      true-sequential buffer visibility, slot fill/mask/pointer-close, round-trip cost
+#      bleed, hard-wall force-flatten, 179-dim obs + mask coercion. 12 tests.
+#   C: The env is now provably faithful and overshoot-proof, so the behaviour the bot
+#      learns here is the behaviour that passes real challenges - not a sim artifact.

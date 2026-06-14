@@ -90,6 +90,49 @@ POINT_SIZE: Dict[str, float] = {
 }
 DEFAULT_POINT_SIZE: float = 1e-5
 
+# Contract size = account-currency (USD) value of a 1.0-lot, 1.0-price move. All 4
+# symbols are USD-quoted, so PnL_USD = price_change * CONTRACT_SIZE * lots (no FX
+# conversion). Used by CostLayer + RiskManager (M4) to translate price <-> dollars
+# so the bot's risk is measured in the same units as the FTMO wall.
+CONTRACT_SIZE: Dict[str, float] = {
+    "EURUSD": 100_000.0,   # 1 lot = 100k EUR; 0.0001 move = $10
+    "GBPUSD": 100_000.0,
+    "XAUUSD": 100.0,       # 1 lot = 100 oz; $1 move = $100
+    "US30": 1.0,           # 1 lot = $1 / index point
+}
+
+# Per-symbol fixed slippage in POINTS, applied adversely on every fill (SOW §10.5).
+# Conservative defaults; never zero (no costless world, SOW C8).
+SLIPPAGE_POINTS: Dict[str, float] = {
+    "EURUSD": 5.0,
+    "GBPUSD": 5.0,
+    "XAUUSD": 20.0,
+    "US30": 10.0,
+}
+
+
+@dataclass(frozen=True)
+class CostConfig:
+    """Real FTMO costs (SOW §10.5). $5 RT/lot on FOREX only; metals/indices pay no
+    per-trade commission (spread + slippage only). No costless world ever (C8)."""
+
+    commission_per_lot_rt_forex: float = 5.0   # round-trip $/lot, forex only
+    # Asset classes that pay the per-trade commission. Metals/indices excluded.
+    commissioned_classes: tuple = ("forex",)
+
+
+@dataclass(frozen=True)
+class RiskConfig:
+    """RiskManager dials (NON-sacred; tunable). The invariant they enforce — total
+    open-slot risk never exceeds the remaining daily-risk buffer — is what makes the
+    4% wall hard to ever reach, which is the mechanical core of not breaching."""
+
+    stop_atr_mult: float = 1.5       # reference stop = stop_atr_mult * ATR(price)
+    lot_step: float = 0.01           # broker rounding granularity
+    min_lot: float = 0.01
+    max_lot: float = 50.0
+    max_per_trade_risk_frac: float = 0.01  # per-trade cap = 1% of account size
+
 DRIVE_FILE_IDS: Dict[str, str] = {
     "EURUSD": "1tsR789vdRYE4rwDAE-hreWF2zN1slcjH",
     "GBPUSD": "1503qJQxjLwA2O0zIiakiOM_68Ucb-ypm",
@@ -228,3 +271,13 @@ def in_colab() -> bool:
 #   A: Bumped nominal_state_dim to 179 (raw on)/149 (off); added per-symbol POINT_SIZE.
 #   C: config stays in lockstep with the schema and the bot sees real spread friction,
 #      so it learns to avoid illiquid/dead-market trades that quietly erode pass-rate.
+# [2026-06-13] M4 — added contract specs + CostConfig + RiskConfig + slippage.
+#   I: The env/RiskManager/CostLayer need per-symbol contract sizes, real FTMO costs,
+#      and risk dials to size and cost trades in account dollars.
+#   R: SOW §10.5 ($5 RT/lot forex; metals/indices no commission; spread+slippage) +
+#      H3 (raw_size -> lots vs remaining buffer) + C8 (no costless world).
+#   A: Added CONTRACT_SIZE, SLIPPAGE_POINTS, CostConfig ($5 RT forex-only), RiskConfig
+#      (stop_atr_mult, lot_step, min/max lot, per-trade risk cap).
+#   C: Trades are sized + costed in the same dollars as the 4% wall, so the
+#      no-overshoot invariant is enforceable and the learned edge survives real fees —
+#      both prerequisites for passing rather than looking profitable.
