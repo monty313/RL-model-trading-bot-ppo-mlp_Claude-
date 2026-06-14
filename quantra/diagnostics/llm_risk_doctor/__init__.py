@@ -11,6 +11,11 @@ It catches models that pass by luck or drift toward the wall BEFORE they cost a 
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M11] Export the read-only diagnoser.
+from .doctor import TAXONOMY, UNCLASSIFIED, Diagnosis, LLMRiskDoctor
+
+__all__ = ["LLMRiskDoctor", "Diagnosis", "TAXONOMY", "UNCLASSIFIED"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

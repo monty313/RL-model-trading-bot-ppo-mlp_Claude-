@@ -1143,6 +1143,59 @@ def test_mlp_interpreter_produces_all_seven_visuals(tmp_path):
         assert path.exists() and path.stat().st_size > 0, f"{name} not written"
 
 
+# =============================================================================
+# SECTION N — LLMRISKDOCTOR (read-only, mandatory rulebook, 8-taxonomy) (M11)
+# FTMO link: catches models that pass by luck or drift to the wall BEFORE they cost a
+# challenge, with evidence-cited diagnoses - and can never touch execution.
+# =============================================================================
+from quantra.diagnostics.llm_risk_doctor import (  # noqa: E402
+    TAXONOMY,
+    UNCLASSIFIED,
+    LLMRiskDoctor,
+)
+
+
+def test_risk_doctor_fails_loud_without_rulebook(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        LLMRiskDoctor(rulebook=tmp_path / "missing_MLP_INTERPRETABILITY_LAYER.md")
+
+
+def test_risk_doctor_is_read_only_no_write_method():
+    doc = LLMRiskDoctor()                              # default rulebook exists in docs/
+    assert doc.rulebook                                # it has READ the rulebook
+    assert not hasattr(doc, "write")                  # NO write capability, by design
+    assert not hasattr(doc, "modify") and not hasattr(doc, "execute")
+
+
+def test_risk_doctor_classifies_reward_hijack_with_evidence():
+    log = TelemetryLogger("run_doc")
+    for t in range(30):
+        p = _demo_packet(t)
+        # a shaping layer (L1) dwarfs Layer 0 -> Reward Hijack
+        p.reward_decomposition = {"L0": 1e-5, "L1": 0.5}
+        p.value = float(np.sin(t)); p.outcome = {"next_bar_return": float(np.sin(t))}
+        log.log_step(p)
+    diag = LLMRiskDoctor().diagnose(log._buf)
+    assert diag.classification == "Reward Hijack"
+    assert diag.classification in TAXONOMY            # always one of the 8
+    assert diag.evidence and "L0" in diag.evidence[0]  # cites the per-layer integral
+    assert "DIAGNOSIS" in diag.render()               # follows the output template
+
+
+def test_risk_doctor_never_invents_ninth_category():
+    log = TelemetryLogger("run_clean")
+    rng = np.random.default_rng(1)
+    for t in range(40):
+        p = _demo_packet(t)
+        p.reward_decomposition = {"L0": float(rng.normal(0, 1e-2)), "L1": 1e-4}
+        p.value = float(rng.normal()); p.outcome = {"next_bar_return": float(rng.normal())}
+        p.hidden_summary = list(rng.normal(size=8))
+        p.pre_mask_logits = [0.1, 0.2, 0.3, 0.4]; p.post_mask_logits = [0.1, 0.2, 0.3, 0.4]
+        log.log_step(p)
+    diag = LLMRiskDoctor().diagnose(log._buf)
+    assert diag.classification in TAXONOMY or diag.classification == UNCLASSIFIED
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -1251,3 +1304,10 @@ if __name__ == "__main__":  # pragma: no cover
 #   A: Section M - generate_all() writes all 7 PNGs from a telemetry run. 1 test.
 #   C: Internal behaviour becomes inspectable evidence, so robust pass-behaviour is
 #      distinguishable from fragile luck - protecting the pass rate.
+# [2026-06-13] Added Section N - LLMRiskDoctor (M11).
+#   I: The read-only/mandatory-rulebook boundary + taxonomy diagnosis needed enforcing.
+#   R: MLP_INTERPRETABILITY_LAYER.md (template, 8 taxonomy, no 9th) + SOW R5/§9.3.
+#   A: Section N - fail-loud without rulebook, no write/modify/execute methods,
+#      Reward-Hijack classification with cited evidence + template render, never a 9th. 4 tests.
+#   C: Failures get a true, evidence-backed cause + safe prescription before they cost a
+#      challenge, and the doctor can never touch execution - it only protects passing.
