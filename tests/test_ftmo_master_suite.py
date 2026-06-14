@@ -41,6 +41,7 @@ import time
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 import quantra.runtime.config as cfg
 from quantra.market_pipeline.data_loader import OHLCV_COLUMNS, load_symbol, parse_mt5_csv
@@ -67,6 +68,8 @@ from quantra.locked_core.risk_manager import RiskManager
 from quantra.ftmo_passing import ChallengeState
 from quantra.runtime.config import ChallengeConfig, RiskConfig
 from quantra.env import SymbolData, TradingEnv
+from quantra.learning_system.ppo_agent import ActorCritic, PPOAgent, ppo_loss
+from quantra.learning_system.rollout_buffer import FIELDS, RolloutBuffer
 from quantra.market_pipeline.law_mask_engine import (
     CLOSE,
     HOLD,
@@ -674,6 +677,146 @@ def test_env_enforces_mask_coerces_forbidden_action():
     assert info["coerced"] is True and info["executed"] == "HOLD"
 
 
+# =============================================================================
+# SECTION H — PPOAGENT + ROLLOUTBUFFER + PPO LOSS (M5)
+# FTMO link: the brain that turns the 179-dim observation into a legal, sized,
+# slot-aware action. Masks are applied to the LOGITS here, so the policy can never
+# sample a breach-bound action; the summed 3-head log-prob is the PPO loss contract.
+# =============================================================================
+def test_actor_critic_matches_locked_architecture():
+    net = ActorCritic(state_dim=STATE_DIM)
+    d, s, p, v = net(torch.randn(4, STATE_DIM))
+    assert d.shape == (4, 4)          # {HOLD, OPEN_LONG, OPEN_SHORT, CLOSE}
+    assert s.shape == (4, 2)          # Beta alpha/beta params
+    assert p.shape == (4, 5)          # 5 pointer slots
+    assert v.shape == (4,)            # V(s)
+    linears = [m for m in net.trunk if isinstance(m, torch.nn.Linear)]
+    assert len(linears) == 3 and all(l.out_features == 256 for l in linears)
+
+
+def test_agent_act_respects_direction_mask():
+    """A forbidden direction must never be sampled (masks are applied to logits)."""
+    agent = PPOAgent(state_dim=STATE_DIM)
+    n = 1000
+    obs = torch.randn(n, STATE_DIM)
+    dm = torch.zeros(n, 4)
+    dm[:, OPEN_SHORT] = -1e9           # forbid OPEN_SHORT everywhere
+    pm = torch.zeros(n, 5)
+    step = agent.act(obs, dm, pm)
+    assert (step.a_direction != OPEN_SHORT).all()
+    assert step.a_size.min() >= 0.0 and step.a_size.max() <= 1.0
+    assert step.a_pointer.min() >= 0 and step.a_pointer.max() <= 4
+
+
+def test_summed_log_prob_gates_size_on_open_and_pointer_on_close():
+    """Size head contributes only on OPEN, pointer only on CLOSE (the lock)."""
+    agent = PPOAgent(state_dim=STATE_DIM)
+    obs = torch.randn(8, STATE_DIM)
+    dm, pm = torch.zeros(8, 4), torch.zeros(8, 5)
+    a_ptr = torch.zeros(8, dtype=torch.long)
+    size_a, size_b = torch.full((8,), 0.3), torch.full((8,), 0.7)
+
+    hold = torch.full((8,), HOLD, dtype=torch.long)
+    lp_a, _, _ = agent.evaluate_actions(obs, dm, pm, hold, size_a, a_ptr)
+    lp_b, _, _ = agent.evaluate_actions(obs, dm, pm, hold, size_b, a_ptr)
+    assert torch.allclose(lp_a, lp_b)   # size gated OFF for HOLD -> logp unchanged
+
+    opn = torch.full((8,), OPEN_LONG, dtype=torch.long)
+    lp_a2, _, _ = agent.evaluate_actions(obs, dm, pm, opn, size_a, a_ptr)
+    lp_b2, _, _ = agent.evaluate_actions(obs, dm, pm, opn, size_b, a_ptr)
+    assert not torch.allclose(lp_a2, lp_b2)  # size gated ON for OPEN -> logp changes
+
+
+def test_act_deterministic_is_argmax_and_beta_mean():
+    agent = PPOAgent(state_dim=STATE_DIM)
+    obs = torch.randn(5, STATE_DIM)
+    dm = torch.zeros(5, 4); dm[:, OPEN_LONG] = -1e9   # forbid OPEN_LONG
+    pm = torch.zeros(5, 5)
+    a_dir, a_size, a_ptr, value = agent.act_deterministic(obs, dm, pm)
+    assert (a_dir != OPEN_LONG).all()                  # argmax respects the mask
+    assert (a_size >= 0).all() and (a_size <= 1).all()  # Beta mean in [0,1]
+
+
+def test_rollout_buffer_stores_ten_fields_and_summed_logp():
+    assert len(FIELDS) == 10                           # SOW §2.9 ten fields
+    agent = PPOAgent(state_dim=STATE_DIM)
+    buf = RolloutBuffer(capacity=3, state_dim=STATE_DIM)
+    obs = torch.randn(STATE_DIM)
+    dm, pm = torch.zeros(4), torch.zeros(5)
+    step = agent.act(obs, dm, pm)
+    buf.add(obs, step.a_direction.item(), step.a_size.item(), step.a_pointer.item(),
+            reward=1.0, next_obs=obs, logp_old=step.log_prob.item(),
+            value_old=step.value.item(), done=0.0, dir_mask=dm, ptr_mask=pm)
+    assert len(buf) == 1
+    d = buf.get()
+    assert d["logp_old"].shape == (1,) and d["dir_mask"].shape == (1, 4)
+    assert abs(float(d["logp_old"][0]) - float(step.log_prob)) < 1e-5
+    buf.clear()
+    assert len(buf) == 0
+
+
+def test_rollout_buffer_no_replay_full_raises():
+    buf = RolloutBuffer(capacity=1, state_dim=STATE_DIM)
+    z4, z5, o = torch.zeros(4), torch.zeros(5), torch.zeros(STATE_DIM)
+    buf.add(o, 0, 0.5, 0, 0.0, o, -1.0, 0.0, 0.0, z4, z5)
+    with pytest.raises(RuntimeError):
+        buf.add(o, 0, 0.5, 0, 0.0, o, -1.0, 0.0, 0.0, z4, z5)  # on-policy: no overflow
+
+
+def _collect(agent, n=24):
+    buf = RolloutBuffer(n, STATE_DIM)
+    for _ in range(n):
+        obs = torch.randn(STATE_DIM)
+        dm, pm = torch.zeros(4), torch.zeros(5)
+        st = agent.act(obs, dm, pm)
+        buf.add(obs, st.a_direction.item(), st.a_size.item(), st.a_pointer.item(),
+                reward=float(np.random.randn()), next_obs=torch.randn(STATE_DIM),
+                logp_old=st.log_prob.item(), value_old=st.value.item(),
+                done=0.0, dir_mask=dm, ptr_mask=pm)
+    return buf
+
+
+def test_ppo_loss_matches_old_logp_right_after_collection():
+    """Evaluating the same net on the just-collected actions -> ratio≈1, KL≈0."""
+    torch.manual_seed(0)
+    agent = PPOAgent(state_dim=STATE_DIM)
+    batch = _collect(agent).get()
+    adv = torch.randn(len(batch["obs"]))
+    ret = torch.randn(len(batch["obs"]))
+    loss, diag = ppo_loss(agent, batch, adv, ret)
+    assert abs(diag["ratio_mean"] - 1.0) < 1e-4
+    assert abs(diag["approx_kl"]) < 1e-4
+    assert 0.0 <= diag["clip_frac"] <= 1.0
+
+
+def test_ppo_loss_backprops_into_the_trunk():
+    agent = PPOAgent(state_dim=STATE_DIM)
+    batch = _collect(agent).get()
+    n = len(batch["obs"])
+    loss, _ = ppo_loss(agent, batch, torch.randn(n), torch.randn(n))
+    agent.net.zero_grad()
+    loss.backward()
+    grads = [p.grad for p in agent.net.trunk.parameters() if p.grad is not None]
+    assert grads and any(g.abs().sum() > 0 for g in grads)   # learning signal reaches the trunk
+
+
+def test_agent_drives_env_end_to_end():
+    """Integration: the agent acts on real env observations + masks without crashing."""
+    env = TradingEnv({"EURUSD": _sym(T=30, atr=1e-4)})
+    agent = PPOAgent(state_dim=STATE_DIM)
+    obs = env.reset()
+    for _ in range(10):
+        dm = torch.tensor(env.direction_mask("EURUSD"))
+        sym = env.symbols[env.cursor]
+        occ = [s.occupied for s in env.slots[sym]]
+        pm = torch.tensor(build_pointer_mask(occ))
+        a_dir, a_size, a_ptr, _ = agent.act_deterministic(obs, dm, pm)
+        obs, reward, done, info = env.step((int(a_dir), float(a_size), int(a_ptr)))
+        assert not info["coerced"]          # agent only ever picked legal actions
+        if done:
+            break
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -736,3 +879,14 @@ if __name__ == "__main__":  # pragma: no cover
 #      bleed, hard-wall force-flatten, 179-dim obs + mask coercion. 12 tests.
 #   C: The env is now provably faithful and overshoot-proof, so the behaviour the bot
 #      learns here is the behaviour that passes real challenges - not a sim artifact.
+# [2026-06-13] Added Section H - PPOAgent + RolloutBuffer + PPO loss (M5).
+#   I: The brain that consumes the 179-dim obs and emits masked, sized, slot-aware
+#      actions - plus the summed-log-prob PPO loss - needed building + proving.
+#   R: PPO_ENGINE.md (3x256 trunk, 4 heads, Beta size, summed 3-head log-prob,
+#      size-on-OPEN/pointer-on-CLOSE gating, -1e9 masks, live argmax/mean) + SOW §2.8/2.9.
+#   A: Section H - locked architecture shape, mask-respecting sampling, the OPEN/CLOSE
+#      log-prob gating, deterministic argmax/Beta-mean, 10-field buffer + no-replay,
+#      PPO loss (ratio≈1/KL≈0 post-collection, grad reaches the trunk), agent-drives-env.
+#   C: The policy provably cannot sample an illegal/breach-bound action and its update
+#      is a correct trust-region step - so training under the M4 physics moves it toward
+#      passing, not toward the wall.

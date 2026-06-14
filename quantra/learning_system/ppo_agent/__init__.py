@@ -11,6 +11,12 @@ The heads encode WHAT/HOW-MUCH/WHICH-to-close and the critic encodes patience; t
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M5] Export the agent + loss API (consumed by the trainer, M8).
+from .agent import ActorCritic, AgentStep, PPOAgent
+from .loss import ppo_loss
+
+__all__ = ["PPOAgent", "ActorCritic", "AgentStep", "ppo_loss"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

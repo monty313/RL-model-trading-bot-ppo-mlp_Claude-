@@ -53,8 +53,11 @@ docs/
   shared account, real FTMO costs, Phase-A wall) + **B5 no-overshoot invariant**
   (`quantra/locked_core/{risk_manager,cost_layer}/`, `quantra/ftmo_passing/challenge_state.py`,
   `quantra/env/trading_env.py`).
-- [ ] M5 PPOAgent · M6 RewardEngine · M7 curriculum+episode · M8 trainer · M9 telemetry ·
-  M10 interpreter · M11 risk doctor · M12 validation · M13 HPO · M14 live bridge · M15 acceptance
+- [x] **M5** — PPOAgent (4 heads · 3×256 trunk · Beta size) + RolloutBuffer (10 fields,
+  no replay) + PPO loss (summed 3-head log-prob, size-on-OPEN/pointer-on-CLOSE gating)
+  (`quantra/learning_system/ppo_agent/`, `.../rollout_buffer/`).
+- [ ] M6 RewardEngine · M7 curriculum+episode · M8 trainer · M9 telemetry · M10 interpreter ·
+  M11 risk doctor · M12 validation · M13 HPO · M14 live bridge · M15 acceptance
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
 tests append there. **Every file carries an IRAC update log** — see
@@ -92,3 +95,8 @@ makes the bot pass FTMO more consistently. Rule: [quantra/constitution/update_ru
   - **R:** SOW B5/H3/§10.5/§2.4/§2.7.
   - **A:** Built RiskManager (round-down, no overshoot), CostLayer ($5 RT forex-only), ChallengeState (buffer+wall), TradingEnv (4-symbol true-sequential, 5 slots, shared account); 12 tests incl. 2000-case sizing fuzz + B5. 52 tests green.
   - **C:** The bot trains on faithful physics where collective overshoot is impossible by construction — so learned behaviour transfers to passing real challenges.
+- **[2026-06-13]** M5 complete — PPOAgent + RolloutBuffer + PPO loss.
+  - **I:** Nothing turned the 179-dim obs into legal, sized, slot-aware actions or produced the summed-log-prob PPO objective.
+  - **R:** PPO_ENGINE.md (4 heads, 3×256, Beta size, summed log-prob, OPEN/CLOSE gating, −1e9 masks) + SOW §2.8/2.9.
+  - **A:** ActorCritic + PPOAgent (act/deterministic/evaluate), 10-field on-policy buffer, ppo_loss; 9 tests incl. gating + grad-to-trunk + agent-drives-env. 61 tests green.
+  - **C:** The brain can never sample a breach-bound action and updates in a correct trust region — so training moves it toward passing.

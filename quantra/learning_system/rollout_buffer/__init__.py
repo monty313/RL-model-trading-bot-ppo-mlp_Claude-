@@ -11,6 +11,11 @@ PPO is on-policy by design (SOW §2.1); replay would contaminate the gradient. S
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M5] Export the RolloutBuffer (consumed by the trainer, M8).
+from .buffer import FIELDS, RolloutBuffer
+
+__all__ = ["RolloutBuffer", "FIELDS"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.
