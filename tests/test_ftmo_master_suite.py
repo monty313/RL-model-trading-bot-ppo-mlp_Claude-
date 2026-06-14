@@ -975,6 +975,81 @@ def test_curriculum_graduates_to_live_mode():
     assert (cm.feature_mask() == 1.0).all()              # no 1m masking once graduated
 
 
+# =============================================================================
+# SECTION K — TRAINER + GAE + AGGRESSION SCHEDULER + G8 (M8)
+# FTMO link: the PPO loop that turns physics + masks + reward into a brain that
+# passes. gamma/lambda locked (patience); the scheduler keeps exploration high while
+# the bot leaves premium setups on the table (G8), cooling as it captures them.
+# =============================================================================
+from quantra.learning_system.trainer import (  # noqa: E402
+    GAMMA,
+    LAMBDA,
+    AggressionScheduler,
+    TrainConfig,
+    Trainer,
+    compute_gae,
+    missed_opportunity,
+)
+from quantra.learning_system.trainer.scheduler import AggressionRanges  # noqa: E402
+
+
+def test_gae_locked_gamma_lambda_and_shapes():
+    assert GAMMA == 0.997 and LAMBDA == 0.97          # 🔴 patience locked
+    r = torch.ones(5)
+    v = torch.zeros(5)
+    d = torch.tensor([0., 0., 0., 0., 1.])
+    adv, ret = compute_gae(r, v, d, last_value=0.0)
+    assert adv.shape == (5,) and ret.shape == (5,)
+    # with V=0 and the last step terminal, the last advantage is just its reward
+    assert abs(float(adv[-1]) - 1.0) < 1e-6
+    # earlier advantages accumulate discounted future reward -> strictly larger
+    assert float(adv[0]) > float(adv[-1])
+
+
+def test_aggression_scheduler_dials_stay_in_locked_ranges():
+    rng = AggressionRanges()
+    sch = AggressionScheduler(rng)
+    for mr in (0.0, 0.5, 1.0):
+        sch.aggression = mr
+        v = sch.values()
+        assert rng.entropy[0] <= v.entropy_coef <= rng.entropy[1]
+        assert rng.clip[0] <= v.clip_eps <= rng.clip[1]
+        assert rng.lr[0] <= v.lr <= rng.lr[1]
+        assert rng.epochs[0] <= v.epochs <= rng.epochs[1]
+
+
+def test_aggression_cools_as_misses_fall():
+    sch = AggressionScheduler(start=1.0)
+    for _ in range(50):
+        sch.update(miss_rate=0.0)                      # bot now captures everything
+    assert sch.aggression < 0.1                        # aggression cools toward low end
+
+
+def test_g8_missed_opportunity_requires_multi_tf_agreement_flat_and_move():
+    row = _feat_row(ssma_align_5m=1, ssma_align_30m=1, ssma_align_4H=1)
+    assert missed_opportunity(row, was_flat=True, realized_move_atr=2.0) is True   # all align + ran 2 ATR
+    assert missed_opportunity(row, was_flat=True, realized_move_atr=0.5) is False  # move < 1.5 ATR
+    assert missed_opportunity(row, was_flat=False, realized_move_atr=2.0) is False  # wasn't flat
+    disagree = _feat_row(ssma_align_5m=1, ssma_align_30m=-1, ssma_align_4H=1)
+    assert missed_opportunity(disagree, was_flat=True, realized_move_atr=2.0) is False
+
+
+def test_trainer_runs_and_checkpoints():
+    """Integration: a short PPO run collects, updates, schedules, and saves a brain."""
+    data = {"EURUSD": _sym(T=400, atr=1e-4, drift=1e-5)}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.2))
+    trainer = Trainer(env, train_cfg=TrainConfig(rollout_size=64, minibatch=16, seed=0))
+    p0 = [x.detach().clone() for x in trainer.agent.net.parameters()]
+    hist = trainer.train(n_updates=2)
+    assert len(hist) == 2
+    assert "approx_kl" in hist[-1] and "miss_rate" in hist[-1]
+    # the update actually changed the weights (a learning step happened)
+    changed = any((a - b).abs().sum() > 0 for a, b in zip(trainer.agent.net.parameters(), p0))
+    assert changed
+    path = trainer.checkpoint("test_brain")
+    assert path.exists()
+
+
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
@@ -1063,3 +1138,10 @@ if __name__ == "__main__":  # pragma: no cover
 #      graduation to live. 5 tests.
 #   C: The bot banks pass-days behind a 1% wall and learns law-respect by habit -
 #      both push it toward consistent passing rather than reckless profit-chasing.
+# [2026-06-13] Added Section K - Trainer + GAE + scheduler + G8 (M8).
+#   I: Nothing ran the on-policy PPO loop that turns the pieces into a trained brain.
+#   R: SOW §2.1/2.8 (PPO), G2/G4 (locked gamma/lambda + ranges + 512/64), G8, §8.4.
+#   A: Section K - GAE locked gamma/lambda + shapes, scheduler dials within ranges +
+#      cooling, G8 multi-TF-agree/flat/>=1.5ATR, trainer-runs-updates-checkpoints. 5 tests.
+#   C: Repeated patient PPO steps under faithful physics + masks produce a brain that
+#      hits target without breaching, and every brain is saved for the promotion gate.

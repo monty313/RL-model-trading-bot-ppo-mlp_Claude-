@@ -11,6 +11,14 @@ High gamma/lambda is the 'math of patience' that teaches delayed gratification �
 BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``.
 """
 
+# [C - 2026-06-13, M8] Export the trainer API (GAE, scheduler, G8, Trainer).
+from .gae import GAMMA, LAMBDA, compute_gae
+from .scheduler import AggressionScheduler, missed_opportunity
+from .trainer import TrainConfig, Trainer
+
+__all__ = ["Trainer", "TrainConfig", "compute_gae", "GAMMA", "LAMBDA",
+           "AggressionScheduler", "missed_opportunity"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13.

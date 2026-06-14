@@ -61,7 +61,9 @@ docs/
 - [x] **M7** — CurriculumManager (trend→reversion→stationarity+ATR, law-school mode,
   1m-timing masking) + two-phase episode rule (auto-flat at +2.5% → Phase-B 1% wall)
   (`quantra/learning_system/curriculum_manager/`, `quantra/ftmo_passing/challenge_state.py`).
-- [ ] M8 trainer · M9 telemetry · M10 interpreter · M11 risk doctor · M12 validation ·
+- [x] **M8** — Trainer + GAE (locked γ=0.997/λ=0.97) + aggression scheduler + G8
+  missed-opportunity metric + checkpointing (`quantra/learning_system/trainer/`).
+- [ ] M9 telemetry · M10 interpreter · M11 risk doctor · M12 validation ·
   M13 HPO · M14 live bridge · M15 acceptance
 
 **Tests:** one master suite — `tests/test_ftmo_master_suite.py` (run `pytest`). All future
