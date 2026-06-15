@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>QUANTRA — Live Cockpit</title>
+<style>
+  :root{ --bg:#0e1116; --surface:#161b22; --line:#283041; --ink:#e7ecf3; --muted:#8b97a8;
+         --accent:#7F77DD; --good:#1D9E75; --warn:#E0A52E; --bad:#E24B4A; --flow:#5DCAA5; }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,sans-serif;}
+  .top{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);}
+  .top h1{font-size:16px;margin:0;letter-spacing:.04em;font-weight:800;}
+  .pill{font-size:11px;padding:3px 9px;border-radius:20px;border:1px solid var(--accent);color:var(--accent);font-weight:700;}
+  .top button{margin-left:auto;background:var(--surface);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;}
+  .top button:hover{border-color:var(--accent);}
+  .wrap{display:flex;gap:14px;padding:14px 18px;flex-wrap:wrap;}
+  .stage{flex:1 1 520px;min-width:340px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:6px;}
+  .panel{flex:1 1 280px;min-width:250px;display:flex;flex-direction:column;gap:10px;}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
+  .card h2{margin:0 0 8px;font-size:11px;letter-spacing:.08em;color:var(--muted);font-weight:700;}
+  .big{font-size:30px;font-weight:800;line-height:1;}
+  .row{display:flex;justify-content:space-between;font-size:13px;margin:5px 0;}
+  .row span:last-child{font-weight:700;}
+  .bar{height:8px;border-radius:6px;background:#0b0f15;overflow:hidden;margin-top:4px;border:1px solid var(--line);}
+  .bar > i{display:block;height:100%;border-radius:6px;}
+  .gaugewrap{display:flex;align-items:baseline;gap:8px;}
+  .alert{font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;display:none;}
+  .nodelabel{font-size:11px;font-weight:700;fill:var(--ink);}
+  .nodesub{font-size:8.5px;fill:var(--muted);}
+  .nrect{fill:#1b2230;stroke:var(--line);stroke-width:1.4;cursor:pointer;transition:stroke .15s;}
+  .nrect:hover{stroke:var(--accent);}
+  .nrect.hot{stroke:var(--accent);stroke-width:2.2;}
+  .edge{stroke:var(--line);stroke-width:1.3;fill:none;}
+  .edge.loop{stroke-dasharray:5 4;}
+  #hood{font-size:13px;line-height:1.5;}
+  #hood b{color:var(--accent);}
+  .mini{font-size:11px;color:var(--muted);}
+  .legend{font-size:10.5px;color:var(--muted);padding:0 18px 14px;}
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>QUANTRA · LIVE COCKPIT</h1>
+    <span class="pill" id="mode">DEMO STREAM</span>
+    <button id="pause">⏸ Pause</button>
+    <button id="speed">⏩ 1×</button>
+  </div>
+
+  <div class="wrap">
+    <div class="stage">
+      <svg id="svg" viewBox="0 0 540 520" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;">
+        <g id="edges"></g><g id="parts"></g><g id="nodes"></g>
+      </svg>
+    </div>
+
+    <div class="panel">
+      <div class="card">
+        <h2>CHANCE OF PASSING TODAY</h2>
+        <div class="gaugewrap"><div class="big" id="succ">–</div><div class="mini">target hit &amp; no breach</div>
+          <span class="alert" id="succAlert">⚠ BELOW 70%</span></div>
+        <div class="bar"><i id="succBar" style="width:0%;background:var(--good);"></i></div>
+        <div class="mini" id="succNote" style="margin-top:6px;">start-of-day forecast + live</div>
+      </div>
+      <div class="card">
+        <h2>THE DAY</h2>
+        <div class="row"><span>Equity</span><span id="eq">100.0%</span></div>
+        <div class="row"><span>Day progress → target</span><span id="prog">0%</span></div>
+        <div class="bar"><i id="progBar" style="width:0%;background:var(--accent);"></i></div>
+        <div class="row" style="margin-top:8px;"><span>Cushion to wall</span><span id="cush">0%</span></div>
+        <div class="bar"><i id="cushBar" style="width:0%;background:var(--flow);"></i></div>
+        <div class="row" style="margin-top:8px;"><span>Mode · Phase</span><span id="phase">FTMO · A</span></div>
+        <div class="row"><span>Day #</span><span id="day">1</span></div>
+      </div>
+      <div class="card">
+        <h2>LAST ACTION</h2>
+        <div class="row"><span>Direction</span><span id="adir">—</span></div>
+        <div class="row"><span>Size (conviction)</span><span id="asize">—</span></div>
+        <div class="row"><span>Asset · Slot</span><span id="aslot">—</span></div>
+      </div>
+      <div class="card">
+        <h2>UNDER THE HOOD <span class="mini">(click a block)</span></h2>
+        <div id="hood" class="mini">Click any block in the pipeline to inspect it live.</div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">Flowing dots = data/decisions circulating the loop each bar. The lit branch = the head that drove the last action. This is a DEMO stream; it wires to the real <code>TelemetryLogger</code> output when training runs.</div>
+
+<script>
+(function(){
+  var N = {
+    obs:{x:270,y:34,l:'Observation',s:'185 inputs',h:'<b>Observation · 185</b><br>Everything the bot sees this bar: indicators, raw values, law flags, 5 slots × 4 assets, portfolio, and the account block (your target/risk as progress + cushion).'},
+    mlp:{x:270,y:120,l:'MLP 3×256',s:'the brain',h:'<b>MLP policy · 3×256</b><br>Small shared net. Feeds the actor (decides) and critic (judges). The cost is simulating the market, not the brain.'},
+    dir:{x:52,y:210,l:'Direction',s:'4-way',h:'<b>Direction head</b><br>hold / long / short / close. Gated by the law masks before sampling.'},
+    size:{x:160,y:210,l:'Size',s:'Beta 0–1',h:'<b>Size head (Beta)</b><br>Conviction 0–1, not lots. RiskManager + ATR + margin turn it into a lot count that can\'t overshoot the budget.'},
+    ptr:{x:270,y:210,l:'Pointer',s:'slot',h:'<b>Pointer head</b><br>Which of the 5 slots to act on — how it holds many positions per asset.'},
+    val:{x:380,y:210,l:'Value',s:'critic',h:'<b>Value head (critic)</b><br>"How good is this state." Used for learning only, never trading.'},
+    succ:{x:486,y:210,l:'Success%',s:'P(pass)',h:'<b>Success-Prob head (NEW)</b><br>Odds of hitting target AND not breaching today. Start-of-day forecast + live; alerts below 70%. Read-only — it forecasts, never steers.'},
+    masks:{x:150,y:300,l:'Law masks',s:'12 rules',h:'<b>Law masks</b><br>9 laws + 3 gates zero illegal moves (logit −1e9) BEFORE sampling. Hard walls, not reward penalties.'},
+    action:{x:316,y:300,l:'Action',s:'1 asset/bar',h:'<b>Action</b><br>One asset, one bar: a direction + conviction-size + slot. The 4 assets act true-sequentially within each bar.'},
+    env:{x:270,y:378,l:'Environment',s:'FTMO day',h:'<b>Environment</b><br>The simulated day: RiskManager sizes vs budget + 1:100-style margin, 20 possible positions share ONE account, costs apply, the trailing wall ends the day.'},
+    reward:{x:270,y:444,l:'Reward',s:'L0 rules',h:'<b>Reward</b><br>Layer 0 (net PnL) dominates; tiny shaping whispers handle timing/patience/pass-days but can\'t out-vote real money.'},
+    ppo:{x:84,y:444,l:'PPO',s:'γ0.997 ↺',h:'<b>PPO update</b><br>Clipped trust-region step toward higher reward. γ=0.997 = patience: values the whole day\'s compounded balance over the next tick.'}
+  };
+  var E = [['obs','mlp'],['mlp','dir'],['mlp','size'],['mlp','ptr'],['mlp','val'],['mlp','succ'],
+           ['dir','masks'],['ptr','masks'],['size','action'],['masks','action'],
+           ['action','env'],['env','reward'],['reward','ppo'],['ppo','mlp',1],['env','obs',1]];
+  var W=92,H=38, ns=document.getElementById('nodes'), es=document.getElementById('edges'), ps=document.getElementById('parts');
+  function el(t,a){var e=document.createElementNS('http://www.w3.org/2000/svg',t);for(var k in a)e.setAttribute(k,a[k]);return e;}
+  for(var i=0;i<E.length;i++){var a=N[E[i][0]],b=N[E[i][1]];var p=el('path',{class:'edge'+(E[i][2]?' loop':''),d:'M'+a.x+','+a.y+' L'+b.x+','+b.y});es.appendChild(p);}
+  var hoodEl=document.getElementById('hood');
+  for(var key in N){(function(k){var n=N[k];
+    var g=el('g',{}); var r=el('rect',{class:'nrect',id:'n_'+k,x:n.x-W/2,y:n.y-H/2,width:W,height:H,rx:8});
+    g.appendChild(r);
+    var t1=el('text',{class:'nodelabel','text-anchor':'middle',x:n.x,y:n.y-1});t1.textContent=n.l;g.appendChild(t1);
+    var t2=el('text',{class:'nodesub','text-anchor':'middle',x:n.x,y:n.y+11});t2.textContent=n.s;g.appendChild(t2);
+    r.addEventListener('click',function(){hoodEl.innerHTML=n.h;document.querySelectorAll('.nrect').forEach(function(x){x.classList.remove('hot');});r.classList.add('hot');});
+    ns.appendChild(g);})(key);}
+
+  // particle pool
+  var P=[]; for(var e=0;e<E.length;e++){for(var j=0;j<3;j++){var c=el('circle',{r:2.6,fill:'var(--flow)',opacity:.9});ps.appendChild(c);P.push({e:e,t:j/3,el:c});}}
+  var hotEdge=-1, speed=1, paused=false, last=0;
+  function frame(ts){ if(!last)last=ts; var dt=Math.min(40,ts-last); last=ts;
+    if(!paused){ for(var i=0;i<P.length;i++){var p=P[i];var ed=E[p.e];var a=N[ed[0]],b=N[ed[1]];
+      p.t+=(0.00045*speed*dt)*(p.e===hotEdge?1.8:1); if(p.t>1)p.t-=1;
+      var x=a.x+(b.x-a.x)*p.t, y=a.y+(b.y-a.y)*p.t;
+      p.el.setAttribute('cx',x);p.el.setAttribute('cy',y);
+      p.el.setAttribute('fill', p.e===hotEdge?'var(--accent)':'var(--flow)');
+      p.el.setAttribute('r', p.e===hotEdge?3.4:2.4);
+    }} requestAnimationFrame(frame); }
+  requestAnimationFrame(frame);
+
+  // ---- DEMO data stream (everything in % of starting balance) ----
+  var S={eq:100,start:100,peak:100,target:2.5,dd:4,phase:'A',ftmo:true,day:1,spark:[]};
+  var DIRS=['HOLD','LONG','SHORT','CLOSE'], EDGEHEAD={LONG:1,SHORT:1,HOLD:0,CLOSE:3};
+  function sig(x){return 1/(1+Math.exp(-x));}
+  function bar(){
+    S.eq += 0.05 + (Math.random()-0.46)*0.9;          // slight positive drift + noise
+    if(S.eq>S.peak)S.peak=S.eq;
+    var wall=S.peak-S.dd, prog=(S.eq-S.start)/S.target, cushion=S.eq-wall, cushF=Math.max(0,Math.min(1,cushion/S.dd));
+    if(S.eq<=wall){ flash('var(--bad)'); S.start=S.eq;S.peak=S.eq;S.day++;S.phase='A'; }
+    else if(prog>=1 && S.ftmo && S.phase==='A'){ S.phase='B'; S.dd=1; flash('var(--good)'); }
+    var succ=sig(2.7*cushF - 2.9*Math.max(0,1-prog) + 0.7);
+    // action
+    var d=DIRS[Math.floor(Math.random()*4)], sz=(Math.random()*0.9+0.05);
+    hotEdge = (d==='LONG'||d==='SHORT')?1 : (d==='CLOSE'?6:0);
+    // paint heads hot
+    document.querySelectorAll('.nrect').forEach(function(x){x.classList.remove('hot');});
+    var hk = d==='SIZE'?'size': (d==='CLOSE'?'ptr':'dir'); var hn=document.getElementById('n_'+hk); if(hn)hn.classList.add('hot');
+    // sparkline
+    S.spark.push(S.eq); if(S.spark.length>60)S.spark.shift();
+    render(prog,cushF,succ,d,sz);
+  }
+  function flash(col){var s=document.getElementById('svg');s.style.transition='none';s.style.filter='drop-shadow(0 0 0 '+col+')';
+    s.animate?s.animate([{filter:'brightness(1.4)'},{filter:'brightness(1)'}],{duration:500}):0;}
+  function render(prog,cushF,succ,d,sz){
+    document.getElementById('eq').textContent=S.eq.toFixed(2)+'%';
+    var pp=Math.max(0,Math.min(100,prog*100));
+    document.getElementById('prog').textContent=Math.round(prog*100)+'%';
+    document.getElementById('progBar').style.width=pp+'%';
+    document.getElementById('cush').textContent=Math.round(cushF*100)+'%';
+    var cb=document.getElementById('cushBar');cb.style.width=(cushF*100)+'%';
+    cb.style.background = cushF<0.25?'var(--bad)':(cushF<0.5?'var(--warn)':'var(--flow)');
+    document.getElementById('phase').textContent=(S.ftmo?'FTMO':'OFF')+' · '+S.phase;
+    document.getElementById('day').textContent=S.day;
+    document.getElementById('adir').textContent=d;
+    document.getElementById('asize').textContent=sz.toFixed(2);
+    document.getElementById('aslot').textContent=['EURUSD','XAUUSD','GBPUSD','US30'][Math.floor(Math.random()*4)]+' · '+(1+Math.floor(Math.random()*5));
+    var pct=Math.round(succ*100);
+    var sEl=document.getElementById('succ');sEl.textContent=pct+'%';
+    var col=pct>=70?'var(--good)':(pct>=50?'var(--warn)':'var(--bad)');
+    sEl.style.color=col;
+    var sb=document.getElementById('succBar');sb.style.width=pct+'%';sb.style.background=col;
+    document.getElementById('succAlert').style.display = pct<70?'inline-block':'none';
+    document.getElementById('succAlert').style.background = 'var(--bad)'; document.getElementById('succAlert').style.color='#fff';
+  }
+  var timer=setInterval(bar, 650);
+  document.getElementById('pause').addEventListener('click',function(){paused=!paused;this.textContent=paused?'▶ Play':'⏸ Pause';if(paused)clearInterval(timer);else timer=setInterval(bar,650/speed);});
+  document.getElementById('speed').addEventListener('click',function(){speed=speed>=4?1:speed*2;this.textContent='⏩ '+speed+'×';clearInterval(timer);if(!paused)timer=setInterval(bar,650/speed);});
+  bar();
+})();
+</script>
+</body>
+</html>

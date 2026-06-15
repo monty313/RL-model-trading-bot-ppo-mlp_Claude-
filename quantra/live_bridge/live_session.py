@@ -119,6 +119,7 @@ class LivePortfolio:
 
     symbols: List[str]
     challenge: cfg.ChallengeConfig = field(default_factory=cfg.ChallengeConfig)
+    max_lot: float = 50.0   # mirrors RiskConfig.max_lot so port_net_size obs matches the env [fix]
 
     def __post_init__(self):
         self.account = ChallengeState(self.challenge.ftmo_account_size, self.challenge)
@@ -140,6 +141,14 @@ class LivePortfolio:
 
     def committed_risk(self) -> float:
         return sum(sl.lots * sl.risk_per_lot
+                   for s in self.symbols for sl in self.slots[s] if sl.occupied)
+
+    def used_margin(self) -> float:
+        """Broker margin tied up by all open slots (notional / leverage). Mirrors the
+        env's _used_margin so LIVE sizing matches training [2026-06-15]. COUPLING ->
+        quantra/locked_core/risk_manager/risk.py size(leverage=, free_margin=)."""
+        lev = max(1.0, self.challenge.leverage)
+        return sum(sl.lots * self._contract(s) * self.price[s] / lev
                    for s in self.symbols for sl in self.slots[s] if sl.occupied)
 
     def mark(self, sym: str, price: float, atr: float) -> None:
@@ -186,7 +195,7 @@ class LivePortfolio:
         c, con = self.price[sym], self._contract(sym)
         opn = [sl for sl in self.slots[sym] if sl.occupied]
         return np.array([sum(s.direction for s in opn) / N_SLOTS,
-                         sum(s.lots for s in opn) / 50.0,
+                         sum(s.lots for s in opn) / max(self.max_lot, 1e-9),  # == env's /max_lot [fix]
                          sum(s.upnl(c, con) for s in opn) / self.account.account_size], dtype=np.float32)
 
 
@@ -204,7 +213,8 @@ class LiveSession:
         self.risk = risk
         self.symbols = symbols
         self.halt = halt or ManualHalt()
-        self.portfolio = LivePortfolio(symbols, challenge or cfg.ChallengeConfig())
+        self.portfolio = LivePortfolio(symbols, challenge or cfg.ChallengeConfig(),
+                                       max_lot=risk.cfg.max_lot)
         # COUPLING [C5] -> quantra/runtime/config.py: POINT_SIZE/DEFAULT_POINT_SIZE per-symbol dict
         # (same one build_market_matrix expects); these point sizes must match training to reproduce features.
         self.point_sizes = point_sizes or {s: cfg.POINT_SIZE.get(s, cfg.DEFAULT_POINT_SIZE) for s in symbols}
@@ -249,7 +259,15 @@ class LiveSession:
             budget = self.portfolio.account.remaining_buffer - self.portfolio.committed_risk()
             # COUPLING -> quantra/locked_core/risk_manager/risk.py: reads SizeResult .feasible/.reason/.lots/
             # .risk_per_lot (same fields live_runner.py uses); rename any -> break OPEN sizing here.
-            sr = self.risk.size(sym, a_size, atr, budget)
+            # Margin ceiling + mode-aware cap [2026-06-15] — IDENTICAL to the env so the
+            # learned sizing reproduces live (ftmo OFF: no per-trade cap; margin binds).
+            sr = self.risk.size(
+                sym, a_size, atr, budget,
+                apply_per_trade_cap=self.portfolio.challenge.ftmo_mode,
+                price=price, contract=self.portfolio._contract(sym),
+                leverage=self.portfolio.challenge.leverage,
+                free_margin=self.portfolio.account.equity - self.portfolio.used_margin(),
+            )
             if not sr.feasible:
                 return {"action": "OPEN_SKIPPED", "symbol": sym, "reason": sr.reason}
             side = 1 if a_dir == OPEN_LONG else -1
@@ -305,3 +323,18 @@ class LiveSession:
 #      deterministically, sizes vs the live buffer, executes, and breach-auto-flats.
 #   C: The learned pass-behaviour reproduces live bar-by-bar with the same obs/masks/slots,
 #      behind hard kill switches - the bridge from a trained brain to a banked live pass.
+# [2026-06-15] Live sizing mirrors training (margin + mode-aware cap).
+#   I: live OPEN sized vs the buffer only - it ignored margin + the ftmo_mode cap, so live
+#      lots could diverge from what the policy trained against.
+#   R: Operator decision 2026-06-15 (margin model; train/live parity).
+#   A: LivePortfolio.used_margin(); step_symbol passes apply_per_trade_cap=ftmo_mode +
+#      price/contract/leverage/free_margin into risk.size - identical to the env.
+#   C: The learned sizing reproduces live to the lot, so demo/funded behaviour matches
+#      training - no live surprise that breaks a pass.
+# [2026-06-15c] port_net_size normalized by max_lot (was hardcoded /50).
+#   I: (audit) live divided net lots by literal 50.0 while the env divides by RiskConfig.max_lot
+#      - a latent obs divergence if max_lot is ever overridden.
+#   R: Logic audit 2026-06-15 (train obs == live obs).
+#   A: LivePortfolio.max_lot (set from risk.cfg.max_lot); portfolio_block divides by it.
+#   C: The port_net_size obs scalar matches the env for any max_lot, preserving train/live
+#      parity so the learned behaviour reproduces live. (Live obs-warmup + LiveRunner are queued.)

@@ -92,17 +92,30 @@ class LiveRunner:
 
 
 def main() -> None:  # pragma: no cover - operator entry point (SOW §12.1)
+    from quantra.runtime import config as cfg
     ap = argparse.ArgumentParser(description="Quantra live runner (deterministic).")
     ap.add_argument("--symbols", default="EURUSD,XAUUSD,GBPUSD,US30")
     ap.add_argument("--daily_target_pct", type=float, default=2.5)
-    ap.add_argument("--daily_risk_pct", type=float, default=4.0)
+    ap.add_argument("--daily_risk_pct", type=float, default=4.0, help="trailing stop-loss %")
     ap.add_argument("--ftmo_account_size", type=float, default=10_000.0)
+    ap.add_argument("--leverage", type=float, default=100.0, help="1:N (e.g. 100, 500, 2000)")
+    ap.add_argument("--ftmo_mode", choices=["on", "off"], default="on",
+                    help="on=2-phase challenge; off=single trailing stop, runs indefinitely")
     ap.add_argument("--broker", default="sim", choices=["sim", "mt5"])
     args = ap.parse_args()
-    print("Quantra live runner configured:")
-    print(f"  symbols={args.symbols} target={args.daily_target_pct}% "
-          f"risk={args.daily_risk_pct}% account={args.ftmo_account_size} broker={args.broker}")
-    print("  Live loop: quantra.live_bridge.LiveSession with an MT5BarFeed (M14b).")
+    # COUPLING -> runtime/config.make_challenge: clamps target/risk into the mode bounds and
+    # pins the wall/pain-zone to the trailing input. This is the real per-run config object.
+    challenge = cfg.make_challenge(
+        daily_target_pct=args.daily_target_pct, daily_risk_pct=args.daily_risk_pct,
+        ftmo_mode=(args.ftmo_mode == "on"), leverage=args.leverage,
+        account_size=args.ftmo_account_size)
+    print("Quantra live runner configured (validated ChallengeConfig):")
+    print(f"  symbols={args.symbols} mode={args.ftmo_mode} target={challenge.daily_target_pct}% "
+          f"trailing-stop={challenge.daily_risk_pct}% leverage=1:{int(challenge.leverage)} "
+          f"account={challenge.ftmo_account_size} broker={args.broker}")
+    print(f"  wall={challenge.hard_wall_pct}% pain_zone={challenge.pain_zone_start_pct}% "
+          f"(clamped to {'FTMO' if challenge.ftmo_mode else 'OFF'} bounds)")
+    print("  Live loop: quantra.live_bridge.LiveSession(challenge=...) with an MT5BarFeed (M14b).")
     print("  Load a trained checkpoint + connect the MT5 terminal to begin. Manual halt +")
     print("  breach auto-flat armed. Validate on a DEMO account before going funded.")
 
@@ -124,3 +137,10 @@ if __name__ == "__main__":  # pragma: no cover
 #      breach_autoflat, manual_halt; argparse CLI per §12.1; no diagnostics import.
 #   C: The learned pass-behaviour reproduces live with the same masks/slots, and two
 #      hard kill switches make a bad session non-fatal - so passes get banked safely.
+# [2026-06-15] Real operator CLI (was print-only).
+#   I: main() parsed --daily_target_pct/--daily_risk_pct then only printed them - dead args.
+#   R: Operator decision 2026-06-15 (adjustable inputs incl leverage + ftmo_mode).
+#   A: main() builds a validated ChallengeConfig via make_challenge(... leverage, ftmo_mode)
+#      and reports the clamped target/stop/wall it will run.
+#   C: The documented launch command now actually configures the run, so per-account
+#      target/stop/leverage reach the live stack instead of silently defaulting.

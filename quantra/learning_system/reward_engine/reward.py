@@ -83,7 +83,9 @@ class RewardEngine:
         l1 = ALPHA if (ctx.in_position and ctx.momentum_aligned) else 0.0
         l2 = -BETA if ctx.stagnation else 0.0
         l3 = -DELTA * self._pain(ctx.drawdown_pct)
-        l4 = EPS * max(0.0, ctx.day_progress)
+        # Clamp at target (1.0): a whisper in ALL modes, incl. ftmo-OFF where day_progress is
+        # unbounded (~40 at 1% target / 40% envelope) and could otherwise rival L0 [2026-06-15 fix].
+        l4 = EPS * min(1.0, max(0.0, ctx.day_progress))
         # L5 category multiplier on the dense shaping (breach-risk = protect capital:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
@@ -180,3 +182,10 @@ class QuadBonus:
 #   C: Layer 0 provably dominates (E8 test), so the policy optimizes REAL net progress
 #      inside the legal/risk-safe space and the pain ramp keeps it off the wall - which
 #      is what passing consistently requires.
+# [2026-06-15c] Clamp L4 target-progress at 1.0.
+#   I: (audit) L4 = EPS*day_progress was unbounded; ftmo-OFF day_progress can reach ~40, so the
+#      whisper could rival L0 over a window and the E8 proof never sampled that range.
+#   R: Logic audit 2026-06-15 (L0 dominance must hold in ALL reachable configs).
+#   A: l4 = EPS*min(1.0, max(0.0, day_progress)) — caps the shaping at target in every mode.
+#   C: L0 stays the dominant objective even in the new OFF configuration, so the bot keeps
+#      optimizing REAL net money (no reward hijack) - the basis of consistent passing.

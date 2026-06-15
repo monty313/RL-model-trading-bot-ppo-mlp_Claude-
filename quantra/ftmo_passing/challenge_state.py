@@ -68,16 +68,27 @@ class ChallengeState:
     # --- wall + buffer (two-phase, SOW §2.6) ---
     @property
     def wall_equity(self) -> float:
-        """Trailing wall. Phase A: peak − 4% of account. Phase B (post +2.5% auto-flat):
-        a fresh 1% trailing anchored at the re-set post-flat peak."""
-        pct = (self.challenge.daily_risk_pct if self.phase == "A"
-               else self.challenge.phase_b_trailing_pct)
+        """The trailing stop-loss (account-level). ftmo_mode: Phase A = peak − daily_risk_pct,
+        Phase B (post auto-flat) = fresh tighter phase_b_trailing_pct. ftmo_mode OFF: a SINGLE
+        trailing stop (daily_risk_pct), never tightened — the bot compounds all day
+        [operator decision 2026-06-15: OFF runs indefinitely under one trailing stop]."""
+        if self.challenge.ftmo_mode and self.phase == "B":
+            pct = self.challenge.phase_b_trailing_pct
+        else:
+            pct = self.challenge.daily_risk_pct
         return self.peak_equity - (pct / 100.0) * self.account_size
 
     @property
     def should_autoflat(self) -> bool:
-        """Phase A only: day net hit +2.5% -> auto-flat ALL + switch to Phase B."""
-        return self.phase == "A" and self.target_hit and not self.breached
+        """Auto-flat ALL when the day's target is hit (never while breached). ftmo_mode ON:
+        always (Phase A) -> banks the pass behind the tighter Phase-B wall. ftmo_mode OFF:
+        ONLY if stop_for_day is set; otherwise OFF runs PAST the target (the target is still
+        the AIM that drives day_progress + the success-%, just not a forced stop)."""
+        if self.breached or not self.target_hit:
+            return False
+        if self.challenge.ftmo_mode:
+            return self.phase == "A"
+        return self.challenge.stop_for_day
 
     def enter_phase_b(self) -> None:
         """After the +2.5% auto-flat: re-anchor the trailing peak to current equity and
@@ -120,9 +131,15 @@ class ChallengeState:
         self.balance -= cost
 
     def reset_day(self) -> None:
-        """Daily reset (00:00 CE(S)T, SOW §10.3): re-anchor day start + target."""
+        """Daily reset (00:00 CE(S)T, SOW §10.3) — START A FRESH DAY. Re-anchors day_start AND
+        the trailing peak to current equity, clears target_hit, and returns to Phase A, so each
+        new calendar day begins with its own 2.5% target and the wide Phase-A wall instead of
+        being stuck in a post-day-1 Phase B [2026-06-15 fix: reset_day was dead code + left phase
+        in B]. COUPLING -> env/trading_env.py _advance_bar() calls this on a calendar-day change."""
         self.day_start_equity = self.equity
+        self.peak_equity = self.equity
         self.target_hit = False
+        self.phase = "A"
 
     def account_block(self) -> np.ndarray:
         """The 7-scalar `account` observation block (schema order), normalized.
@@ -134,7 +151,9 @@ class ChallengeState:
         eq_norm = self.equity / self.account_size
         eq_dev = (self.equity - self.peak_equity) / self.account_size
         trailing_buf = self.remaining_buffer / self.account_size
-        daily_buf = (self.equity - self.wall_equity) / self.account_size  # same anchor (Phase A)
+        daily_buf = (self.equity - self.wall_equity) / self.account_size  # NOTE: same single wall
+        #     in EVERY phase, so pre-breach this == trailing_buf (audit). A genuine separate daily-
+        #     loss wall lands with the scale-invariant-obs rework (task #23); kept now for obs width.
         day_progress = self.day_pnl / ((self.challenge.daily_target_pct / 100.0) * self.account_size)
         overall_progress = (self.equity - self.account_size) / self.account_size
         # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 7-scalar
@@ -166,3 +185,27 @@ class ChallengeState:
 #      (re-anchor peak to post-flat equity). The env force-flattens + enters Phase B.
 #   C: Hitting target locks in the day's gain behind a tight 1% wall, exactly the
 #      challenge-style stopping behaviour that turns a good day into a banked pass-day.
+# [2026-06-15] ftmo_mode-aware wall + auto-flat (per-day inputs).
+#   I: wall/auto-flat were hard-wired to the 2-phase challenge; ftmo OFF needs a single
+#      trailing stop that runs indefinitely (no auto-flat at target).
+#   R: Operator decision 2026-06-15 (OFF = one trailing stop, compounds all day).
+#   A: wall_equity uses phase_b only when ftmo_mode AND phase B; should_autoflat requires
+#      ftmo_mode (OFF never auto-flats).
+#   C: ON keeps the protective 2-phase pass behaviour; OFF lets a strong policy keep
+#      compounding under a single trailing stop - the operator's side-account mode.
+# [2026-06-15b] OFF keeps the target as the AIM + stop_for_day toggle.
+#   I: OFF must still HAVE a target (operator: "OFF has to have a target and a trailing
+#      stop") - it drives day_progress + the success-%; it just isn't a forced stop.
+#   R: Operator correction 2026-06-15 + the earlier "stop-for-day toggle" request.
+#   A: should_autoflat: ON auto-flats at target (Phase A); OFF auto-flats ONLY if
+#      challenge.stop_for_day, else returns False so the day runs PAST the target.
+#   C: OFF aims at the target (measured by the success-%) yet compounds past it by default,
+#      with an opt-in stop to bank a side-account day - matching how the operator trades.
+# [2026-06-15c] reset_day made real (was dead code) + daily_buffer comment corrected.
+#   I: (audit) reset_day was never called and left phase in B; acct_daily_buffer == trailing.
+#   R: Logic audit 2026-06-15.
+#   A: reset_day re-anchors day_start AND peak, clears target_hit, returns to Phase A (fresh day);
+#      the env now calls it on a calendar-day change. daily_buffer comment fixed (genuine daily
+#      wall deferred to the scale-invariant-obs rework).
+#   C: Each calendar day is a fresh Phase-A 2.5%/4% challenge instead of a stuck post-day-1 Phase
+#      B - faithful multi-day simulation, which is what an honest pass-rate metric requires.

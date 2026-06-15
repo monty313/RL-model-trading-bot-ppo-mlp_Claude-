@@ -73,36 +73,62 @@ class RiskManager:
         return stop_distance * cfg.CONTRACT_SIZE.get(symbol, 1.0)
 
     def size(self, symbol: str, raw_size: float, atr_price: float,
-             available_budget: float) -> SizingResult:
+             available_budget: float, *, apply_per_trade_cap: bool = True,
+             price: float | None = None, contract: float | None = None,
+             leverage: float | None = None, free_margin: float | None = None
+             ) -> SizingResult:
         """raw_size in [0,1] -> feasible lots with committed_risk <= available_budget.
 
         ``available_budget`` is the daily-risk buffer ALREADY reduced by every open
         slot's committed risk (and, within a bar, by prior symbols' opens — the
         true-sequential B5 threading the env performs). Rounding DOWN is what makes
         the no-overshoot guarantee exact.
+
+        Two optional caps layer ON TOP, and each only ever SHRINKS lots, so the 🔴
+        no-overshoot invariant is preserved by construction:
+          * apply_per_trade_cap (ftmo_mode ON): one trade <= max_per_trade_risk_frac of
+            account. ftmo_mode OFF passes False -> no fixed cap; confidence scales the whole
+            budget and MARGIN is the real ceiling (operator decision 2026-06-15).
+          * margin (price·contract·leverage·free_margin): the broker 1:leverage ceiling.
+            max lots = free_margin·leverage / (price·contract). This is the physical cap
+            that lets ftmo-off run uncapped-but-safe.
         """
         rpl = self.risk_per_lot(symbol, atr_price)
         raw_size = float(min(max(raw_size, 0.0), 1.0))
         if rpl <= 0.0 or available_budget <= 0.0:
             return SizingResult(0.0, 0.0, rpl, False, "no budget or zero risk/lot")
 
-        per_trade_cap = self.cfg.max_per_trade_risk_frac * self.account_size
-        desired_risk = raw_size * min(per_trade_cap, available_budget)
-        desired_risk = min(desired_risk, available_budget)   # hard ceiling
+        if apply_per_trade_cap:
+            per_trade_cap = self.cfg.max_per_trade_risk_frac * self.account_size
+            desired_risk = raw_size * min(per_trade_cap, available_budget)
+        else:
+            desired_risk = raw_size * available_budget    # confidence scales the WHOLE budget
+        desired_risk = min(desired_risk, available_budget)   # hard ceiling (no overshoot)
 
         # Round DOWN to the lot step: committed = lots*rpl <= desired <= available.
         lots = math.floor((desired_risk / rpl) / self.cfg.lot_step) * self.cfg.lot_step
+
+        # Margin ceiling (1:leverage). Only ever shrinks lots; never relaxes the budget.
+        reason = "ok"
+        if leverage and price and contract and free_margin is not None:
+            margin_lots = (max(0.0, free_margin) * leverage) / (price * contract)
+            margin_lots = math.floor(margin_lots / self.cfg.lot_step) * self.cfg.lot_step
+            if margin_lots < lots:
+                lots, reason = margin_lots, "margin-capped"
+
         lots = min(lots, self.cfg.max_lot)
         lots = round(lots, 8)
         if lots < self.cfg.min_lot:
-            return SizingResult(0.0, 0.0, rpl, False, "below min lot for the buffer")
+            return SizingResult(0.0, 0.0, rpl, False,
+                                "below min lot (margin)" if reason == "margin-capped"
+                                else "below min lot for the buffer")
 
         committed = lots * rpl
         # Invariant (must hold by construction); assert to fail loud if ever violated.
         assert committed <= available_budget + 1e-6, (
             f"RiskManager overshoot: committed {committed} > budget {available_budget}"
         )
-        return SizingResult(lots, committed, rpl, True, "ok")
+        return SizingResult(lots, committed, rpl, True, reason)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,3 +145,12 @@ class RiskManager:
 #      lots rounded DOWN to lot_step; sub-min refused; invariant asserted.
 #   C: The bot literally cannot size its way past the wall — committed risk <= budget
 #      by construction — which is the mechanical foundation of not breaching, hence passing.
+# [2026-06-15] Margin ceiling (1:leverage) + mode-aware per-trade cap.
+#   I: per-trade risk was pinned to 1% of account regardless of target/DD, blocking the
+#      size head from scaling with the regime; and the sim modelled NO broker margin.
+#   R: Operator decision 2026-06-15 (no fixed caps when ftmo OFF; margin is the real cap;
+#      different leverage per account).
+#   A: size() gains apply_per_trade_cap (OFF -> confidence scales the whole budget) and an
+#      optional margin ceiling (free_margin*leverage/(price*contract)); both only SHRINK lots.
+#   C: The size head now scales risk with the regime up to the REAL physical (margin) limit,
+#      so bigger goals are pursued proportionally without ever overshooting the wall (B5 intact).

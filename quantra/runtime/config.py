@@ -203,13 +203,50 @@ class ChallengeConfig:
     the exact target/wall that were in force — never against assumed defaults.
     """
 
-    daily_target_pct: float = 2.5     # Phase-A profit that triggers auto-flat
-    daily_risk_pct: float = 4.0       # Phase-A trailing wall
-    phase_b_trailing_pct: float = 1.0  # fresh trailing wall after target (SOW §2.6)
+    daily_target_pct: float = 2.5     # Phase-A profit that triggers auto-flat (ftmo_mode)
+    daily_risk_pct: float = 4.0       # the trailing stop-loss (account-level wall). INPUT.
+    phase_b_trailing_pct: float = 1.0  # fresh trailing wall after target (ftmo_mode only, §2.6)
     pain_zone_start_pct: float = 3.5  # exponential reward Layer 3 begins here
     hard_wall_pct: float = 4.0        # force-flatten + lockout (SOW §2.7)
-    ftmo_mode: bool = True
+    ftmo_mode: bool = True            # ON: 2-phase, auto-flat at target. OFF: target is the AIM
+                                      # (drives progress + success-%) but not a forced stop — runs on.
+    stop_for_day: bool = False        # OFF-mode toggle: bank + STOP when the target is hit (else run on).
     ftmo_account_size: float = 10_000.0  # reference scaling only; policy is blind
+    leverage: float = 100.0          # account leverage (1:100). Margin = notional / leverage. INPUT.
+
+
+# Operator input bounds [decision 2026-06-15]. ftmo_mode ON keeps challenge-safe ranges;
+# OFF unlocks the wide side-account envelope (target up to 100%, trailing risk up to 40%).
+# The bot is trained scale-invariant (% space), so any (target, risk) in-range maps onto
+# the SAME normalized policy — no per-combo retraining. COUPLING -> make_challenge() clamps
+# operator input into these; live_runner.py / live_session.py build configs through it.
+FTMO_ON_BOUNDS = {"target": (0.25, 10.0), "risk": (1.0, 10.0)}
+FTMO_OFF_BOUNDS = {"target": (1.0, 100.0), "risk": (1.0, 40.0)}
+LEVERAGE_CHOICES = (50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0)
+
+
+def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *,
+                   ftmo_mode: bool = True, leverage: float = 100.0,
+                   stop_for_day: bool = False,
+                   phase_b_trailing_pct: float = 1.0, account_size: float = 10_000.0,
+                   pain_zone_start_pct: float | None = None,
+                   hard_wall_pct: float | None = None) -> "ChallengeConfig":
+    """Build a VALIDATED ChallengeConfig — the operator entry point for per-day inputs.
+
+    Clamps target/risk into the active mode's bounds, and pins the breach wall + pain
+    zone to the trailing-risk INPUT (so the reward/breach geometry follows the operator's
+    chosen stop, not a stale 3.5/4.0). ChallengeConfig stays frozen; per-day changes mean
+    constructing a fresh one (env.reset(challenge=...) / a new live session)."""
+    b = FTMO_ON_BOUNDS if ftmo_mode else FTMO_OFF_BOUNDS
+    t = float(min(max(daily_target_pct, b["target"][0]), b["target"][1]))
+    r = float(min(max(daily_risk_pct, b["risk"][0]), b["risk"][1]))
+    hw = r if hard_wall_pct is None else float(hard_wall_pct)        # wall == trailing stop input
+    pz = (0.875 * hw) if pain_zone_start_pct is None else float(pain_zone_start_pct)  # 7/8 of wall
+    return ChallengeConfig(
+        daily_target_pct=t, daily_risk_pct=r, phase_b_trailing_pct=phase_b_trailing_pct,
+        pain_zone_start_pct=pz, hard_wall_pct=hw, ftmo_mode=ftmo_mode,
+        stop_for_day=stop_for_day, ftmo_account_size=account_size,
+        leverage=max(1.0, float(leverage)))
 
 
 @dataclass(frozen=True)
@@ -329,3 +366,17 @@ def in_colab() -> bool:
 #   R: COUPLING [C1] - nominal_state_dim must equal schema.STATE_DIM (master-suite asserted).
 #   A: 185 (raw inputs on) / 167 (off).
 #   C: The benchmark + device choice stay aligned with the real observation width.
+# [2026-06-15] Per-day inputs: leverage + make_challenge() + mode bounds.
+#   I: Daily target/trailing-stop weren't per-day settable, ftmo_mode was a dead flag,
+#      and there was no leverage/margin input (operator uses 1:50..1:2000 accounts).
+#   R: Operator decision 2026-06-15 (adjustable target/risk/leverage per day; ftmo OFF
+#      unlocks the wide side-account envelope; % space so one brain scales by proportion).
+#   A: Added ChallengeConfig.leverage; FTMO_ON/OFF_BOUNDS + LEVERAGE_CHOICES; make_challenge()
+#      clamps target/risk to the mode bounds and pins wall+pain-zone to the trailing input.
+#   C: The operator can dial each account's target/stop/leverage and the bot trades the same
+#      normalized policy against it - consistent passing on the priority, safe scale when off.
+# [2026-06-15b] Added stop_for_day toggle (OFF mode).
+#   I: OFF still needs a target (the aim) but the operator may want to bank+stop at it.
+#   R: Operator correction 2026-06-15.
+#   A: ChallengeConfig.stop_for_day + make_challenge passthrough.
+#   C: OFF can either run past the target (default) or bank a side-account day on demand.

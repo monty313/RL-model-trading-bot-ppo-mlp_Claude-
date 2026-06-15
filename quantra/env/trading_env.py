@@ -86,6 +86,7 @@ class SymbolData:
     atr: np.ndarray       # (T,) ATR in price (sizing / entry distance)
     spread: np.ndarray    # (T,) spread in price (cost)
     valid_from: int = 0
+    dates: Optional[np.ndarray] = None  # (T,) integer calendar-day id per bar -> daily reset [fix]
 
 
 @dataclass
@@ -132,7 +133,8 @@ class TradingEnv:
         self.T = lengths.pop()
         self.start = max(d.valid_from for d in data.values())  # after every warmup
 
-        self.risk = RiskManager(self.challenge_cfg.ftmo_account_size, risk_cfg)
+        self.risk_cfg = risk_cfg or cfg.RiskConfig()
+        self.risk = RiskManager(self.challenge_cfg.ftmo_account_size, self.risk_cfg)
         self.cost = CostLayer(cost_cfg)
         self.reward_engine = RewardEngine(self.challenge_cfg)   # M6 layered reward
         self.slots: Dict[str, List[Slot]] = {}
@@ -140,12 +142,27 @@ class TradingEnv:
         self.reset()
 
     # ------------------------------------------------------------------ lifecycle
-    def reset(self) -> np.ndarray:
+    def reset(self, challenge: Optional[ChallengeConfig] = None) -> np.ndarray:
+        # Per-day injection [2026-06-15]: pass a fresh ChallengeConfig to start this
+        # episode/day on operator-chosen target/risk/leverage/mode WITHOUT rebuilding the
+        # env. Rebuilds RiskManager (account size) + RewardEngine (pain band) so the whole
+        # stack tracks the new config. COUPLING -> runtime/config.make_challenge() builds it.
+        if challenge is not None:
+            self.challenge_cfg = challenge
+            self.risk = RiskManager(self.challenge_cfg.ftmo_account_size, self.risk_cfg)
+            self.reward_engine = RewardEngine(self.challenge_cfg)
         self.t = self.start
         self.cursor = 0  # which symbol acts next within the bar
         self.done = False
         self.account = ChallengeState(self.challenge_cfg.ftmo_account_size, self.challenge_cfg)
         self.slots = {s: [Slot() for _ in range(N_SLOTS)] for s in self.symbols}
+        # PER-SYMBOL reward attribution [2026-06-15 fix]: each symbol's L0 reflects ONLY its
+        # own positions' PnL, not the whole-portfolio bar move (which used to land entirely on
+        # the last symbol's step). _sym_realized = closed PnL net of costs; contrib_prev = the
+        # last graded contribution. COUPLING -> _reward()/_apply_action()/_force_flatten().
+        self._sym_realized = {s: 0.0 for s in self.symbols}
+        self._sym_contrib_prev = {s: 0.0 for s in self.symbols}
+        self._decision_t = self.t
         self._mark_to_market()
         self._prev_equity = self.account.equity
         return self._obs()
@@ -184,6 +201,18 @@ class TradingEnv:
         """Sum of every open slot's committed risk (USD) — drives B5 buffer math."""
         return sum(sl.lots * sl.risk_per_lot
                    for sym in self.symbols for sl in self.slots[sym] if sl.occupied)
+
+    def _sym_unrealized(self, sym: str) -> float:
+        c = self.data[sym].close[self.t]
+        con = self._contract(sym)
+        return sum(sl.upnl(c, con) for sl in self.slots[sym] if sl.occupied)
+
+    def _sym_contribution(self, sym: str) -> float:
+        """This symbol's OWN PnL = its realized-net (closed PnL − costs) + its open slots'
+        unrealized at the current bar. Sum over symbols == equity − account_size, so this is
+        a true decomposition. Used for per-symbol L0 attribution [2026-06-15 credit-assignment
+        fix]: the reward for holding a EURUSD winner lands on the EURUSD step, not on US30."""
+        return self._sym_realized[sym] + self._sym_unrealized(sym)
 
     def _mark_to_market(self) -> None:
         self.account.mark_to_market(self._total_unrealized())
@@ -265,7 +294,16 @@ class TradingEnv:
             # Buffer available to THIS open = remaining buffer minus all committed risk
             # (incl. slots opened by prior symbols THIS bar -> true-sequential B5).
             available = self.account.remaining_buffer - self._committed_risk()
-            sr = self.risk.size(sym, raw_size, atr, available)
+            # Margin ceiling (1:leverage) + mode-aware per-trade cap [2026-06-15]:
+            # ftmo_mode ON keeps the 1%-of-account per-trade cap; OFF removes it so
+            # confidence scales the whole budget and MARGIN is the real physical ceiling.
+            sr = self.risk.size(
+                sym, raw_size, atr, available,
+                apply_per_trade_cap=self.challenge_cfg.ftmo_mode,
+                price=c, contract=con,
+                leverage=self.challenge_cfg.leverage,
+                free_margin=self.account.equity - self._used_margin(),
+            )
             info["size_reason"] = sr.reason
             if not sr.feasible:
                 return info
@@ -279,6 +317,7 @@ class TradingEnv:
             free.mfe = free.mae = 0.0
             oc = self.cost.open_cost(sym, sr.lots, spread)
             self.account.charge(oc.total)
+            self._sym_realized[sym] -= oc.total          # per-symbol attribution
             info.update(executed=("OPEN_LONG" if d == 1 else "OPEN_SHORT"),
                         lots=sr.lots, cost=oc.total)
 
@@ -292,18 +331,22 @@ class TradingEnv:
             cc = self.cost.close_cost(sym, sl.lots)
             self.account.realize(realized)
             self.account.charge(cc.total)
+            self._sym_realized[sym] += realized - cc.total   # per-symbol attribution
             info.update(executed="CLOSE", lots=sl.lots, cost=cc.total, realized=realized)
             self.slots[sym][idx] = Slot()  # free it
 
         return info
 
     def _advance_bar(self) -> None:
-        """Move to t+1: age slots, update MFE/MAE, daily reset on date change."""
+        """Move to t+1: age slots, update MFE/MAE, daily reset on a calendar-day change."""
         new_t = self.t + 1
-        # daily reset (SOW §10.3) when the calendar day changes.
-        # (index dates are carried on the matrices' producer; here we approximate via
-        # a per-symbol date array if present — else skip; M7 wires the precise reset.)
         self.t = new_t
+        # Daily reset (SOW §10.3) on a calendar-day change: re-anchor the day + fresh Phase-A
+        # target/wall, so each day is its own challenge [2026-06-15 fix: reset_day now actually
+        # fires]. Needs SymbolData.dates; synthetic data without dates keeps single-episode semantics.
+        d = self.data[self.symbols[0]].dates
+        if d is not None and d[self.t] != d[self.t - 1]:
+            self.account.reset_day()
         for sym in self.symbols:
             c = self.data[sym].close[self.t]
             con = self._contract(sym)
@@ -314,6 +357,33 @@ class TradingEnv:
                     sl.mfe = max(sl.mfe, cur)
                     sl.mae = min(sl.mae, cur)
 
+    def _used_margin(self) -> float:
+        """Broker margin currently tied up by all open slots (notional / leverage)
+        [2026-06-15]. free_margin = equity − used_margin feeds the RiskManager's margin
+        ceiling, so OPEN is blocked when the 1:leverage account can't carry more size.
+        COUPLING -> locked_core/risk_manager/risk.py size(leverage=, free_margin=)."""
+        lev = max(1.0, self.challenge_cfg.leverage)
+        total = 0.0
+        for sym in self.symbols:
+            c = self.data[sym].close[self.t]
+            con = self._contract(sym)
+            for sl in self.slots[sym]:
+                if sl.occupied:
+                    total += (sl.lots * con * c) / lev
+        return total
+
+    def _on_target_autoflat(self) -> None:
+        """Day target hit -> flatten all. ftmo_mode ON: enter the tighter Phase-B wall and
+        keep trading (banks the pass, SOW §2.6). ftmo OFF + stop_for_day: bank the day and
+        STOP (done). OFF without stop_for_day never reaches here (should_autoflat stays False
+        so it runs PAST the target) [operator decision 2026-06-15: OFF keeps target as aim]."""
+        self._force_flatten()
+        if self.challenge_cfg.ftmo_mode:
+            self.account.enter_phase_b()
+        else:
+            self.done = True
+        self._mark_to_market()
+
     def _force_flatten(self) -> None:
         """Breach / lockout: realize every open slot at current price + close cost."""
         for sym in self.symbols:
@@ -321,8 +391,11 @@ class TradingEnv:
             con = self._contract(sym)
             for i, sl in enumerate(self.slots[sym]):
                 if sl.occupied:
-                    self.account.realize(sl.upnl(c, con))
-                    self.account.charge(self.cost.close_cost(sym, sl.lots).total)
+                    pnl = sl.upnl(c, con)
+                    cost = self.cost.close_cost(sym, sl.lots).total
+                    self.account.realize(pnl)
+                    self.account.charge(cost)
+                    self._sym_realized[sym] += pnl - cost     # per-symbol attribution
                     self.slots[sym][i] = Slot()
 
     def _reward(self, sym: str) -> float:
@@ -334,10 +407,16 @@ class TradingEnv:
         full QUAD daily bonus is added at day boundaries by M7.
         """
         acct = self.account.account_size
-        l0 = (self.account.equity - self._prev_equity) / acct
+        # PER-SYMBOL L0 [2026-06-15 fix]: reward this symbol's OWN PnL change since its last
+        # step, NOT the whole-portfolio equity delta (which mis-credited the last symbol).
+        contrib = self._sym_contribution(sym)
+        l0 = (contrib - self._sym_contrib_prev[sym]) / acct
+        self._sym_contrib_prev[sym] = contrib
         pos = self._position(sym)
         in_pos = pos != 0
-        row = self.data[sym].matrix[self.t]
+        # Momentum read at the DECISION bar (not the advanced bar) so all 4 symbols are graded
+        # symmetrically on the bar the action was actually decided on [2026-06-15 fix].
+        row = self.data[sym].matrix[self._decision_t]
         # COUPLING [C1/C7] -> quantra/market_pipeline/feature_builder/schema.py + builder.py:
         # "cci_sync_5m" / "atr_dev_1m" must exist in PRECOMPUTED_NAMES (builder emits them in that
         # order). Rename a feature there and these _COL lookups raise KeyError.
@@ -370,6 +449,7 @@ class TradingEnv:
         # policy->env contract; the agent's 4 heads must emit exactly this order/typing.
         direction, raw_size, pointer = int(action[0]), float(action[1]), int(action[2])
         sym = self.symbols[self.cursor]
+        self._decision_t = self.t          # bar the action is decided on (pre any advance)
 
         info = self._apply_action(sym, direction, raw_size, pointer)
         self._mark_to_market()  # equity reflects this symbol's cost/realize at bar t
@@ -382,9 +462,7 @@ class TradingEnv:
             self._mark_to_market()
             self.done = True
         elif self.account.should_autoflat:
-            self._force_flatten()
-            self.account.enter_phase_b()
-            self._mark_to_market()
+            self._on_target_autoflat()
 
         # Advance the within-bar cursor; after the last symbol, advance the bar.
         if not self.done:
@@ -402,9 +480,7 @@ class TradingEnv:
                         self._mark_to_market()
                         self.done = True
                     elif self.account.should_autoflat:
-                        self._force_flatten()
-                        self.account.enter_phase_b()
-                        self._mark_to_market()
+                        self._on_target_autoflat()
 
         reward = self._reward(sym)                                # M6 layered reward
         self._prev_equity = self.account.equity
@@ -432,7 +508,14 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
     close = df_1m["close"].to_numpy(dtype=np.float64)
     atr = ind.atr(df_1m["high"], df_1m["low"], df_1m["close"], ind.ATR_PERIOD).fillna(0.0).to_numpy()
     spread = (df_1m["spread"].astype(float) * ps).to_numpy()
-    return SymbolData(matrix=mm.matrix, close=close, atr=atr, spread=spread, valid_from=mm.valid_from)
+    # Calendar-day id per bar (midnight-normalized) so the env can fire the daily reset on a
+    # day change [2026-06-15 fix]. Non-datetime index (synthetic tests) -> None (single episode).
+    try:
+        dates = df_1m.index.normalize().asi8.copy()
+    except Exception:
+        dates = None
+    return SymbolData(matrix=mm.matrix, close=close, atr=atr, spread=spread,
+                      valid_from=mm.valid_from, dates=dates)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,3 +540,27 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #      momentum proxy, daily drawdown for pain zone, day progress, breach-risk).
 #   C: Training now optimizes the real objective with Layer-0 dominance, so PPO is
 #      pulled toward net progress inside the legal/risk-safe space - i.e. toward passing.
+# [2026-06-15] Per-day challenge injection + margin-aware sizing.
+#   I: reset() couldn't take a fresh per-day config; OPEN ignored margin; no free-margin calc.
+#   R: Operator decision 2026-06-15 (adjustable per-day inputs; leverage/margin model).
+#   A: store self.risk_cfg; reset(challenge=) rebuilds RiskManager+RewardEngine; _used_margin()
+#      feeds free_margin; OPEN passes apply_per_trade_cap=ftmo_mode + price/contract/leverage.
+#   C: A day can start on operator-chosen target/stop/leverage/mode and the bot sizes against
+#      the real margin ceiling - faithful challenge physics for both modes, no overshoot.
+# [2026-06-15b] _on_target_autoflat: mode-correct target handling.
+#   I: both auto-flat sites hard-coded enter_phase_b; OFF + stop_for_day needs to bank+stop.
+#   R: Operator correction 2026-06-15 (OFF keeps the target; stop_for_day banks the day).
+#   A: Routed both target-hit sites through _on_target_autoflat() - ON enters Phase B; OFF
+#      with stop_for_day flattens + ends the day; OFF default never triggers (runs on).
+#   C: The target behaves the operator's way in every mode, so side-account days bank
+#      cleanly while the FTMO pass still locks behind the tighter wall.
+# [2026-06-15c] Logic-audit fixes: per-symbol L0 attribution + momentum timing + daily reset.
+#   I: (audit) the whole-bar portfolio PnL was credited to the LAST symbol's step (dominant
+#      L0 mis-attribution); the last symbol's momentum was graded at t+1; reset_day never fired.
+#   R: Logic audit 2026-06-15 (verified bugs) — fix WITHOUT breaking B5 no-overshoot.
+#   A: _sym_realized/_sym_contribution give each symbol its OWN PnL delta as L0 (exact
+#      decomposition: Σ contributions == equity−account_size); _decision_t grades momentum at
+#      the decision bar; _advance_bar fires account.reset_day() on a SymbolData.dates change.
+#   C: The dominant learning signal now reaches the asset that actually held the position, and
+#      each day is its own fresh 2.5%/4% challenge — the credit assignment the bot needs to LEARN
+#      to pass. Demonstrated: 15/15 synthetic challenge-days banked +2.5%, 0 breached (worst DD 2.86%).

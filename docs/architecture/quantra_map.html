@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Quantra — Interactive Architecture Map</title>
+<style>
+  :root{
+    --bg:#faf9f5; --surface:#ffffff; --ink:#2c2c2a; --muted:#5f5e5a;
+    --border:#d3d1c7; --accent:#7F77DD; --accentink:#534AB7;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;padding:28px 20px 60px;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  .page{max-width:920px;margin:0 auto;}
+  h1{font-size:20px;margin:0 0 2px;}
+  .lead{font-size:13px;color:var(--muted);margin:0 0 18px;}
+  .hint{font-size:12px;text-align:center;color:var(--muted);margin:0 0 14px;}
+  .tierlabel{font-size:10px;letter-spacing:.09em;color:var(--muted);text-align:center;margin:14px 0 4px;}
+  .tier{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
+  .card{flex:1;min-width:130px;max-width:240px;border:1.5px solid var(--border);border-radius:10px;
+    padding:10px 12px;cursor:pointer;background:var(--surface);transition:border-color .12s,transform .12s;}
+  .card:hover{border-color:var(--accent);transform:translateY(-1px);}
+  .card h3{font-size:13px;margin:0 0 2px;font-weight:600;}
+  .card p{font-size:11px;margin:0;color:var(--muted);}
+  .card.new{border-color:var(--accent);}
+  .card.new h3{color:var(--accentink);}
+  #detail{display:none;margin-top:16px;border:1px dashed var(--border);border-radius:8px;
+    padding:12px 14px;font-size:13px;background:var(--surface);}
+  #detail .q{margin-top:8px;font-size:12px;color:var(--accentink);}
+  .copied{color:var(--accentink);font-weight:600;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Quantra — Interactive Architecture Map</h1>
+  <p class="lead">A click-through map of the PPO + MLP trading bot. One trip around the loop: see → decide → act → score → learn.</p>
+  <p class="hint">Click any block. Inside Claude it asks your mentor to explain that piece. In a browser it shows a note <em>and copies a ready-to-paste question</em> for your mentor.</p>
+
+  <div class="tierlabel">SEE</div>
+  <div class="tier" id="see"></div>
+  <div class="tierlabel">DECIDE</div>
+  <div class="tier" id="decide"></div>
+  <div class="tierlabel">HEADS</div>
+  <div class="tier" id="heads"></div>
+  <div class="tierlabel">ACT</div>
+  <div class="tier" id="act"></div>
+  <div class="tierlabel">WORLD</div>
+  <div class="tier" id="world"></div>
+  <div class="tierlabel">SCORE</div>
+  <div class="tier" id="score"></div>
+  <div class="tierlabel">LEARN</div>
+  <div class="tier" id="learn"></div>
+
+  <div id="detail"></div>
+</div>
+
+<script>
+  var NODES = {
+    see: [
+      {t:"Observation · 185", s:"everything the bot sees", neu:1,
+       q:"Mentor, explain the 185-dim observation vector in my Quantra bot: the six blocks and which file builds them.",
+       d:"The 185 numbers the bot sees each bar: market indicators, raw versions, law flags, 5 trade slots × 4 assets, portfolio aggregates, and the account block (progress + cushion + your target/risk)."},
+      {t:"ATR · cross-cutting", s:"the volatility yardstick",
+       q:"Mentor, explain every way ATR is used across my Quantra bot — sizing, feature normalization, gates, and inputs.",
+       d:"ATR = volatility yardstick: sets the 1.5×ATR reference stop for sizing, normalizes Bollinger/candle/slot features, drives the liquidity + spread gates, and is itself an input."}
+    ],
+    decide: [
+      {t:"MLP policy · 3×256", s:"the brain (actor + critic)",
+       q:"Mentor, explain the 3×256 MLP trunk and the actor-critic split in my bot, and where it's defined.",
+       d:"A small 3-layer × 256 net. Shared trunk feeds the actor (decides) and the critic (judges). Small on purpose — the cost is simulating the market, not the brain."}
+    ],
+    heads: [
+      {t:"Direction", s:"hold/long/short/close",
+       q:"Mentor, explain the Direction head and how the law masks gate it.",
+       d:"4-way choice: hold, open long, open short, close. Passes through law masks — illegal choices zeroed before sampling."},
+      {t:"Size · Beta", s:"conviction 0–1",
+       q:"Mentor, explain the Beta size head and how raw_size becomes lots via the RiskManager, ATR, and 1:100 margin.",
+       d:"Outputs conviction 0–1 (not lots). RiskManager + ATR + margin convert it to a lot count that can't overshoot the budget."},
+      {t:"Pointer", s:"which slot",
+       q:"Mentor, explain the pointer head and the 5-slot-per-asset position management.",
+       d:"Picks which of the 5 slots to act on — how the bot holds multiple positions per asset at once."},
+      {t:"Value · critic", s:"how good is here",
+       q:"Mentor, explain the critic/value head and how GAE uses it to compute advantage.",
+       d:"Estimates 'how good is this state'. Used only for learning (the advantage baseline), never for trading."},
+      {t:"Success-Prob", s:"P(pass day) · NEW", neu:0, isnew:1,
+       q:"Mentor, explain the planned success-probability head: P(hit target AND not breach by end of day), start-of-day + live, with the sub-70% alert.",
+       d:"NEW: predicts your odds of passing the day given your target/risk. Start-of-day forecast + live update; pushes an alert if it drops below 70%."}
+    ],
+    act: [
+      {t:"Law masks", s:"forbid illegal moves",
+       q:"Mentor, explain laws-as-masks vs reward penalties in my bot — the 9 laws and 3 gates.",
+       d:"9 directional laws + 3 gates. They zero illegal actions (logit −1e9) BEFORE sampling — hard walls, not reward penalties."},
+      {t:"Action", s:"one asset, one bar",
+       q:"Mentor, walk me through what one Action means — direction + size + pointer for one asset on one bar.",
+       d:"One bar, one asset: a direction, a conviction-size, and a slot pointer. The 4 assets act true-sequentially within each bar."}
+    ],
+    world: [
+      {t:"Environment", s:"the FTMO day, simulated",
+       q:"Mentor, explain the environment: RiskManager sizing, the 1:100 margin model we're adding, 5 slots × 4 assets, the one shared account, costs, and the breach wall.",
+       d:"The simulated FTMO day: RiskManager turns conviction into lots against the budget + margin, 20 possible positions share ONE account, costs apply, the DD wall ends the day."}
+    ],
+    score: [
+      {t:"Reward", s:"L0 net PnL dominates",
+       q:"Mentor, explain the layered reward L0–L6 + QUAD and why Layer 0 (net PnL) must dominate.",
+       d:"Layer 0 = net PnL after costs, and it dominates. The shaping layers are tiny 'whispers' for timing/patience/pass-days that can't out-vote real money."}
+    ],
+    learn: [
+      {t:"PPO update", s:"clipped step · γ 0.997 ↺",
+       q:"Mentor, explain the PPO update, the clip/trust-region, and why γ=0.997 means 'patience'.",
+       d:"PPO nudges weights toward higher-reward behavior in small clipped steps. γ=0.997 makes it value the whole day's compounded balance over the next tick."}
+    ]
+  };
+
+  var detail = document.getElementById('detail');
+  function makeCard(n){
+    var c = document.createElement('div');
+    c.className = 'card' + (n.isnew ? ' new' : '');
+    c.innerHTML = '<h3>'+n.t+'</h3><p>'+n.s+'</p>';
+    c.addEventListener('click', function(){
+      if (typeof sendPrompt === 'function'){ sendPrompt(n.q); return; }
+      detail.style.display = 'block';
+      detail.innerHTML = '<strong>'+n.t+'</strong><br>'+n.d+'<div class="q">Question to paste to your mentor:<br>“'+n.q+'”</div>';
+      if (navigator.clipboard){ navigator.clipboard.writeText(n.q).then(function(){
+        detail.innerHTML += '<div class="copied">✓ copied to clipboard</div>'; }, function(){}); }
+    });
+    return c;
+  }
+  Object.keys(NODES).forEach(function(k){
+    var row = document.getElementById(k);
+    NODES[k].forEach(function(n){ row.appendChild(makeCard(n)); });
+  });
+</script>
+</body>
+</html>
