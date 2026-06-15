@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "include_raw_inputs": true,
-  "state_dim": 167,
-  "precomputed_dim": 110,
+  "state_dim": 185,
+  "precomputed_dim": 128,
   "block_widths": {
-    "market": 92,
+    "market": 110,
     "market_raw": 18,
     "law": 12,
     "trade": 35,
@@ -14,30 +14,48 @@
   "blocks": {
     "market": [
       0,
-      92
-    ],
-    "market_raw": [
-      92,
       110
     ],
-    "law": [
+    "market_raw": [
       110,
-      122
+      128
+    ],
+    "law": [
+      128,
+      140
     ],
     "trade": [
-      122,
-      157
+      140,
+      175
     ],
     "portfolio": [
-      157,
-      160
+      175,
+      178
     ],
     "account": [
-      160,
-      167
+      178,
+      185
     ]
   },
   "raw_feature_names": [
+    "boll_bb200_lo_raw_30m",
+    "boll_bb200_lo_raw_4H",
+    "boll_bb200_lo_raw_5m",
+    "boll_bb200_mid_raw_30m",
+    "boll_bb200_mid_raw_4H",
+    "boll_bb200_mid_raw_5m",
+    "boll_bb200_up_raw_30m",
+    "boll_bb200_up_raw_4H",
+    "boll_bb200_up_raw_5m",
+    "boll_bb20_lo_raw_30m",
+    "boll_bb20_lo_raw_4H",
+    "boll_bb20_lo_raw_5m",
+    "boll_bb20_mid_raw_30m",
+    "boll_bb20_mid_raw_4H",
+    "boll_bb20_mid_raw_5m",
+    "boll_bb20_up_raw_30m",
+    "boll_bb20_up_raw_4H",
+    "boll_bb20_up_raw_5m",
     "cci100_1m",
     "cci100_30m",
     "cci100_4H",
@@ -100,6 +118,24 @@
     "boll_bb200_mid_4H",
     "boll_bb200_up_4H",
     "boll_bb200_lo_4H",
+    "boll_bb20_mid_raw_5m",
+    "boll_bb20_up_raw_5m",
+    "boll_bb20_lo_raw_5m",
+    "boll_bb200_mid_raw_5m",
+    "boll_bb200_up_raw_5m",
+    "boll_bb200_lo_raw_5m",
+    "boll_bb20_mid_raw_30m",
+    "boll_bb20_up_raw_30m",
+    "boll_bb20_lo_raw_30m",
+    "boll_bb200_mid_raw_30m",
+    "boll_bb200_up_raw_30m",
+    "boll_bb200_lo_raw_30m",
+    "boll_bb20_mid_raw_4H",
+    "boll_bb20_up_raw_4H",
+    "boll_bb20_lo_raw_4H",
+    "boll_bb200_mid_raw_4H",
+    "boll_bb200_up_raw_4H",
+    "boll_bb200_lo_raw_4H",
     "cci10_1m",
     "cci10_sma_1m",
     "cci30_1m",
@@ -250,7 +286,7 @@
     "acct_day_progress",
     "acct_overall_progress"
   ],
-  "sha256": "eaec70d21733e557aa2dfaf85d25b726631dad82f93528f01cf13e2df36b6c41",
+  "sha256": "1c2c0322feefba00d3ef92e1f4bd5955cd930bd77883e8d3a733592a1758442f",
   "_llm_interpretation": {
     "purpose": "This snapshot pins the observation the PPO policy sees. Judged against repeated FTMO passing, not PnL. A drift means the policy's WORLD changed.",
     "blocks": {

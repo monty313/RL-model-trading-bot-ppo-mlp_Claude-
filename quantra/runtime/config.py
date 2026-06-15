@@ -249,7 +249,7 @@ class RuntimeConfig:
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
     # suite). 167 with raw inputs on (CCI kept raw + raw price-SMA), 149 off.
-    nominal_state_dim: int = field(default_factory=lambda: 167 if INCLUDE_RAW_INPUTS else 149)
+    nominal_state_dim: int = field(default_factory=lambda: 185 if INCLUDE_RAW_INPUTS else 167)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss
@@ -324,3 +324,8 @@ def in_colab() -> bool:
 #   R: COUPLING - config.nominal_state_dim must equal schema.STATE_DIM (master-suite asserted).
 #   A: 167 (raw inputs on) / 149 (off).
 #   C: The hardware race times the true observation width, so the device/cost choice stays honest.
+# [2026-06-15] nominal_state_dim -> 185 (raw Bollinger band levels added).
+#   I: Operator kept BOTH normalized + raw Bollinger; market 92->110, STATE_DIM 167->185.
+#   R: COUPLING [C1] - nominal_state_dim must equal schema.STATE_DIM (master-suite asserted).
+#   A: 185 (raw inputs on) / 167 (off).
+#   C: The benchmark + device choice stay aligned with the real observation width.

@@ -16,10 +16,11 @@ read raw value vs raw SMA (legal space identical, Section F tests verify). STATE
 Authoritative map in `COUPLINGS.md` (8 clusters) + inline `# COUPLING:` notes at the
 definition sites. Enforced by the change-impact tracker + the master suite.
 
-## 2. PENDING REVIEW — Bollinger normalization
-Operator is reviewing Bollinger like CCI. Current: `boll_{band}_{tf} = (close − band)/ATR14`
-(bands = SMA ± 1·std, dev=1, population std; BB20/BB200 on 5m/30m/4H), clipped ±10. Await
-operator decision (keep normalized vs raw, like CCI) before any change.
+## 2. DONE — Bollinger: keep BOTH normalized + raw (operator decision 2026-06-15) ✅
+Kept the ATR-normalized distance `boll_{band}_{tf}=(close−band)/ATR14` AND added 18 RAW
+band-level features `boll_{band}_raw_{tf}` (BB20/BB200 mid/up/lo on 5m/30m/4H, unclipped,
+in RAW_FEATURE_NAMES). Additive, observation-only — laws still read the normalized sign so
+the legal space is unchanged. STATE_DIM 167→185 (market 92→110). Snapshot re-pinned; 101 tests green.
 
 ## 3. APPROVED — NEXT: MT5 demo launcher (now unblocked)
 Operator approved ("yes"). Add a **one-command** `live_bridge` launcher tying

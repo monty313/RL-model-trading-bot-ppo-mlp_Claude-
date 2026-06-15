@@ -101,7 +101,10 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
             ("bb20_mid", bb20_mid), ("bb20_up", bb20_up), ("bb20_lo", bb20_lo),
             ("bb200_mid", bb200_mid), ("bb200_up", bb200_up), ("bb200_lo", bb200_lo),
         ]:
-            out[f"boll_{base}_{tf}"] = (c - line) / atr_tf
+            out[f"boll_{base}_{tf}"] = (c - line) / atr_tf     # NORMALIZED distance
+            # RAW band price level [operator 2026-06-15: keep both]. UNCLIPPED via
+            # RAW_FEATURE_NAMES. COUPLING: name mirrors schema._market_names boll_*_raw_*.
+            out[f"boll_{base}_raw_{tf}"] = line
 
     # --- CCI (1m/5m/30m/4H): RAW value + RAW shifted-forward SMA + sync flags ---
     # CCI is kept RAW [operator decision 2026-06-13]: NO /100, NO normalized deviation.
@@ -372,3 +375,10 @@ __all__ = [
 #      dropped raw_cci (now == cci{p}); these CCI cols are in RAW_FEATURE_NAMES (unclipped).
 #   C: The policy sees CCI's true magnitude + its 4-bar-ago smoothed location, the
 #      operator's intended trend signal, with the legal space (laws) unchanged.
+# [2026-06-15] Operator decision — emit RAW Bollinger band levels (keep both).
+#   I: Only the normalized (close-band)/ATR was emitted; operator wants the raw band too.
+#   R: Operator override; additive + observation-only (laws read the normalized sign).
+#   A: In the Bollinger loop, also emit boll_{base}_raw_{tf} = the raw band price level
+#      (unclipped via RAW_FEATURE_NAMES). 18 new features; market 92->110.
+#   C: The policy gets the raw band positions/width alongside the ATR-scaled distance,
+#      with the masks unchanged - richer volatility/structure signal, same legal space.

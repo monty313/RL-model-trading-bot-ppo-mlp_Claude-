@@ -258,13 +258,14 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_167_with_raw_cci_and_gate_ingredients():
-    # market 92 (incl. RAW CCI value + RAW cci-SMA) + 18 raw price-SMA + 12 law + 35 + 3 + 7
-    assert STATE_DIM == 167
+def test_schema_total_is_185_with_raw_cci_bollinger_and_gate_ingredients():
+    # market 110 (incl. RAW CCI value+SMA + RAW Bollinger levels) + 18 raw price-SMA
+    # + 12 law + 35 trade + 3 portfolio + 7 account = 185
+    assert STATE_DIM == 185
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
-    assert EXPECTED_WIDTHS["market"] == 92 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["market"] == 110 and EXPECTED_WIDTHS["market_raw"] == 18
     assert len(SCHEMA.feature_names) == STATE_DIM
     assert len(set(SCHEMA.feature_names)) == STATE_DIM  # names unique
 
@@ -297,8 +298,11 @@ def test_raw_block_present_finite_and_unclipped(make_1m):
     """
     mm = build_market_matrix(make_1m(n_bars=4000, seed=26))
     raw_idx = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n in RAW_FEATURE_NAMES]
-    assert len(raw_idx) == 42      # 18 raw price-SMA + 24 raw CCI (value + shifted-SMA)
+    assert len(raw_idx) == 60      # 18 raw price-SMA + 24 raw CCI + 18 raw Bollinger levels
     assert np.isfinite(mm.matrix[:, raw_idx]).all()
+    # a raw Bollinger band level exists and is a real price (unclipped, > the ±10 clip)
+    boll_raw = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n.startswith("boll_") and "_raw_" in n]
+    assert len(boll_raw) == 18
     # raw CCI value (not the cci_sma) is unbounded -> proves no clip on the raw block
     cci_cols = [i for i, n in enumerate(PRECOMPUTED_NAMES)
                 if n in RAW_FEATURE_NAMES and n.startswith("cci") and "_sma_" not in n]

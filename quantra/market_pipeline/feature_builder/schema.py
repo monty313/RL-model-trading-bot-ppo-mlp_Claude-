@@ -7,20 +7,20 @@ blocks, so the total width is fixed and asserted everywhere. This is the contrac
 the FeatureBuilder fills, the env assembles, the PPO trunk consumes, and the
 TelemetryLogger labels (the data contract requires "grouped feature block names").
 
-Block widths (default INCLUDE_RAW_INPUTS=True -> total 167):
-    market      92   market+time + 3 gate ingredients + RAW CCI value & RAW shifted-SMA(CCI)
+Block widths (default INCLUDE_RAW_INPUTS=True -> total 185):
+    market     110   market+time + gate ingredients + RAW CCI(value & SMA) + RAW Bollinger levels
     market_raw  18   RAW price-SMA inputs (operator-directed; precomputed)
     law         12   9 laws + 3 gates (filled by LawMask, M3)
     trade x5    35   7 features x 5 slots (env, M4)
     portfolio    3   aggregates across slots (env, M4)
     account      7   equity/buffers + 2 challenge-progress (env, M4)
     ------------------
-    TOTAL      167   (149 when INCLUDE_RAW_INPUTS=False)
+    TOTAL      185   (167 when INCLUDE_RAW_INPUTS=False)
 
 CCI is kept RAW (operator decision 2026-06-13): no /100, no normalized deviation —
 the raw CCI value + its raw shifted-forward SMA(2, shift4) are exposed so the policy
 compares CCI to its location 4 bars ago. Those CCI columns are in RAW_FEATURE_NAMES
-(unclipped). The first TWO blocks (market + market_raw = 110) are action-independent
+(unclipped). The first TWO blocks (market + market_raw = 128) are action-independent
 and are the FeatureBuilder's precomputed output (``PRECOMPUTED_NAMES`` / ``PRECOMPUTED_DIM``).
 
 OPERATOR OVERRIDE [2026-06-13]
@@ -89,7 +89,14 @@ def _market_names() -> List[str]:
     names: List[str] = []
     for tf in BOLL_TFS:
         for band in _BB_BANDS:
-            names.append(f"boll_{band}_{tf}")
+            names.append(f"boll_{band}_{tf}")          # NORMALIZED: (close - band) / ATR14
+    # RAW Bollinger band levels [operator decision 2026-06-15: keep BOTH the normalized
+    # ATR-scaled distance AND the unnormalized raw band PRICE level]. UNCLIPPED (price
+    # levels) -> in RAW_FEATURE_NAMES; the M5 agent standardizes them.
+    # COUPLING [C1] -> builder._compute_tf_features (emits these), RAW_FEATURE_NAMES (below).
+    for tf in BOLL_TFS:
+        for band in _BB_BANDS:
+            names.append(f"boll_{band}_raw_{tf}")        # RAW band price level
     # CCI kept RAW [operator decision 2026-06-13]: expose the raw CCI value AND its
     # raw shifted-forward SMA (period 2, shift 4) so the policy compares current CCI
     # against the CCI's location 4 bars ago — NOT a normalized deviation. No /100.
@@ -241,14 +248,14 @@ SCHEMA = build_schema()
 # quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
 # (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
 # logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
-STATE_DIM = SCHEMA.dim                                   # 167 (raw on) / 149 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 185 (raw on) / 167 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
 # COUPLING: this ORDER is the FeatureBuilder's output column order AND the index map
 # used by laws._IDX, env._COL, and the live session. Reorder here => reorder there.
 PRECOMPUTED_NAMES = SCHEMA.blocks["market"] + SCHEMA.blocks["market_raw"]
-PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 110 (raw on) / 92 (raw off)
+PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 128 (raw on) / 110 (raw off)
 
 # Backwards-compatible aliases (the normalized block only).
 MARKET_NAMES = SCHEMA.blocks["market"]
@@ -262,13 +269,15 @@ MARKET_DIM = len(MARKET_NAMES)
 # block but are listed here too (they are raw, ~[-300,300]).
 _RAW_CCI_NAMES = ([f"cci{p}_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS]
                   + [f"cci{p}_sma_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS])
-RAW_FEATURE_NAMES = set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES)
+# RAW Bollinger band levels [operator 2026-06-15] are price levels -> also unclipped.
+_RAW_BOLL_NAMES = [f"boll_{band}_raw_{tf}" for tf in BOLL_TFS for band in _BB_BANDS]
+RAW_FEATURE_NAMES = set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES) | set(_RAW_BOLL_NAMES)
 
 # Canonical block widths — asserted by the master suite so a refactor can't silently
 # drop a challenge-critical feature. COUPLING: must equal the real block_spans; the
 # master suite (Section D) asserts both, and config.nominal_state_dim must equal STATE_DIM.
 EXPECTED_WIDTHS = {
-    "market": 92,  # 89 market+time + 3 gate ingredients (spread x2, adf) [M3]
+    "market": 110,  # 92 + 18 RAW Bollinger band levels [operator 2026-06-15: keep both]
     "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
     "law": 12, "trade": 35, "portfolio": 3, "account": 7,
 }
@@ -353,3 +362,12 @@ def state_vector_fingerprint() -> dict:
 #      Sign-identical so the laws' legal space is UNCHANGED (laws read raw value vs raw SMA).
 #   C: The policy sees CCI's true magnitude + its 4-bar-ago smoothed location in raw form
 #      (the operator's intended trend signal) with law semantics intact.
+# [2026-06-15] Operator decision — Bollinger: keep BOTH normalized + raw.
+#   I: Bollinger was only ATR-normalized distance (close-band)/ATR; operator wants the
+#      unnormalized data kept too.
+#   R: Operator override (additive, observation-only; laws still read the normalized
+#      distance sign, so the legal space is unchanged).
+#   A: Added 18 RAW band-level features boll_{band}_raw_{tf} (BB20/BB200 mid/up/lo on
+#      5m/30m/4H) in RAW_FEATURE_NAMES (unclipped); market 92->110, STATE_DIM 167->185.
+#   C: The policy sees both the ATR-relative band distance AND the raw band positions/width
+#      (volatility in price terms) - more signal, with the masks/legal space untouched.
