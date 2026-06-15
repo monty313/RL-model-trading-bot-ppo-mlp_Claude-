@@ -18,6 +18,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# HONEST-OUTPUT FIX: the report contains em-dashes / box glyphs. On Windows the console
+# defaults to cp1252 and mangles them (— -> "ﾄ"), which makes an "honest report" look
+# corrupt. Force UTF-8 on stdout/stderr so the report renders exactly as written.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # py3.7+; no-op if already utf-8
+    except (AttributeError, ValueError):
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quantra.runtime import config as cfg                                      # noqa: E402
