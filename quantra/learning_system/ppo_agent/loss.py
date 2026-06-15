@@ -78,7 +78,9 @@ def ppo_loss(
             "policy_obj": float(policy_obj),
             "value_loss": float(value_loss),
             "entropy": float(entropy_bonus),
-            "approx_kl": float((logp_old - new_logp).mean()),
+            # Schulman k3 KL estimator: E[(r-1) - log r] — always >= 0, lower variance than
+            # the naive (logp_old - new_logp) mean [2026-06-15: diagnostic robustness].
+            "approx_kl": float(((ratio - 1.0) - (new_logp - logp_old)).mean()),
             "clip_frac": float(((ratio - 1.0).abs() > clip_eps).float().mean()),
             "ratio_mean": float(ratio.mean()),
         }
@@ -99,3 +101,10 @@ def ppo_loss(
 #   C: Each update is a correct, small trust-region step on the legal policy, so the
 #      patient law-bounded behaviour improves toward passing without lurching into a
 #      breach-prone regime.
+# [2026-06-15] approx_kl -> Schulman k3 estimator (diagnostic robustness).
+#   I: approx_kl used the naive (logp_old - new_logp).mean(), which can go negative and is
+#      higher-variance — a noisier training-health signal for the Risk Doctor's KL reads.
+#   R: Canonical PPO (Schulman): KL ≈ E[(r-1) - log r], always >= 0, lower variance. Loss math unchanged.
+#   A: approx_kl = ((ratio-1) - (new_logp - logp_old)).mean(); policy/value/entropy terms untouched.
+#   C: A trustworthy KL trace makes instability (Representation Chaos) easier to catch early,
+#      protecting the patient policy — and thus the pass rate. (Full actor/critic audit pending.)

@@ -1641,65 +1641,44 @@ def test_daily_reset_fires_on_calendar_day_change():
     assert env.account.phase == "A" and env.account.target_hit is False
 
 
-def _favorable_day(seed, T=160, up=True):
-    """A trending synthetic day (up if up=True) — a winning opportunity for a long/short."""
-    rng = np.random.default_rng(seed)
-    drift = (0.0004 if up else -0.0004)
-    steps = 1.0 + rng.normal(drift, 0.0006, T)
-    close = (1.20 * np.cumprod(steps)).astype(float)
-    return {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 6e-4),
-                                 np.full(T, 2e-5), valid_from=0)}
+# =============================================================================
+# SECTION V — REAL-DATA BACKTEST (2026-06-15). NO synthetic pass-claims.
+# FTMO link: the ONLY performance proof is on REAL MT5 bars via scripts/real_backtest.py.
+# (1) unit-test the MT5-style report math (ground-truth net = final − account, incl. the
+# breach force-flatten). (2) a gated real backtest, run only when the real CSV is present
+# AND QUANTRA_REAL_BACKTEST=1, so the suite stays fast + offline by default. The synthetic
+# "demonstration" tests were REMOVED — a real backtest already showed the trailing wall can
+# be overshot, so fake favorable-data pass claims have no place here.
+# =============================================================================
+from scripts.real_backtest import compute_stats  # noqa: E402
 
 
-def test_DEMONSTRATION_consistent_2p5pct_target_without_4pct_breach():
-    """DEMONSTRATION (boss check): across N independent challenge-days where the bot captures
-    a real trend, it banks the +2.5% target (auto-flat) and NEVER lets the trailing drawdown
-    exceed 4%. Run with -s to see the per-day table. Proves the challenge LOGIC + risk rails
-    deliver consistent passing; finding the trend on REAL markets is the training milestone."""
-    N = 15
-    passes, breaches, rets, max_dd = 0, 0, [], 0.0
-    print("\n  day | target_hit | breached | peak_dd% | day_return%")
-    for seed in range(N):
-        data = _favorable_day(seed)
-        env = TradingEnv(data)                       # default RiskConfig (1% per-trade)
-        env.reset()
-        peak_dd = 0.0
-        done = False
-        while not done:
-            if env._n_open("EURUSD") == 0 and not env.account.target_hit:
-                action = (OPEN_LONG, 1.0, 0)         # competent: ride the up-trend
-            else:
-                action = (HOLD, 0.0, 0)
-            _, _, done, _ = env.step(action)
-            dd = (env.account.peak_equity - env.account.equity) / env.account.account_size * 100.0
-            peak_dd = max(peak_dd, dd)
-        ret = (env.account.equity - env.account.account_size) / env.account.account_size * 100.0
-        rets.append(ret); max_dd = max(max_dd, peak_dd)
-        passes += int(env.account.target_hit); breaches += int(env.account.breached)
-        print(f"  {seed:>3} | {str(env.account.target_hit):>10} | {str(env.account.breached):>8} "
-              f"| {peak_dd:>7.2f} | {ret:>10.2f}")
-        assert peak_dd <= 4.0 + 1e-6                 # the 4% trailing wall is NEVER exceeded
-    print(f"  => {passes}/{N} days banked +2.5% | {breaches}/{N} breached | "
-          f"worst DD {max_dd:.2f}% | mean return {np.mean(rets):.2f}%")
-    assert breaches == 0                             # CONSISTENT: zero breaches across all days
-    assert passes == N                               # CONSISTENT: every day hit the +2.5% target
+def test_backtest_report_math_is_correct():
+    """MT5-style stats on a KNOWN trade list + equity curve: net is the GROUND-TRUTH equity
+    change (not just the agent's closes), plus profit factor / win% / max drawdown."""
+    trades = [100.0, -40.0, 60.0, -20.0]
+    equity = [10000.0, 10100.0, 10060.0, 10120.0, 10100.0]
+    s = compute_stats(trades, equity, account_size=10000.0)
+    assert s["closed_net"] == 100.0                  # 100 - 40 + 60 - 20
+    assert s["net"] == 100.0                          # final 10100 - 10000 (ground truth)
+    assert s["forced"] == 0.0                          # closed == equity change here
+    assert s["gp"] == 160.0 and s["gl"] == -60.0
+    assert abs(s["pf"] - 160.0 / 60.0) < 1e-9
+    assert abs(s["win"] - 50.0) < 1e-9                # 2 of 4 wins
+    assert abs(s["maxdd"] - 40.0) < 1e-9              # peak 10100 -> dip 10060 = 40
 
 
-def test_protection_path_loss_is_capped_at_the_wall_no_overshoot():
-    """The other side of consistency: on a LOSING day, the trailing wall force-flattens at ~4%
-    and the loss never overshoots it — the account is protected to fight another day."""
-    data = _favorable_day(0, up=False)               # a down-trending day vs an always-long bot
-    env = TradingEnv(data)
-    env.reset()
-    done = False
-    worst = 0.0
-    while not done:
-        action = (OPEN_LONG, 1.0, 0) if env._n_open("EURUSD") == 0 else (HOLD, 0.0, 0)
-        _, _, done, _ = env.step(action)
-        loss = (env.account.account_size - env.account.equity) / env.account.account_size * 100.0
-        worst = max(worst, loss)
-    # the wall caps the loss near 4% (a small bar-overshoot is allowed, but nowhere near a blow-up)
-    assert worst <= 4.5                              # never a catastrophic loss; the rail holds
+def test_real_backtest_runs_on_real_bars_when_enabled():
+    """Gated REAL proof: with data/raw/EURUSD_recent.csv present AND QUANTRA_REAL_BACKTEST=1,
+    run the harness end-to-end on real bars and assert it emits a self-consistent report.
+    Skipped by default (the real run is `python scripts/real_backtest.py`)."""
+    if not os.path.exists("data/raw/EURUSD_recent.csv") or os.environ.get("QUANTRA_REAL_BACKTEST") != "1":
+        pytest.skip("set QUANTRA_REAL_BACKTEST=1 with data/raw/EURUSD_recent.csv present")
+    import subprocess
+    import sys as _sys
+    r = subprocess.run([_sys.executable, "scripts/real_backtest.py", "--updates", "0"],
+                       capture_output=True, text=True, timeout=600)
+    assert "QUANTRA BACKTEST" in r.stdout and "GROUND TRUTH" in r.stdout
 
 
 # Allow `python tests/test_ftmo_master_suite.py` to run the whole suite directly.
@@ -1869,3 +1848,13 @@ if __name__ == "__main__":  # pragma: no cover
 #      0 breach the 4% wall, plus a losing-day protection check (loss capped at the wall). 5 tests.
 #   C: The post-fix challenge LOGIC provably delivers consistent passing mechanics (banks the
 #      target, never overshoots the wall) - the rails the trained policy needs to pass for real.
+# [2026-06-15] Removed FAKE synthetic demonstrations; added Section V (REAL-DATA backtest).
+#   I: The synthetic "banks 2.5%/3% consistently" demonstrations were rigged favorable data
+#      (operator: "no fake tests"); a REAL backtest on REAL EURUSD bars even DISPROVED the
+#      "loss never overshoots the wall" protection test (it hit 11% DD on a 4% wall).
+#   R: Operator directive 2026-06-15: real proof only, on real MT5 bars (scripts/real_backtest.py).
+#   A: Deleted the 15-day demonstration + protection + _favorable_day. Added Section V: a
+#      unit test of the MT5-style report math (ground-truth net = final-account) + a gated
+#      real backtest (runs only with the real CSV + QUANTRA_REAL_BACKTEST=1).
+#   C: The suite no longer claims a pass it can't honestly back; performance is measured on
+#      REAL bars, so what we report about passing FTMO is true - not a fitted illusion.
