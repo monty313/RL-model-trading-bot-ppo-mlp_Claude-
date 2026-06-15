@@ -46,6 +46,8 @@ from quantra.runtime import config as cfg
 
 # Canonical output columns. Every loaded symbol frame has exactly these, indexed
 # by a tz-naive UTC DatetimeIndex named "time" (bar OPEN time, MT5 convention).
+# COUPLING [C5] -> resampler/resampler.py (_AGG keys), feature_builder/builder.py, locked_core/cost_layer/costs.py, env/trading_env.py:
+# these exact column names/order ("spread","tick_volume",...) are aggregated/read downstream; rename or reorder breaks all of them.
 OHLCV_COLUMNS = ["open", "high", "low", "close", "tick_volume", "spread"]
 
 # Synonyms we accept for each canonical field (normalized: lowercased, stripped of
@@ -65,6 +67,8 @@ _COLUMN_SYNONYMS: Dict[str, List[str]] = {
 }
 
 
+# COUPLING [C8] -> diagnostics/telemetry_logger/logger.py: these LoadReport field
+# names/order are recorded into telemetry/run logs the LLM Risk Doctor reads; renaming a field breaks that contract.
 @dataclass
 class LoadReport:
     """Provenance of a loaded symbol frame — recorded into telemetry/run logs."""
@@ -180,6 +184,8 @@ def parse_mt5_csv(path: Path) -> tuple[pd.DataFrame, dict]:
     dropped = before - len(out)
 
     had_spread = bool((out["spread"] != 0).any())
+    # COUPLING (file-local) -> load_symbol below: these meta dict keys
+    # ("delimiter","dropped_duplicates","had_spread") and the (df, meta) tuple order are unpacked there into LoadReport.
     meta = {"delimiter": delimiter, "dropped_duplicates": dropped, "had_spread": had_spread}
     return out[OHLCV_COLUMNS], meta
 
@@ -194,6 +200,8 @@ def _resolve_raw_path(symbol: str, explicit: Optional[Path]) -> tuple[Path, str]
     if explicit is not None:
         return Path(explicit), "local"
 
+    # COUPLING [C5] -> runtime/config.py: DRIVE_FILENAMES/DRIVE_FILE_IDS/DRIVE_FOLDER_NAME
+    # are per-symbol keyed by config.SYMBOLS; adding a symbol there requires entries in all those dicts or resolution fails here.
     filename = cfg.DRIVE_FILENAMES.get(symbol, f"{symbol}_M1.csv")
 
     # 1. already in data/raw, or any {symbol}_M1_*.csv there
@@ -228,6 +236,8 @@ def _resolve_raw_path(symbol: str, explicit: Optional[Path]) -> tuple[Path, str]
     return dest, "gdown"
 
 
+# COUPLING -> feature_builder/builder.py (df_1m, _ = load_symbol(symbol)) + load_all below:
+# the (df, LoadReport) return-tuple order is unpacked by those callers; flipping it silently swaps frame for report.
 def load_symbol(
     symbol: str,
     path: Optional[Path] = None,
@@ -266,6 +276,8 @@ def load_symbol(
 
 def load_all(symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
     """Load every configured symbol. Used by the env/feature precompute (M2/M4)."""
+    # COUPLING [C5] -> runtime/config.py: SYMBOLS is the canonical per-symbol list; the
+    # cost/risk/env per-symbol dicts must stay keyed by the same set or load_all yields symbols those layers can't price.
     symbols = symbols or cfg.SYMBOLS
     return {s: load_symbol(s)[0] for s in symbols}
 

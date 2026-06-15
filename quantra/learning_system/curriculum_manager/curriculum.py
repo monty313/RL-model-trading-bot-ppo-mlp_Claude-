@@ -34,8 +34,15 @@ from typing import List, Optional
 
 import numpy as np
 
+# COUPLING [C4] -> locked_core/laws/laws.py: LAW_NAMES order/strings drive _trend_laws/
+# _pullback_laws (substring match) and the LAW_NAMES[:9] directional slice below; if laws.py
+# renames a law or reorders the 12 names, the stage required_laws change silently.
 from quantra.locked_core.laws.laws import LAW_NAMES
+# COUPLING [C1] -> market_pipeline/feature_builder/schema.py: STATE_DIM sizes feature_mask;
+# PRECOMPUTED_NAMES order resolves the _EARLY_MASK_1M indices (guarded but order-sensitive).
 from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES, STATE_DIM
+# COUPLING -> market_pipeline/law_mask_engine/engine.py: MODE_LIVE/MODE_SCHOOL are the
+# enforcement-mode constants the env (trading_env.py) expects in law_school_config().
 from quantra.market_pipeline.law_mask_engine.engine import MODE_LIVE, MODE_SCHOOL
 
 # 1m TIMING features masked in early stages (structure-first). We KEEP the law-binding
@@ -72,6 +79,8 @@ def _pullback_laws() -> List[str]:
 DEFAULT_STAGES: List[Stage] = [
     Stage("trend", _trend_laws(), stationarity_mode=None, mask_1m=True),
     Stage("reversion", _pullback_laws(), stationarity_mode=None, mask_1m=True),
+    # COUPLING [C4] -> locked_core/laws/laws.py: LAW_NAMES[:9] assumes the first 9 names are
+    # the DIRECTIONAL laws and [9:] the 3 gates (mirrored by law_mask_engine [:9]/[9:]).
     Stage("stationarity_atr", LAW_NAMES[:9], stationarity_mode="A", mask_1m=False),
 ]
 
@@ -89,6 +98,8 @@ class CurriculumManager:
 
     def law_school_config(self) -> dict:
         """Env kwargs for the current stage: live-ban after graduation, else school."""
+        # COUPLING -> env/trading_env.py: these dict KEYS (mask_mode, required_laws,
+        # stationarity_mode) are spread as TradingEnv constructor kwargs of the same name.
         st = self.current_stage()
         if st is None:
             return {"mask_mode": MODE_LIVE, "required_laws": None, "stationarity_mode": "A"}
@@ -102,6 +113,8 @@ class CurriculumManager:
         timing — forcing structure-first learning (fewer fragile micro-entries that
         breach). After mask_1m stages it is all ones.
         """
+        # COUPLING [C1] -> trainer/trainer.py: returns a (STATE_DIM,) array the trainer
+        # element-wise multiplies against each obs; its length MUST equal the obs width.
         mask = np.ones(STATE_DIM, dtype=np.float32)
         st = self.current_stage()
         if st is not None and st.mask_1m:

@@ -50,6 +50,8 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor, dones: torch.Tensor
         gae = delta + gamma * lam * nonterminal * gae
         adv[t] = gae
     returns = adv + values
+    # COUPLING -> trainer/trainer.py: update() unpacks this as (adv, ret) positionally
+    # and feeds both into ppo_loss(advantages, returns); keep this 2-tuple order.
     return adv, returns
 
 

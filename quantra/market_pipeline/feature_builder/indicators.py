@@ -38,6 +38,10 @@ import pandas as pd
 
 # Locked parameters (SOW-D4). Changing any of these changes the legal space and
 # MUST go through Monty (🔴) — see THE_TRADING_CODE.md.
+# COUPLING [C7] -> quantra/market_pipeline/feature_builder/builder.py + quantra/locked_core/laws/laws.py:
+# builder._compute_tf_features reads these exact names (SHIFT, SSMA_PERIOD, ATR_PERIOD,
+# ATR_REF_PERIOD, CCI_APPLIED_SMA, BB_FAST/BB_SLOW/BB_DEV, CCI_PERIODS) to emit features,
+# and the laws' semantics assume the same values. Rename/change a param => fix builder + laws.
 SHIFT = 4
 SSMA_PERIOD = 4
 ATR_PERIOD = 14
@@ -138,6 +142,9 @@ def candle_structure(o, h, l, c, atr_1m):
 
 # Dickey-Fuller 5% critical value (with constant). stat < this => reject unit root
 # => stationary (mean-reverting). Used by the Stationarity Regime Gate (F4: p<0.05).
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py: imported there (gate_stationarity
+# threshold compares adf_stat_1m < ADF_CRIT_5PCT). Change this value => gate fires on a
+# different regime boundary; keep in sync with the F4 spec.
 ADF_CRIT_5PCT = -2.86
 
 

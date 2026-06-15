@@ -26,6 +26,8 @@ def main() -> None:
     cfg = RuntimeConfig()
     print(f"Environment: {'Google Colab' if in_colab() else 'local'}")
     print(f"Symbols    : {', '.join(cfg.symbols)}")
+    # COUPLING [C5] -> config.py ChallengeConfig: reads field names daily_target_pct,
+    # daily_risk_pct, ftmo_mode; renaming any in config.py breaks this banner.
     print(
         f"Challenge  : target {cfg.challenge.daily_target_pct}% / "
         f"risk {cfg.challenge.daily_risk_pct}% trailing | ftmo_mode={cfg.challenge.ftmo_mode}"
@@ -33,6 +35,8 @@ def main() -> None:
 
     # Measure utilisation across the benchmark itself so the report reflects a
     # real load, not an idle sample.
+    # COUPLING [C1] -> config.py: passes cfg.nominal_state_dim as the benchmark width; that
+    # value must equal feature_builder.schema.STATE_DIM or the race times the wrong shape.
     with UtilizationMonitor(interval=0.25) as mon:
         hw = plan(state_dim=cfg.nominal_state_dim, hw=cfg.hardware)
     util = mon.stop()

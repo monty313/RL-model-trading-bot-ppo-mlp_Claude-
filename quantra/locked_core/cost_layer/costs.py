@@ -31,6 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# COUPLING [C5] -> runtime/config.py: reads the per-symbol dicts CONTRACT_SIZE / SLIPPAGE_POINTS /
+# POINT_SIZE / ASSET_CLASS (all keyed by config.SYMBOLS) + DEFAULT_POINT_SIZE, and cfg.CostConfig
+# (commissioned_classes, commission_per_lot_rt_forex). Renaming a config field/key breaks costing.
 from quantra.runtime import config as cfg
 
 
@@ -38,6 +41,9 @@ from quantra.runtime import config as cfg
 class FillCosts:
     """Itemised costs of one fill (open or close), in USD — logged for telemetry."""
 
+    # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py: these field names (spread/slippage/
+    # commission/total) are the per-fill cost contract the telemetry logger + interpreter read.
+    # Renaming a field changes the logged cost schema other diagnostics tools depend on.
     spread: float = 0.0
     slippage: float = 0.0
     commission: float = 0.0
@@ -58,11 +64,16 @@ class CostLayer:
 
     def _slippage_usd(self, symbol: str, lots: float) -> float:
         """Fixed slippage points -> price -> USD, charged on every fill."""
+        # COUPLING [C5] -> runtime/config.py: SLIPPAGE_POINTS[symbol] + POINT_SIZE[symbol] (per-symbol
+        # dicts keyed by config.SYMBOLS). A missing key silently falls back (0.0 / DEFAULT_POINT_SIZE)
+        # and undercharges; keep both dicts' keys == config.SYMBOLS when adding/removing a symbol.
         pts = cfg.SLIPPAGE_POINTS.get(symbol, 0.0)
         point = cfg.POINT_SIZE.get(symbol, cfg.DEFAULT_POINT_SIZE)
         return pts * point * self._contract(symbol) * lots
 
     def _pays_commission(self, symbol: str) -> bool:
+        # COUPLING [C5] -> runtime/config.py: ASSET_CLASS[symbol] decides forex (pays $5 RT) vs
+        # metals/indices (none); its values must match cfg.CostConfig.commissioned_classes membership.
         return cfg.ASSET_CLASS.get(symbol, "forex") in self.cfg.commissioned_classes
 
     def open_cost(self, symbol: str, lots: float, spread_price: float) -> FillCosts:

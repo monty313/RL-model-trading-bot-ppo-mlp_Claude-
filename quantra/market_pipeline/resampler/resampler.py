@@ -34,8 +34,12 @@ import pandas as pd
 
 # Pandas offset aliases for the higher timeframes the laws/observation use.
 # 1m is the base/decision frame (PPO acts every 1m bar, SOW C4/B4).
+# COUPLING [C1] -> feature_builder/builder.py (iterates ("5m","30m","4H") + frames[tf]) and feature_builder/schema.py:
+# these TF keys become the _5m/_30m/_4H feature-name suffixes; adding/renaming a TF changes FEATURE_NAMES width and all C1 consumers.
 TIMEFRAMES: Dict[str, str] = {"5m": "5min", "30m": "30min", "4H": "4h"}
 
+# COUPLING [C5] -> data_loader/loader.py: these aggregation keys must match OHLCV_COLUMNS
+# exactly; a column the loader emits but _AGG omits is silently dropped from every higher-TF bar.
 _AGG = {
     "open": "first",
     "high": "max",
@@ -69,6 +73,8 @@ def build_all_timeframes(df_1m: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     The 1m frame is passed through unchanged (it is the decision frame); the rest
     are close-time-stamped higher-TF aggregations ready for ``as_of_higher_tf``.
     """
+    # COUPLING [C1] -> feature_builder/builder.py: caller reads frames["1m"] and frames[tf]
+    # for tf in ("5m","30m","4H"); these dict keys must stay identical to TIMEFRAMES + "1m" or the builder KeyErrors.
     frames: Dict[str, pd.DataFrame] = {"1m": df_1m}
     for name, freq in TIMEFRAMES.items():
         frames[name] = resample_ohlcv(df_1m, freq)
@@ -89,6 +95,8 @@ def as_of_higher_tf(
     """
     base = pd.DataFrame(index=base_index)
     base.index.name = "time"
+    # COUPLING [C1] -> feature_builder/builder.py + feature_builder/schema.py: add_suffix(f"_{suffix}")
+    # builds the "_5m"/"_30m"/"_4H" column names the builder selects and schema lists in FEATURE_NAMES; the suffix format is load-bearing.
     merged = pd.merge_asof(
         base.reset_index(),
         higher.add_suffix(f"_{suffix}").reset_index(),

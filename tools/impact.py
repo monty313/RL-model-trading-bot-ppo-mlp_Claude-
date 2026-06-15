@@ -36,8 +36,14 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# COUPLING -> quantra/ package root: PKG names the import namespace; _module_name/_imports_of/
+# build_graph only trace modules under this prefix. Renaming the top-level package breaks the graph.
 PKG = "quantra"
 
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/{schema,builder,indicators}.py +
+# runtime/config.py + resampler/resampler.py + data_loader/loader.py: these dict keys are
+# repo-relative path SUBSTRINGS matched against changed files; if any of those files moves/renames,
+# the matching key here must move too or the follow-up checklist silently stops firing.
 # Static map: when a file matching the substring changes, these FTMO-framed
 # follow-ups apply regardless of the import graph.
 PIPELINE_FOLLOWUPS: Dict[str, List[str]] = {
@@ -178,6 +184,10 @@ def report(changed: List[str]) -> str:
         for key, items in PIPELINE_FOLLOWUPS.items():
             if key in c.replace("\\", "/"):
                 followups.extend(items)
+    # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py + tools/snapshot.py:
+    # any change under feature_builder/ (or any 'schema' file) implies an observation-layout
+    # ripple; this hard-codes that the snapshot guard must be re-run. Keep in sync if the
+    # observation-defining module is ever renamed away from 'feature_builder'/'schema'.
     if any("feature_builder" in c or "schema" in c for c in changed):
         followups.append("Always: the master suite Section D + snapshot test must stay green.")
     lines.append("Required follow-ups:")

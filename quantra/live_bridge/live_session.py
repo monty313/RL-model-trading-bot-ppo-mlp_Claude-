@@ -36,12 +36,18 @@ import numpy as np
 import pandas as pd
 import torch
 
+# COUPLING -> quantra/env/trading_env.py: reuses the Slot dataclass; its fields
+# (occupied, direction, entry_price, lots, risk_per_lot, age, mfe, mae) + upnl() are read below to mirror env.
 from quantra.env.trading_env import Slot
+# COUPLING [C5] -> quantra/ftmo_passing/challenge_state.py: uses ChallengeState.account_block()
+# (its block ORDER must match schema account names, C1) + realize/mark_to_market/equity/wall_equity.
 from quantra.ftmo_passing.challenge_state import ChallengeState
 from quantra.learning_system.ppo_agent.agent import PPOAgent
 from quantra.live_bridge.execution_adapter import ExecutionAdapter
 from quantra.live_bridge.manual_halt import ManualHalt
 from quantra.locked_core.risk_manager.risk import RiskManager
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: rebuilds the obs from
+# STATE_DIM/assemble_state; block ORDER here must equal schema/env, else live obs != trained obs.
 from quantra.market_pipeline.feature_builder import (
     PRECOMPUTED_NAMES,
     STATE_DIM,
@@ -49,8 +55,12 @@ from quantra.market_pipeline.feature_builder import (
     build_market_matrix,
 )
 from quantra.market_pipeline.feature_builder import indicators as _ind
+# COUPLING [C3] -> quantra/market_pipeline/feature_builder/schema.py: N_SLOTS must equal
+# execution_adapter.N_SLOTS + env slot count + ppo pointer width (trade block 7*5=35).
 from quantra.market_pipeline.feature_builder.schema import N_SLOTS
 from quantra.locked_core.laws.laws import compute_law_states
+# COUPLING [C2] -> quantra/market_pipeline/law_mask_engine/engine.py: direction ints + mask
+# builders; the {OPEN_LONG=1,OPEN_SHORT=2,CLOSE=3} mapping must match agent head + env + live_runner.
 from quantra.market_pipeline.law_mask_engine.engine import (
     CLOSE,
     OPEN_LONG,
@@ -116,6 +126,8 @@ class LivePortfolio:
         self.price: Dict[str, float] = {s: 0.0 for s in self.symbols}
         self.atr: Dict[str, float] = {s: 1e-9 for s in self.symbols}
 
+    # COUPLING [C5] -> quantra/runtime/config.py: CONTRACT_SIZE is keyed by config.SYMBOLS
+    # (same per-symbol dict env/cost_layer use); a symbol missing here silently falls back to 1.0.
     def _contract(self, sym: str) -> float:
         return cfg.CONTRACT_SIZE.get(sym, 1.0)
 
@@ -154,6 +166,9 @@ class LivePortfolio:
         self.slots[sym][slot_idx] = Slot()
 
     # obs blocks (same layout as the env)
+    # COUPLING [C1][C3] -> quantra/market_pipeline/feature_builder/schema.py (trade block 7*N_SLOTS=35)
+    # + quantra/env/trading_env.py: the per-slot 7-field order below (direction, upnl, age, entry-dist,
+    # mfe, mae, occupied) must match schema's trade-block names + the env's trade_block exactly.
     def trade_block(self, sym: str) -> np.ndarray:
         acct, c, atr, con = self.account.account_size, self.price[sym], self.atr[sym], self._contract(sym)
         out = np.zeros(N_SLOTS * 7, dtype=np.float32)
@@ -165,6 +180,8 @@ class LivePortfolio:
                             (c - sl.entry_price) / atr, sl.mfe / acct, sl.mae / acct, 1.0]
         return out
 
+    # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py + quantra/env/trading_env.py:
+    # this 3-element portfolio block order must match schema's portfolio-block names + the env's.
     def portfolio_block(self, sym: str) -> np.ndarray:
         c, con = self.price[sym], self._contract(sym)
         opn = [sl for sl in self.slots[sym] if sl.occupied]
@@ -188,6 +205,8 @@ class LiveSession:
         self.symbols = symbols
         self.halt = halt or ManualHalt()
         self.portfolio = LivePortfolio(symbols, challenge or cfg.ChallengeConfig())
+        # COUPLING [C5] -> quantra/runtime/config.py: POINT_SIZE/DEFAULT_POINT_SIZE per-symbol dict
+        # (same one build_market_matrix expects); these point sizes must match training to reproduce features.
         self.point_sizes = point_sizes or {s: cfg.POINT_SIZE.get(s, cfg.DEFAULT_POINT_SIZE) for s in symbols}
 
     def _observe(self, sym: str):
@@ -196,9 +215,14 @@ class LiveSession:
         mm = build_market_matrix(bars, point_size=self.point_sizes[sym])
         market_row = mm.matrix[-1]
         price = float(bars["close"].iloc[-1])
+        # COUPLING -> quantra/market_pipeline/feature_builder/indicators.py: ATR_PERIOD is a locked param;
+        # must equal the period used in training's feature pipeline or the entry-dist feature drifts.
         atr = float(_ind.atr(bars["high"], bars["low"], bars["close"], _ind.ATR_PERIOD).iloc[-1] or 1e-9)
         self.portfolio.mark(sym, price, atr)
         law = compute_law_states(market_row)
+        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py + env/trading_env.py:
+        # assemble_state's block order (market, law, trade, portfolio, account) + account_block() names
+        # must match schema; mismatch => live obs misaligned vs the trained STATE_DIM vector.
         obs = assemble_state(market_row, law_flags=law,
                              trade=self.portfolio.trade_block(sym),
                              portfolio=self.portfolio.portfolio_block(sym),
@@ -212,6 +236,8 @@ class LiveSession:
         obs, price, atr, law = self._observe(sym)
         dm = build_direction_mask(law, self.portfolio.position(sym), self.portfolio.n_open(sym))
         pm = build_pointer_mask([sl.occupied for sl in self.portfolio.slots[sym]])
+        # COUPLING -> quantra/learning_system/ppo_agent/agent.py: unpacks act_deterministic's
+        # 4-tuple (a_dir, a_size, a_ptr, value) positionally (same as live_runner.py); reorder there -> wrong here.
         a_dir, a_size, a_ptr, _ = self.agent.act_deterministic(
             torch.as_tensor(obs, dtype=torch.float32),
             torch.as_tensor(dm, dtype=torch.float32),
@@ -219,7 +245,10 @@ class LiveSession:
         a_dir, a_size, a_ptr = int(a_dir[0]), float(a_size[0]), int(a_ptr[0])
 
         if a_dir in (OPEN_LONG, OPEN_SHORT):
+            # COUPLING [C5] -> quantra/ftmo_passing/challenge_state.py: reads ChallengeState.remaining_buffer.
             budget = self.portfolio.account.remaining_buffer - self.portfolio.committed_risk()
+            # COUPLING -> quantra/locked_core/risk_manager/risk.py: reads SizeResult .feasible/.reason/.lots/
+            # .risk_per_lot (same fields live_runner.py uses); rename any -> break OPEN sizing here.
             sr = self.risk.size(sym, a_size, atr, budget)
             if not sr.feasible:
                 return {"action": "OPEN_SKIPPED", "symbol": sym, "reason": sr.reason}
@@ -236,12 +265,16 @@ class LiveSession:
         return {"action": "HOLD", "symbol": sym}
 
     def _check_breach(self, price_map: Dict[str, float]) -> bool:
+        # COUPLING [C5] -> quantra/ftmo_passing/challenge_state.py: reads .equity + .wall_equity
+        # (the 4% wall anchor); rename either attr there -> breach detection silently breaks.
         acct = self.portfolio.account
         if acct.equity <= acct.wall_equity:
             self.exec.close_all()
             for s in self.symbols:
                 for i in range(N_SLOTS):
                     self.portfolio.slots[s][i] = Slot()
+            # COUPLING -> quantra/live_bridge/manual_halt.py: latches via ManualHalt._halted directly
+            # (same private attr live_runner.breach_autoflat sets); keep that attr name stable.
             self.halt._halted = True
             return True
         return False

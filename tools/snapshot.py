@@ -41,8 +41,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: state_vector_fingerprint()
+# defines STATE_DIM/FEATURE_NAMES/block_widths/include_raw_inputs; diff() below reads those exact
+# keys. If schema's fingerprint dict shape changes, diff()/checklist() here must change too.
 from quantra.market_pipeline.feature_builder.schema import state_vector_fingerprint  # noqa: E402
 
+# COUPLING [C1] -> tests/snapshots/state_vector.json: this committed snapshot is the pinned
+# observation layout; `--update` rewrites it. Any schema.py layout change must be re-snapshotted here.
 SNAPSHOT_PATH = REPO_ROOT / "tests" / "snapshots" / "state_vector.json"
 
 # Static, FTMO-framed guidance baked into the snapshot so the LLM Risk Doctor (and
@@ -94,6 +99,9 @@ def write(path: Path = SNAPSHOT_PATH) -> None:
 def diff(old: dict, new: dict) -> list:
     """Structural deltas between two snapshots (ignores the _llm_interpretation text)."""
     deltas = []
+    # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: these dict keys
+    # (state_dim, include_raw_inputs, block_widths, feature_names) are produced by
+    # state_vector_fingerprint(); renaming any key there silently breaks this drift check.
     if old.get("state_dim") != new.get("state_dim"):
         deltas.append(f"state_dim: {old.get('state_dim')} -> {new.get('state_dim')}")
     if old.get("include_raw_inputs") != new.get("include_raw_inputs"):

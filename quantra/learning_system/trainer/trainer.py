@@ -39,7 +39,11 @@ from quantra.learning_system.ppo_agent.loss import ppo_loss
 from quantra.learning_system.rollout_buffer.buffer import RolloutBuffer
 from quantra.learning_system.trainer.gae import compute_gae
 from quantra.learning_system.trainer.scheduler import AggressionScheduler, missed_opportunity
+# COUPLING [C1] -> market_pipeline/feature_builder/schema.py: STATE_DIM sizes the agent
+# input, the buffer rows, and the zero next_obs / checkpoint metadata below.
 from quantra.market_pipeline.feature_builder import STATE_DIM
+# COUPLING [C3] -> market_pipeline/law_mask_engine/engine.py: build_pointer_mask returns
+# an N_SLOTS-wide mask; its length must match the agent pointer head + buffer ptr_mask.
 from quantra.market_pipeline.law_mask_engine.engine import build_pointer_mask
 from quantra.runtime import config as cfg
 
@@ -81,6 +85,9 @@ class Trainer:
         return torch.as_tensor(obs, dtype=torch.float32) * self._feature_mask
 
     def _masks(self):
+        # COUPLING -> env/trading_env.py: reads env.symbols/.cursor/.slots[sym] (each slot's
+        # .occupied) and calls env.direction_mask(sym); renaming any of these on the env
+        # breaks rollout collection. slot.occupied feeds build_pointer_mask (C3).
         sym = self.env.symbols[self.env.cursor]
         dm = torch.as_tensor(self.env.direction_mask(sym), dtype=torch.float32)
         occ = [s.occupied for s in self.env.slots[sym]]
@@ -97,12 +104,19 @@ class Trainer:
             t_now = self.env.t
             was_flat = self.env._position(sym) == 0
             step = self.agent.act(self._obs, dm, pm)
+            # COUPLING -> ppo_agent/agent.py: reads AgentStep field names a_direction/
+            # a_size/a_pointer (and log_prob/value/done below) — must match that dataclass.
             a_dir = int(step.a_direction[0]); a_size = float(step.a_size[0]); a_ptr = int(step.a_pointer[0])
+            # COUPLING -> env/trading_env.py: env.step takes the (a_dir, a_size, a_ptr) tuple
+            # and returns (next_obs, reward, done, info) in this order — keep both contracts.
             nxt, reward, done, _info = self.env.step((a_dir, a_size, a_ptr))
 
             # G8 missed-opportunity scoring (training-only; lookahead allowed here).
             if was_flat:
                 flats += 1
+                # COUPLING -> env/trading_env.py + data_loader/loader.py: env.data[sym]
+                # exposes .close/.atr arrays and a PRECOMPUTED_NAMES-ordered .matrix row;
+                # data.matrix[t] is passed straight into scheduler.missed_opportunity (C1).
                 data = self.env.data[sym]
                 k = t_now + self.cfg.g8_lookahead
                 if k < len(data.close) and data.atr[t_now] > 0:
@@ -111,6 +125,9 @@ class Trainer:
                         misses += 1
 
             next_obs = self._apply_mask(nxt) if not done else torch.zeros(STATE_DIM)
+            # COUPLING -> rollout_buffer/buffer.py: positional arg order must match
+            # RolloutBuffer.add(obs, a_dir, a_size, a_ptr, reward, next_obs, logp, value,
+            # done, dir_mask, ptr_mask).
             self.buffer.add(self._obs, a_dir, a_size, a_ptr, reward, next_obs,
                             float(step.log_prob[0]), float(step.value[0]), float(done), dm, pm)
             self._obs = next_obs if not done else self._apply_mask(self.env.reset())
@@ -122,7 +139,11 @@ class Trainer:
     def update(self, dials) -> Dict[str, float]:
         b = self.buffer.get()
         with torch.no_grad():
+            # net(...)[3] indexes the VALUE head — COUPLING -> ppo_agent/agent.py: relies on
+            # ActorCritic.forward returning (dir, size, ptr, value) with value at index 3.
             last_value = 0.0 if float(b["done"][-1]) > 0.5 else float(self.agent.net(self._obs.unsqueeze(0))[3])
+        # COUPLING -> trainer/gae.py: positional args (rewards, values, dones, last_value);
+        # b keys come from RolloutBuffer.get(). compute_gae returns (adv, ret) in this order.
         adv, ret = compute_gae(b["reward"], b["value_old"], b["done"], last_value)
 
         for g in self.opt.param_groups:
@@ -159,6 +180,8 @@ class Trainer:
 
     def checkpoint(self, name: str = "brain") -> Path:
         """Save the brain (SOW §8.4: every brain checkpointed, benchmarked, never lost)."""
+        # COUPLING -> runtime/config.py: depends on cfg.ensure_dirs() + cfg.CHECKPOINT_DIR;
+        # renaming either there breaks checkpointing.
         cfg.ensure_dirs()
         path = cfg.CHECKPOINT_DIR / f"{name}.pt"
         torch.save({"state_dict": self.agent.net.state_dict(),

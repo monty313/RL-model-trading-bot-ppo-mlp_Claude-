@@ -23,8 +23,12 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+# COUPLING -> quantra/locked_core/platform_adapter/adapters.py: calls BrokerAdapter.market_order
+# (returns ticket int) + close_position(ticket)->bool; those signatures are unpacked below.
 from quantra.locked_core.platform_adapter.adapters import BrokerAdapter
 
+# COUPLING [C3] -> quantra/market_pipeline/feature_builder/schema.py (N_SLOTS=5) + live_session.py:
+# must equal schema N_SLOTS and env/ppo pointer width; change one -> change all (trade block 7*5=35).
 N_SLOTS = 5
 
 
@@ -46,6 +50,8 @@ class ExecutionAdapter:
                 return i
         return None
 
+    # COUPLING -> quantra/live_bridge/live_session.py + live_runner.py: callers depend on
+    # open()->slot index|None and close()->bool; live_session mirrors the returned slot into LivePortfolio.
     def open(self, symbol: str, side: int, lots: float, price: float = 0.0) -> Optional[int]:
         """Fill the next free slot. Returns the slot index, or None if all 5 are full."""
         i = self.free_slot(symbol)

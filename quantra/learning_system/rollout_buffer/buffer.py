@@ -29,6 +29,9 @@ from __future__ import annotations
 import torch
 
 # The 10 locked fields (SOW §2.9). 'masks' is materialised as dir_mask + ptr_mask.
+# COUPLING -> ppo_agent/loss.py + trainer/trainer.py: the get() dict KEYS below mirror
+# these field names; ppo_loss reads obs/dir_mask/ptr_mask/a_direction/a_size/a_pointer/
+# logp_old and the trainer reads reward/value_old/done — keep names in sync.
 FIELDS = ("obs", "a_direction", "a_size", "a_pointer", "reward",
           "next_obs", "logp_old", "value_old", "done", "masks")
 
@@ -36,6 +39,9 @@ FIELDS = ("obs", "a_direction", "a_size", "a_pointer", "reward",
 class RolloutBuffer:
     """Fixed-capacity, single-trajectory PPO buffer. Cleared after every update."""
 
+    # COUPLING [C2/C3] -> market_pipeline/law_mask_engine/engine.py + feature_builder/
+    # schema.py: n_dir=4 == N_DIR_ACTIONS, n_slots=5 == N_SLOTS; the dir_mask/ptr_mask
+    # tensors must match the agent's direction/pointer head widths. state_dim is [C1].
     def __init__(self, capacity: int, state_dim: int, n_dir: int = 4,
                  n_slots: int = 5, device: str = "cpu"):
         self.capacity = int(capacity)
@@ -61,6 +67,9 @@ class RolloutBuffer:
     def is_full(self) -> bool:
         return self.ptr >= self.capacity
 
+    # COUPLING -> trainer/trainer.py: collect_rollout calls add() with this exact
+    # positional arg order (obs, a_dir, a_size, a_ptr, reward, next_obs, logp, value,
+    # done, dir_mask, ptr_mask); reordering params here breaks that call site.
     def add(self, obs, a_direction, a_size, a_pointer, reward, next_obs,
             logp_old, value_old, done, dir_mask, ptr_mask) -> None:
         """Store one symbol-step transition (all 10 locked fields)."""
@@ -83,6 +92,10 @@ class RolloutBuffer:
     def get(self) -> dict:
         """Return the filled slice as tensors (for GAE + minibatch updates, M8)."""
         n = self.ptr
+        # COUPLING -> ppo_agent/loss.py + trainer/trainer.py: these dict KEYS are read by
+        # ppo_loss (obs/dir_mask/ptr_mask/a_direction/a_size/a_pointer/logp_old) and by
+        # the trainer's update/compute_gae (reward/value_old/done). Renaming a key here
+        # is a silent KeyError downstream.
         return {
             "obs": self.obs[:n], "next_obs": self.next_obs[:n],
             "a_direction": self.a_direction[:n], "a_size": self.a_size[:n],

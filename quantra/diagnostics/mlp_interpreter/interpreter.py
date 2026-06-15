@@ -56,6 +56,8 @@ class MLPInterpreter:
         cfg.ensure_dirs()
         self.out_dir = out_dir or cfg.REPORT_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        # COUPLING [C8] -> quantra/diagnostics/telemetry_logger/logger.py: the "kind" tags
+        # ("step"/"header") and every field key read below are produced by TelemetryLogger/StepPacket.
         self.steps = [r for r in records if r.get("kind") == "step"]
         self.header = next((r for r in records if r.get("kind") == "header"), {})
 
@@ -66,6 +68,8 @@ class MLPInterpreter:
     def _obs(self) -> np.ndarray:
         return np.array([s["observation"] for s in self.steps], dtype=float)
 
+    # COUPLING [C8] -> quantra/diagnostics/telemetry_logger/logger.py: reads the
+    # "reward_decomposition" dict key + its layer names (e.g. "L0"); set by StepPacket.
     def _reward_layers(self) -> Dict[str, np.ndarray]:
         keys: set = set()
         for s in self.steps:
@@ -145,6 +149,8 @@ class MLPInterpreter:
 
     # --- 7. Pass-Day Atlas ---
     def pass_day_atlas(self) -> Path:
+        # COUPLING [C8] -> quantra/diagnostics/telemetry_logger/logger.py: reads risk_context["trailing_dd"]
+        # (same key llm_risk_doctor uses); renaming it in StepPacket.risk_context breaks this panel.
         risk = np.array([s["risk_context"].get("trailing_dd", 0.0) for s in self.steps])
         fig, (a1, a2) = plt.subplots(2, 1, figsize=(7, 4), sharex=True)
         a1.plot(self._col("value"), color="tab:green"); a1.set_ylabel("V(s)")

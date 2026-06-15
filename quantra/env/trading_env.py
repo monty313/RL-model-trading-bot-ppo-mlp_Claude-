@@ -41,18 +41,29 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
+# COUPLING [C5] -> quantra/ftmo_passing/challenge_state.py: env builds ChallengeState and
+# reads its attrs/methods (equity, peak_equity, remaining_buffer, breached, should_autoflat,
+# mark_to_market, realize, charge, enter_phase_b, account_block). Their names are the contract.
 from quantra.ftmo_passing.challenge_state import ChallengeState
 from quantra.locked_core.cost_layer.costs import CostLayer
 from quantra.locked_core.laws.laws import compute_law_states
 from quantra.locked_core.risk_manager.risk import RiskManager
 from quantra.learning_system.reward_engine.reward import RewardContext, RewardEngine
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: assemble_state expects
+# the block order (precomputed market+raw · law · trade · portfolio · account); PRECOMPUTED_DIM
+# fixes SymbolData.matrix width. A schema STATE_DIM/block change must be mirrored in _obs() below.
 from quantra.market_pipeline.feature_builder import PRECOMPUTED_DIM, assemble_state
+# COUPLING [C3] -> quantra/market_pipeline/feature_builder/schema.py: N_SLOTS=5 governs slot
+# count + the 7*N_SLOTS trade block here; also schema._market_names order via PRECOMPUTED_NAMES (C1).
 from quantra.market_pipeline.feature_builder.schema import N_SLOTS, PRECOMPUTED_NAMES
 
 # Feature column index by name (reward proxies read a couple of market features).
 # COUPLING [C1 in COUPLINGS.md]: depends on schema.PRECOMPUTED_NAMES ORDER (same map
 # laws._IDX + scheduler._COL build). A feature reorder invalidates these lookups.
 _COL = {name: i for i, name in enumerate(PRECOMPUTED_NAMES)}
+# COUPLING [C2] -> quantra/market_pipeline/law_mask_engine/engine.py: direction action ints
+# {HOLD=0,OPEN_LONG=1,OPEN_SHORT=2,CLOSE=3} are defined there and indexed in _apply_action; they
+# must match ppo_agent/agent.py's direction head + live_bridge/live_session.py. Reorder -> wrong trades.
 from quantra.market_pipeline.law_mask_engine.engine import (
     CLOSE,
     HOLD,
@@ -141,6 +152,8 @@ class TradingEnv:
 
     # ------------------------------------------------------------------ helpers
     def _contract(self, sym: str) -> float:
+        # COUPLING [C5] -> quantra/runtime/config.py: CONTRACT_SIZE is a per-symbol dict keyed
+        # by config.SYMBOLS; cost_layer/costs.py + live_bridge/live_session.py read the same dict.
         return cfg.CONTRACT_SIZE.get(sym, 1.0)
 
     def _open_slots(self, sym: str) -> List[Slot]:
@@ -182,6 +195,9 @@ class TradingEnv:
         c = self.data[sym].close[self.t]
         atr = max(self.data[sym].atr[self.t], 1e-12)
         con = self._contract(sym)
+        # COUPLING [C3/C1] -> quantra/market_pipeline/feature_builder/schema.py: trade block is
+        # 7 features x N_SLOTS (schema 7*5=35); the per-slot field order written below (direction,
+        # upnl, age, entry-dist, mfe, mae, occupied) must match schema's trade-block names.
         out = np.zeros(N_SLOTS * 7, dtype=np.float32)
         for i, sl in enumerate(self.slots[sym]):
             if not sl.occupied:
@@ -217,6 +233,9 @@ class TradingEnv:
 
     def _obs(self) -> np.ndarray:
         sym = self.symbols[self.cursor]
+        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/__init__.py (assemble_state):
+        # block kwargs (law_flags · trade · portfolio · account) + their widths must match schema
+        # block_spans; the account block order mirrors challenge_state.account_block() / schema.
         return assemble_state(
             self.data[sym].matrix[self.t],
             law_flags=self._law_states(sym),
@@ -319,6 +338,9 @@ class TradingEnv:
         pos = self._position(sym)
         in_pos = pos != 0
         row = self.data[sym].matrix[self.t]
+        # COUPLING [C1/C7] -> quantra/market_pipeline/feature_builder/schema.py + builder.py:
+        # "cci_sync_5m" / "atr_dev_1m" must exist in PRECOMPUTED_NAMES (builder emits them in that
+        # order). Rename a feature there and these _COL lookups raise KeyError.
         cci = float(row[_COL["cci_sync_5m"]])
         atr_alive = float(row[_COL["atr_dev_1m"]]) > 0.0
         momentum = in_pos and (cci * pos > 0) and atr_alive
@@ -326,6 +348,9 @@ class TradingEnv:
         ctx = RewardContext(
             net_pnl_delta=l0, in_position=in_pos, momentum_aligned=momentum,
             stagnation=False, drawdown_pct=dd_pct,
+            # COUPLING [C1] -> quantra/ftmo_passing/challenge_state.py: index [5] is day_progress
+            # in account_block()'s fixed 7-scalar order; reorder the account block and this picks
+            # the wrong scalar. RewardContext field names couple to reward_engine/reward.py.
             day_progress=float(self.account.account_block()[5]),
             breach_risk=dd_pct >= self.challenge_cfg.pain_zone_start_pct,
         )
@@ -340,6 +365,9 @@ class TradingEnv:
         """
         if self.done:
             raise RuntimeError("step() called on a finished episode; call reset().")
+        # COUPLING [C2/C3] -> quantra/ppo_agent/agent.py + live_bridge/live_session.py: the action
+        # tuple (direction int [C2], raw_size float, pointer slot int [0..N_SLOTS) [C3]) is the
+        # policy->env contract; the agent's 4 heads must emit exactly this order/typing.
         direction, raw_size, pointer = int(action[0]), float(action[1]), int(action[2])
         sym = self.symbols[self.cursor]
 
@@ -397,6 +425,8 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
     from quantra.market_pipeline.feature_builder import indicators as ind
     from quantra.market_pipeline.feature_builder.builder import build_market_matrix
 
+    # COUPLING [C5] -> quantra/runtime/config.py: POINT_SIZE per-symbol dict + DEFAULT_POINT_SIZE
+    # scalar; same keys (config.SYMBOLS) used by data_loader/loader.py + cost_layer/costs.py.
     ps = point_size if point_size is not None else cfg.POINT_SIZE.get(symbol, cfg.DEFAULT_POINT_SIZE)
     mm = build_market_matrix(df_1m, point_size=ps)
     close = df_1m["close"].to_numpy(dtype=np.float64)

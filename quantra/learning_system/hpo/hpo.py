@@ -30,12 +30,19 @@ from __future__ import annotations
 from typing import Callable, Dict, Iterable
 
 # 🔴 SACRED — Optuna may NEVER tune these (G2/G6 hand-locks).
+# COUPLING [C6] -> trainer/gae.py + trainer/scheduler.py: this guard exists because
+# gae.py hand-locks GAMMA/LAMBDA and scheduler.py hand-locks AggressionRanges (entropy/
+# clip/lr/epochs) + the scheduler logic; if a new locked dial is added there, add its
+# name here or HPO could tune it.
 SACRED_DIALS = frozenset({
     "gamma", "lambda", "scheduler_logic",
     "entropy_range", "clip_range", "lr_range", "epochs_range",
 })
 
 # Non-sacred search space: (low, high) for floats, [choices] for categoricals.
+# COUPLING -> trainer/trainer.py: these key NAMES (value_coef, minibatch, rollout_size)
+# echo TrainConfig fields the objective callback maps tuned params onto; keep the names
+# aligned with TrainConfig or the wiring silently drops a dial.
 DEFAULT_SEARCH_SPACE: Dict[str, object] = {
     "value_coef": (0.3, 0.8),         # critic loss weight
     "grad_clip_norm": (0.3, 1.0),     # gradient clipping

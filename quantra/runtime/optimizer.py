@@ -34,6 +34,9 @@ from .device import available_devices
 from .throughput_benchmark import BenchResult, race_devices
 
 
+# COUPLING -> __main__.py + learning_system/trainer/trainer.py: print_report (in this file)
+# and the trainer read these field names (device, scale, bench, decision_note, n_envs).
+# Renaming a field breaks the report and the trainer's hardware consumption.
 @dataclass(frozen=True)
 class HardwarePlan:
     """The resolved runtime compute decision."""
@@ -58,6 +61,9 @@ def _pick_device(bench: List[BenchResult], hw: HardwareConfig):
     Otherwise we stay on CPU — even if the GPU is marginally faster — because a
     near-tie does not justify a paid accelerator on this tiny network.
     """
+    # COUPLING -> throughput_benchmark.py BenchResult (.kind/.steps_per_sec/.label) +
+    # config.py HardwareConfig (.gpu_speedup_required/.prefer_cpu). Field renames in either
+    # break this device-pick policy. Kind strings "cpu"/"cuda"/"mps" mirror device.py.
     by_kind = {b.kind: b for b in bench}
     cpu = by_kind.get("cpu")
     cpu_sps = cpu.steps_per_sec if cpu else 0.0

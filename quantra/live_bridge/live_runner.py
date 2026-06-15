@@ -35,6 +35,8 @@ from quantra.learning_system.ppo_agent.agent import PPOAgent
 from quantra.live_bridge.execution_adapter import ExecutionAdapter
 from quantra.live_bridge.manual_halt import ManualHalt
 from quantra.locked_core.risk_manager.risk import RiskManager
+# COUPLING [C2] -> quantra/market_pipeline/law_mask_engine/engine.py: direction ints
+# {OPEN_LONG=1,OPEN_SHORT=2,CLOSE=3}; must match ppo_agent direction head + env + live_session. Reorder -> wrong trades.
 from quantra.market_pipeline.law_mask_engine.engine import CLOSE, OPEN_LONG, OPEN_SHORT
 
 
@@ -52,6 +54,8 @@ class LiveRunner:
         """One deterministic live decision for ``symbol``. Returns an info dict."""
         if self.halt.is_halted:
             return {"action": "HALTED"}
+        # COUPLING -> quantra/learning_system/ppo_agent/agent.py: unpacks act_deterministic's
+        # 4-tuple (a_dir, a_size, a_ptr, value) positionally; reorder there -> wrong action/size here.
         a_dir, a_size, a_ptr, value = self.agent.act_deterministic(
             torch.as_tensor(obs, dtype=torch.float32),
             torch.as_tensor(dir_mask, dtype=torch.float32),
@@ -59,6 +63,8 @@ class LiveRunner:
         a_dir, a_size, a_ptr = int(a_dir[0]), float(a_size[0]), int(a_ptr[0])
 
         if a_dir in (OPEN_LONG, OPEN_SHORT):
+            # COUPLING -> quantra/locked_core/risk_manager/risk.py: reads SizeResult fields
+            # .feasible/.reason/.lots; rename any -> break this gate (also relied on in live_session.py).
             sr = self.risk.size(symbol, a_size, atr_price, remaining_budget)  # RiskManager clip
             if not sr.feasible:
                 return {"action": "OPEN_SKIPPED", "reason": sr.reason}
@@ -74,6 +80,8 @@ class LiveRunner:
         """Hard kill switch #2: at/below the 4% wall, flatten ALL + latch halted."""
         if equity <= wall_equity:
             self.exec.close_all(price)
+            # COUPLING -> quantra/live_bridge/manual_halt.py: reaches into ManualHalt._halted directly;
+            # renaming that private attr breaks this latch (live_session.py does the same).
             self.halt._halted = True            # lock out for the day (manual reset)
             return True
         return False

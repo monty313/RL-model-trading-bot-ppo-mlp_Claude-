@@ -33,12 +33,18 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# COUPLING [C1] -> market_pipeline/feature_builder/schema.py: _COL is built from
+# PRECOMPUTED_NAMES order and indexed by the ssma_align_5m/30m/4H names below; if
+# schema renames/reorders those columns (or the builder stops emitting them) the G8
+# metric reads the wrong column. feature_builder/builder.py must emit them in this order.
 from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES
 
 _COL = {n: i for i, n in enumerate(PRECOMPUTED_NAMES)}
 G8_ATR_THRESHOLD = 1.5   # 🔴 locked: price must run >= 1.5x ATR in the permitted dir
 
 
+# COUPLING -> trainer/trainer.py: collect_rollout calls missed_opportunity(data.matrix
+# [t], True, move_atr) positionally; market_row must be a PRECOMPUTED_NAMES-ordered row.
 def missed_opportunity(market_row, was_flat: bool, realized_move_atr: float,
                        threshold: float = G8_ATR_THRESHOLD) -> bool:
     """G8: multi-TF (5m+30m+4H) directional agreement + flat + move >= 1.5x ATR.
@@ -59,6 +65,9 @@ def missed_opportunity(market_row, was_flat: bool, realized_move_atr: float,
 
 @dataclass(frozen=True)
 class AggressionRanges:
+    # COUPLING [C6-adjacent] -> learning_system/hpo/hpo.py: these ranges + the scheduler
+    # logic are the "sacred" dials HPO must never tune — hpo.SACRED_DIALS lists
+    # entropy_range/clip_range/lr_range/epochs_range/scheduler_logic to guard exactly this.
     """The locked G2 law-school dial ranges (low, high)."""
 
     entropy: tuple = (0.03, 0.08)
@@ -69,6 +78,9 @@ class AggressionRanges:
 
 @dataclass
 class DialValues:
+    # COUPLING -> trainer/trainer.py (+ ppo_agent/loss.py): the trainer reads dials.lr/
+    # clip_eps/entropy_coef/epochs by these field NAMES and forwards clip_eps/entropy_coef
+    # into ppo_loss(clip_eps=, entropy_coef=). Renaming a field breaks the update loop.
     entropy_coef: float
     clip_eps: float
     lr: float

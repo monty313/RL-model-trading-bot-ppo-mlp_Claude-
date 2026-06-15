@@ -31,6 +31,9 @@ import torch
 from .config import HardwareConfig
 
 
+# COUPLING -> optimizer.py: HardwarePlan.n_envs reads scale.n_envs and print_report reads
+# .rationale + .torch_threads; apply_thread_limits below reads .torch_threads. Rename a
+# field => optimizer's plan/report break.
 @dataclass(frozen=True)
 class ScalePlan:
     """The concrete parallelism decision for a run."""
@@ -55,6 +58,8 @@ def plan_cpu_scale(hw: HardwareConfig) -> ScalePlan:
     tiny MLP) gets the same thread budget since matmuls are small.
     """
     cores = _logical_cores()
+    # COUPLING -> config.py HardwareConfig: reads field names min_envs, utilization_target,
+    # reserved_cores, max_envs (and below); renaming any in config.py breaks sizing here.
     usable = max(hw.min_envs, int(round(cores * hw.utilization_target)) - hw.reserved_cores)
     usable = max(hw.min_envs, min(usable, hw.max_envs))
     threads = max(1, min(usable, cores - hw.reserved_cores))

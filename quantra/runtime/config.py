@@ -75,6 +75,9 @@ SYMBOLS: List[str] = ["EURUSD", "XAUUSD", "GBPUSD", "US30"]  # SOW §12.1 order
 
 # Asset class drives the cost model (SOW §10.5): forex pays $5/RT/lot; metals &
 # indices pay no per-trade commission (spread + slippage only).
+# COUPLING [C5] -> cost_layer/costs.py: costs.py looks up ASSET_CLASS[symbol] vs
+# CostConfig.commissioned_classes ("forex") to decide commission; a new class string
+# here that isn't in commissioned_classes silently pays no commission.
 ASSET_CLASS: Dict[str, str] = {
     "EURUSD": "forex",
     "GBPUSD": "forex",
@@ -87,6 +90,9 @@ ASSET_CLASS: Dict[str, str] = {
 # needs this to convert. Broker-dependent; conservative defaults for 5-digit forex,
 # 2-digit gold, 1.0 index. Used by the FeatureBuilder's spread features + the
 # Spread Filter gate so the bot learns under realistic execution friction (SOW-H2).
+# COUPLING [C5] -> feature_builder/builder.py + locked_core/laws/laws.py: builder uses
+# POINT_SIZE[symbol] to convert MT5 <SPREAD> points->price for the spread feature; the
+# Spread Filter law reads that feature. Missing key => KeyError on that symbol.
 POINT_SIZE: Dict[str, float] = {
     "EURUSD": 1e-5,
     "GBPUSD": 1e-5,
@@ -99,6 +105,9 @@ DEFAULT_POINT_SIZE: float = 1e-5
 # symbols are USD-quoted, so PnL_USD = price_change * CONTRACT_SIZE * lots (no FX
 # conversion). Used by CostLayer + RiskManager (M4) to translate price <-> dollars
 # so the bot's risk is measured in the same units as the FTMO wall.
+# COUPLING [C5] -> risk_manager/risk.py + cost_layer/costs.py + env/trading_env.py:
+# they index CONTRACT_SIZE[symbol] for lot-sizing and PnL; add a SYMBOL => add a key
+# here or risk/cost/PnL KeyError for that symbol.
 CONTRACT_SIZE: Dict[str, float] = {
     "EURUSD": 100_000.0,   # 1 lot = 100k EUR; 0.0001 move = $10
     "GBPUSD": 100_000.0,
@@ -108,6 +117,8 @@ CONTRACT_SIZE: Dict[str, float] = {
 
 # Per-symbol fixed slippage in POINTS, applied adversely on every fill (SOW §10.5).
 # Conservative defaults; never zero (no costless world, SOW C8).
+# COUPLING [C5] -> cost_layer/costs.py + live_bridge/live_session.py: costs.py reads
+# SLIPPAGE_POINTS[symbol] (x POINT_SIZE) for fill adversity; key must exist per SYMBOL.
 SLIPPAGE_POINTS: Dict[str, float] = {
     "EURUSD": 5.0,
     "GBPUSD": 5.0,
@@ -116,6 +127,9 @@ SLIPPAGE_POINTS: Dict[str, float] = {
 }
 
 
+# COUPLING [C5] -> cost_layer/costs.py: costs.py reads these exact field names
+# (commission_per_lot_rt_forex, commissioned_classes) and matches commissioned_classes
+# against ASSET_CLASS values above. Rename a field or change the class string => costs break.
 @dataclass(frozen=True)
 class CostConfig:
     """Real FTMO costs (SOW §10.5). $5 RT/lot on FOREX only; metals/indices pay no
@@ -126,6 +140,9 @@ class CostConfig:
     commissioned_classes: tuple = ("forex",)
 
 
+# COUPLING [C5] -> risk_manager/risk.py: risk.py reads these exact field names
+# (stop_atr_mult, lot_step, min_lot, max_lot, max_per_trade_risk_frac) to size/round lots;
+# renaming any breaks lot-sizing. HPO may tune values but must not rename fields.
 @dataclass(frozen=True)
 class RiskConfig:
     """RiskManager dials (NON-sacred; tunable). The invariant they enforce — total
@@ -138,6 +155,9 @@ class RiskConfig:
     max_lot: float = 50.0
     max_per_trade_risk_frac: float = 0.01  # per-trade cap = 1% of account size
 
+# COUPLING [C5] -> data_loader/loader.py: loader.py resolves each SYMBOL's bars via
+# DRIVE_FILE_IDS[symbol] (gdown) and DRIVE_FILENAMES[symbol] (Drive-mount lookup); a
+# SYMBOL missing from either dict cannot be loaded.
 DRIVE_FILE_IDS: Dict[str, str] = {
     "EURUSD": "1tsR789vdRYE4rwDAE-hreWF2zN1slcjH",
     "GBPUSD": "1503qJQxjLwA2O0zIiakiOM_68Ucb-ypm",
@@ -164,9 +184,16 @@ DRIVE_FOLDER_ID: str = "1azEnCfwQjxPkBemmv9mxY3GyVAMcjF-3"
 # feature_builder/RAW_INPUTS.md). Flip to False to ablate raw-vs-normalized; the
 # schema + STATE_DIM follow automatically. Read by feature_builder.schema.
 # ---------------------------------------------------------------------------
+# COUPLING [C1] -> feature_builder/schema.py: schema reads INCLUDE_RAW_INPUTS to add/drop
+# the market_raw block, which sets STATE_DIM (167 on / 149 off). Flipping this changes the
+# observation width everywhere; nominal_state_dim below mirrors the same branch.
 INCLUDE_RAW_INPUTS: bool = True
 
 
+# COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
+# env/trading_env.py + live_bridge/live_session.py: they read these exact field names
+# (daily_target_pct, daily_risk_pct, pain_zone_start_pct, hard_wall_pct, ...) to set the
+# target/wall thresholds; renaming a field silently changes what "passing" means.
 @dataclass(frozen=True)
 class ChallengeConfig:
     """Runtime FTMO inputs (SOW §1.4, §2.6, §2.7). Defaults per SOW-A3.
@@ -224,6 +251,9 @@ class RuntimeConfig:
     # suite). 167 with raw inputs on (CCI kept raw + raw price-SMA), 149 off.
     nominal_state_dim: int = field(default_factory=lambda: 167 if INCLUDE_RAW_INPUTS else 149)
 
+    # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
+    # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss
+    # from that block (these keys), NOT from this file. Key shape here is the data contract.
     def to_dict(self) -> dict:
         """Flatten for telemetry's run-config block (M9 data contract)."""
         d = asdict(self)

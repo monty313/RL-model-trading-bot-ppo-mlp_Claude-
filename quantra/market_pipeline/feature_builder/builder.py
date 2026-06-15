@@ -48,6 +48,10 @@ from quantra.market_pipeline.resampler import build_all_timeframes
 
 from quantra.runtime.config import INCLUDE_RAW_INPUTS
 
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: builder is bound to
+# schema's PRECOMPUTED_NAMES order (output column order), RAW_FEATURE_NAMES (clip-exempt set),
+# RAW_SMA_TFS (which TFs emit raw_sma*), and STATE_DIM/PRECOMPUTED_DIM (width asserts).
+# Any rename/reorder in schema must be reflected by the column emitters in _compute_tf_features.
 from . import indicators as ind
 from .schema import (
     MARKET_DIM,
@@ -82,6 +86,10 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
     alignment the telemetry contract relies on.
     """
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+    # COUPLING -> quantra/market_pipeline/feature_builder/indicators.py: the locked params
+    # (ATR_PERIOD, BB_FAST/BB_SLOW/BB_DEV, CCI_PERIODS, CCI_APPLIED_SMA, SHIFT, SSMA_PERIOD,
+    # ATR_REF_PERIOD) consumed below define the legal space; laws.py reads the same ingredients.
+    # Changing a param in indicators.py shifts which bars fire => retrain. Do not diverge.
     atr_tf = ind.atr(h, l, c, ind.ATR_PERIOD).replace(0, np.nan)
     out: Dict[str, pd.Series] = {}
 
@@ -198,6 +206,9 @@ def _asof_onto(base_index: pd.DatetimeIndex, feat: pd.DataFrame) -> pd.DataFrame
 class MarketMatrix:
     """The precomputed market block + provenance for the env / telemetry."""
 
+    # COUPLING [C1] -> quantra/env/trading_env.py + quantra/live_bridge/live_session.py:
+    # these field names (matrix/index/valid_from/names) are read when the env/live session
+    # slices a precomputed row; matrix width is PRECOMPUTED_DIM in PRECOMPUTED_NAMES order.
     matrix: np.ndarray          # (T, PRECOMPUTED_DIM) float32, precomputed-block order
     index: pd.DatetimeIndex     # 1m timestamps aligned to rows
     valid_from: int             # first row with non-4H normalized features ready
@@ -263,6 +274,9 @@ def precompute_symbol(symbol: str, force: bool = False) -> MarketMatrix:
         return MarketMatrix(mat, pd.DatetimeIndex(idx), valid_from, list(PRECOMPUTED_NAMES))
 
     df_1m, _ = load_symbol(symbol)
+    # COUPLING [C5] -> quantra/runtime/config.py: POINT_SIZE is a per-symbol dict keyed by
+    # config.SYMBOLS; a symbol missing here silently falls back to DEFAULT_POINT_SIZE, which
+    # would mis-scale the spread-gate ingredients. Add new symbols to config.POINT_SIZE.
     mm = build_market_matrix(df_1m, point_size=cfg.POINT_SIZE.get(symbol, cfg.DEFAULT_POINT_SIZE))
     np.save(npy, mm.matrix)
     pd.DataFrame(index=mm.index).to_parquet(meta)
@@ -297,6 +311,10 @@ def assemble_state(
             raise ValueError(f"block '{name}' expected {width} values, got {v.shape[0]}")
         return v
 
+    # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py (_BLOCK_BUILDERS) +
+    # quantra/env/trading_env.py (the caller that supplies law/trade/portfolio/account vecs):
+    # this concat order MUST equal schema's block order, and each _blk width is read from
+    # SCHEMA.block_spans. Reorder schema blocks => reorder here or the obs is scrambled.
     state = np.concatenate([
         pre,                       # market + market_raw (PRECOMPUTED_DIM)
         _blk("law", law_flags),

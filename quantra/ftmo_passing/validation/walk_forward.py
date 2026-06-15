@@ -31,6 +31,9 @@ from typing import Callable, List, Optional, Tuple
 
 import pandas as pd
 
+# COUPLING -> quantra/ftmo_passing/validation/scoreboard.py: depends on RunResult fields
+# (.passed) + Scoreboard API (constructor takes a List[RunResult]; .breach_count, .better_than).
+# Any rename there must be mirrored in this runner/gate.
 from .scoreboard import RunResult, Scoreboard
 
 # 🔴 locked protocol
@@ -76,6 +79,9 @@ class WalkForwardRunner:
     def __init__(self, n_seeds: int = N_SEEDS):
         self.n_seeds = n_seeds
 
+    # COUPLING -> quantra/ftmo_passing/validation/scoreboard.py + M15 e2e caller: eval_fn
+    # MUST return a RunResult; the (Scoreboard, per-seed-pass List[int]) return shape is
+    # unpacked by the e2e harness and feeds PromotionGate.promote(..., seed_pass_counts).
     def run(self, index: pd.DatetimeIndex,
             eval_fn: Callable[[Window, int], RunResult]) -> Tuple[Scoreboard, List[int]]:
         """Return (overall Scoreboard, per-seed pass counts across windows).

@@ -37,6 +37,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+# COUPLING [C5] -> runtime/config.py: this module reads cfg.CONTRACT_SIZE (per-symbol dict
+# keyed by config.SYMBOLS) and cfg.RiskConfig (stop_atr_mult/max_per_trade_risk_frac/lot_step/
+# max_lot/min_lot). Renaming those config fields/keys or dropping a symbol breaks sizing here.
 from quantra.runtime import config as cfg
 
 
@@ -44,6 +47,9 @@ from quantra.runtime import config as cfg
 class SizingResult:
     """Outcome of sizing one OPEN — carries the committed risk for buffer accounting."""
 
+    # COUPLING -> env/trading_env.py: env reads SizingResult.committed_risk to debit the shared
+    # B5 buffer and stores risk_per_lot on the slot; LLM Risk Doctor cites committed_risk vs the
+    # buffer. Renaming/reordering these fields breaks the env's true-sequential buffer accounting.
     lots: float
     committed_risk: float   # USD this position loses if its reference stop is hit
     risk_per_lot: float     # USD/lot (stored on the slot for later buffer math)
@@ -61,6 +67,9 @@ class RiskManager:
     def risk_per_lot(self, symbol: str, atr_price: float) -> float:
         """USD lost per 1.0 lot if price moves stop_atr_mult*ATR against the trade."""
         stop_distance = max(0.0, atr_price) * self.cfg.stop_atr_mult
+        # COUPLING [C5] -> runtime/config.py: CONTRACT_SIZE[symbol] (price->USD per lot). The same
+        # dict is read by cost_layer/costs.py + env/trading_env.py; a wrong/missing key here
+        # silently falls back to 1.0 and mis-sizes risk. Keys must stay == config.SYMBOLS.
         return stop_distance * cfg.CONTRACT_SIZE.get(symbol, 1.0)
 
     def size(self, symbol: str, raw_size: float, atr_price: float,

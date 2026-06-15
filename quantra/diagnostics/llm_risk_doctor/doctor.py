@@ -91,6 +91,10 @@ class LLMRiskDoctor:
         return Path(path).read_text(encoding="utf-8", errors="replace")
 
     # -- evidence extractors --
+    # COUPLING [C8] -> quantra/diagnostics/telemetry_logger/logger.py: the "kind"=="step"/"header"
+    # tags + every field key read in diagnose()/heuristics (value, outcome["next_bar_return"],
+    # pre/post_mask_logits, risk_context["trailing_dd"], raw_size, law_states, chosen_action,
+    # hidden_summary, reward_decomposition) are produced by TelemetryLogger/StepPacket.
     @staticmethod
     def _steps(records: List[dict]) -> List[dict]:
         return [r for r in records if r.get("kind") == "step"]
@@ -123,6 +127,8 @@ class LLMRiskDoctor:
 
         # ---- CRITIC link: Critic Misalignment ----
         val = np.array([s["value"] for s in steps])
+        # COUPLING [C8] -> quantra/diagnostics/telemetry_logger/logger.py: relies on the
+        # StepPacket.outcome subkey "next_bar_return"; whoever fills outcome must use that exact key.
         out = np.array([s.get("outcome", {}).get("next_bar_return", 0.0) for s in steps])
         if val.std() > 0 and out.std() > 0:
             corr = float(np.corrcoef(val, out)[0, 1])
@@ -207,6 +213,8 @@ class LLMRiskDoctor:
 
     def _stagnation_blindness(self, steps) -> Optional[Diagnosis]:
         # HOLD-dominated in favourable legal contexts (a directional law active)
+        # COUPLING [C4] -> quantra/locked_core/laws/laws.py: [:9] assumes the 9-directional-then-3-gates
+        # law order; chosen_action==0 assumes HOLD==0 (C2, law_mask_engine/engine.py).
         fav = [s for s in steps if any(abs(x) == 1 for x in s["law_states"][:9])]
         if len(fav) < 10:
             return None

@@ -32,9 +32,14 @@ from typing import List, Optional
 
 import torch
 
+# COUPLING -> device.py: RepresentativePolicy.forward returns (direction, size, pointer,
+# value) in that order; _bench_one below unpacks it as (dlog, size, plog, v). Keep the
+# head order in device.py and the unpack here in sync.
 from .device import DeviceInfo, RepresentativePolicy, available_devices, resolve_device
 
 
+# COUPLING -> optimizer.py: optimizer._pick_device + print_report read these exact field
+# names (kind, label, steps_per_sec, note). Rename a field => the device-pick/report break.
 @dataclass(frozen=True)
 class BenchResult:
     """Per-device benchmark outcome, ready for the optimizer + the run report."""

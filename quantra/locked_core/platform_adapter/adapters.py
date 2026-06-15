@@ -34,6 +34,11 @@ from typing import Dict, List, Optional
 class Position:
     """One open broker position (a filled trade slot)."""
 
+    # COUPLING -> live_bridge/execution_adapter.py + live_bridge/live_session.py: these field
+    # names (ticket/symbol/side/lots/entry_price) + the side encoding (+1 long / -1 short, which
+    # mirrors the OPEN_LONG/OPEN_SHORT direction ints [C2] in law_mask_engine/engine.py) are read
+    # by the live bridge to reconcile slots. positions() below builds Position POSITIONALLY, so
+    # reordering/renaming these fields breaks both the constructors and the live-bridge readers.
     ticket: int
     symbol: str
     side: int          # +1 long, -1 short
@@ -44,6 +49,9 @@ class Position:
 class BrokerAdapter:
     """Abstract broker interface. ExecutionAdapter speaks only to this."""
 
+    # COUPLING -> live_bridge/execution_adapter.py: ExecutionAdapter calls exactly these methods
+    # (connect/market_order/close_position/positions/equity) with this signature shape (e.g.
+    # market_order(symbol, side, lots, price)). Changing a name/arg order here breaks every caller.
     def connect(self) -> bool: raise NotImplementedError
     def market_order(self, symbol: str, side: int, lots: float, price: float = 0.0) -> int: raise NotImplementedError
     def close_position(self, ticket: int, price: float = 0.0) -> bool: raise NotImplementedError
@@ -187,6 +195,10 @@ class MT5Adapter(BrokerAdapter):
 
     def recent_bars(self, symbol: str, n: int = 600):  # pragma: no cover
         """Pull the last n CLOSED 1m bars as a clean OHLCV+spread DataFrame (live feed)."""
+        # COUPLING -> live_bridge/live_session.py + data_loader/loader.py: the returned columns
+        # (open/high/low/close/tick_volume/spread) + 'time' index are the raw-bar contract the
+        # live session feeds into the FeatureBuilder. These names must match the offline loader's
+        # OHLCV+spread frame, else live-rebuilt features diverge from the trained schema [C1].
         import pandas as pd
         m = self._mt5
         m.symbol_select(symbol, True)
@@ -209,6 +221,8 @@ class MT5Adapter(BrokerAdapter):
 def make_adapter(kind: str = "sim", **kw) -> BrokerAdapter:
     """Factory: 'sim' (default, paper) or 'mt5' (real). Falls back to sim if MT5 is
     unavailable, so a non-Windows/CI environment always gets a working adapter."""
+    # COUPLING -> live_bridge/live_session.py + live_bridge/live_runner.py: those callers pass the
+    # kind strings "sim"/"mt5" verbatim. Renaming a kind here silently routes to the sim fallback.
     if kind == "mt5":
         try:
             return MT5Adapter(**kw)          # login/password/server/path/deviation/magic

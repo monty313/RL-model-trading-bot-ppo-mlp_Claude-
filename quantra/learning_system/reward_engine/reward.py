@@ -46,6 +46,9 @@ PAIN_K = 4.0   # exponential steepness of the pain ramp
 
 @dataclass
 class RewardContext:
+    # COUPLING -> env/trading_env.py: _reward()/build-context constructs RewardContext by
+    # these exact keyword field NAMES (net_pnl_delta, in_position, momentum_aligned,
+    # stagnation, drawdown_pct, day_progress, breach_risk). Renaming a field breaks that call.
     """Everything the engine needs for one step — the env populates it."""
 
     net_pnl_delta: float           # L0: equity change after costs this step / account
@@ -66,6 +69,8 @@ class RewardEngine:
 
     def _pain(self, dd_pct: float) -> float:
         """L3 exponential ramp from pain_zone_start (3.5%) to hard_wall (4.0%)."""
+        # COUPLING -> runtime/config.py: reads ChallengeConfig.pain_zone_start_pct and
+        # .hard_wall_pct by attribute; renaming those fields there breaks the pain ramp.
         lo, hi = self.challenge.pain_zone_start_pct, self.challenge.hard_wall_pct
         if dd_pct <= lo:
             return 0.0
@@ -83,6 +88,9 @@ class RewardEngine:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
         shaped = (l1 + l2 + l4) * l5_mult
+        # COUPLING [C8] -> diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/
+        # doctor.py: both read the "L0".."L5_mult"/"shaped" keys by name (L0-dominance /
+        # Reward-Hijack checks). "total" is consumed by reward()/env. Keep these key names.
         return {"L0": l0, "L1": l1, "L2": l2, "L3": l3, "L4": l4,
                 "L5_mult": l5_mult, "shaped": shaped, "total": l0 + shaped + l3}
 

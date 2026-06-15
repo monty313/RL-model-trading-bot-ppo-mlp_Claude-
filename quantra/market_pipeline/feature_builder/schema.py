@@ -58,6 +58,9 @@ import json
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+# COUPLING [C1] -> quantra/runtime/config.py: INCLUDE_RAW_INPUTS toggles whether the
+# market_raw block exists, which changes STATE_DIM (167 vs 149); config.nominal_state_dim
+# and the committed state_vector.json snapshot must be regenerated when this flag flips.
 from quantra.runtime.config import INCLUDE_RAW_INPUTS
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,8 @@ _CCI_PERIODS = [10, 30, 100]
 
 # Raw-input groupings (operator override). Raw SMA on the trend TFs; raw CCI on the
 # full CCI observation TF set.
+# COUPLING [C1] -> feature_builder/builder.py: RAW_SMA_TFS is imported there to gate which
+# timeframes emit raw_sma* columns; the names produced must match _market_raw_names() below.
 RAW_SMA_TFS = ["5m", "30m", "4H"]
 RAW_CCI_TFS = ["1m", "5m", "30m", "4H"]
 
@@ -132,6 +137,10 @@ def _market_raw_names() -> List[str]:
     return names
 
 
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py (LAW_NAMES) + law_mask_engine/engine.py
+# (_GATE_IDX/_LAW_IDX, [:9] dir-slice): this is the canonical 12-name law block — 9
+# directional laws THEN 3 gates. laws.LAW_NAMES must mirror it exactly; the mask engine
+# hardcodes offset 9 for the gates. Reorder/rename here => break laws + the mask engine.
 def _law_names() -> List[str]:
     return [
         "law_super_trend_bb", "law_super_trend_cci", "law_super_trend_ssma",
@@ -146,6 +155,9 @@ def _law_names() -> List[str]:
 # RepresentativePolicy pointer logits, and the env/live slot arrays. Change => update
 # ppo_agent, runtime.device, env.trading_env, execution_adapter, live_session, mask engine.
 N_SLOTS = 5
+# COUPLING [C1/C3] -> quantra/env/trading_env.py (_COL) + learning_system/trainer/scheduler.py:
+# these 7 per-slot feature names AND their order define each slot's sub-vector that the
+# env fills (slot{s}_{f}) and the trainer/scheduler reads by name. Reorder/rename => fix _COL.
 _SLOT_FEATURES = ["dir", "upnl", "age", "entry_dist", "mfe", "mae", "occupied"]  # 7 -> trade block
 
 
@@ -153,10 +165,15 @@ def _trade_names() -> List[str]:
     return [f"slot{s}_{f}" for s in range(N_SLOTS) for f in _SLOT_FEATURES]
 
 
+# COUPLING [C1] -> quantra/env/trading_env.py: these 3 portfolio aggregate names + order
+# are filled by the env per step (the "portfolio" sub-vector of assemble_state); change => fix env.
 def _portfolio_names() -> List[str]:
     return ["port_net_exposure", "port_net_size", "port_total_upnl"]
 
 
+# COUPLING [C1] -> quantra/ftmo_passing/challenge_state.py (account_block()) + env/trading_env.py:
+# the order of these 7 account names IS the order ChallengeState.account_block() must emit
+# and the env appends to the obs. Add/reorder => fix account_block() + EXPECTED_WIDTHS["account"].
 def _account_names() -> List[str]:
     return [
         "acct_equity_norm", "acct_equity_dev", "acct_equity_slope",
@@ -167,6 +184,9 @@ def _account_names() -> List[str]:
 
 # Ordered blocks: (name, builder). Order IS the observation order. market + market_raw
 # are the precomputed (action-independent) blocks.
+# COUPLING [C1] -> quantra/env/trading_env.py (assemble_state block order) + feature_builder/builder.py:
+# this tuple order sets the concatenation order in builder.assemble_state and the env's
+# block offsets; _PRECOMPUTED_BLOCKS below selects which blocks builder precomputes.
 _BLOCK_BUILDERS = [
     ("market", _market_names),
     ("market_raw", _market_raw_names),
@@ -217,6 +237,10 @@ def build_schema() -> StateVectorSchema:
 
 # Singleton + public constants.
 SCHEMA = build_schema()
+# COUPLING [C1] -> quantra/runtime/config.py (nominal_state_dim must == STATE_DIM),
+# quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
+# (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
+# logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
 STATE_DIM = SCHEMA.dim                                   # 167 (raw on) / 149 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
@@ -260,6 +284,10 @@ def state_vector_fingerprint() -> dict:
     change from quietly degrading FTMO pass-rate between runs.
     """
     blocks = {n: [s, e] for n, (s, e) in SCHEMA.block_spans.items()}
+    # COUPLING [C1] -> tools/snapshot.py + tests/snapshots/state_vector.json: these exact
+    # dict keys (schema_version, state_dim, block_widths, feature_names, sha256, ...) are
+    # the fingerprint the snapshot guard diffs. Add/rename a key or bump schema_version =>
+    # regenerate the committed JSON via tools/snapshot.py --update.
     payload = {
         "schema_version": 1,
         "include_raw_inputs": INCLUDE_RAW_INPUTS,

@@ -29,6 +29,8 @@ from typing import List, Optional
 from quantra.diagnostics.mlp_interpreter.interpreter import MLPInterpreter
 
 
+# COUPLING -> quantra/diagnostics/mlp_interpreter/interpreter.py: delegates to MLPInterpreter's
+# constructor (records, out_dir=) + its failure_atlas()/pass_day_atlas() method names; rename there => fix here.
 def failure_atlas(records: List[dict], out_dir: Optional[Path] = None) -> Path:
     """Build the Failure Atlas PNG from a telemetry run (visual 6)."""
     return MLPInterpreter(records, out_dir=out_dir).failure_atlas()

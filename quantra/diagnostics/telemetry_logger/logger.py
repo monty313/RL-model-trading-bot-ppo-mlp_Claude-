@@ -37,9 +37,13 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+# COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: header logs
+# SCHEMA.blocks/feature_names; if the observation layout changes, regenerate telemetry.
 from quantra.market_pipeline.feature_builder.schema import SCHEMA
 from quantra.runtime import config as cfg
 
+# COUPLING [C8] -> quantra/diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/doctor.py:
+# they read this schema_version + StepPacket fields by exact name; bump => update both readers.
 SCHEMA_VERSION = "1.0.0"   # 🔴 versioned; no field removed without approval
 
 
@@ -56,6 +60,10 @@ def _jsonable(v: Any) -> Any:
     return v
 
 
+# COUPLING [C8] -> quantra/diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/doctor.py:
+# every field name below is read by exact key there (observation, hidden_summary, value, chosen_action,
+# pre/post_mask_logits, reward_decomposition, risk_context["trailing_dd"], law_states, raw_size, outcome).
+# Rename/drop any field => break both readers.
 @dataclass
 class StepPacket:
     """One decision step — every field required by the data contract."""
@@ -106,12 +114,16 @@ class TelemetryLogger:
         self.path = (out_dir or cfg.TELEMETRY_DIR) / f"{run_id}.jsonl"
         self._buf: List[dict] = []
         # Run header: schema version + the grouped feature block names (contract).
+        # COUPLING [C8] -> quantra/diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/doctor.py:
+        # they pick out kind=="header"/"step" and read run_id/schema_version; keep these key strings stable.
         self._buf.append({"kind": "header", "schema_version": SCHEMA_VERSION,
                           "run_id": run_id, "seed": seed, "window_id": window_id,
                           "blocks": {name: names for name, names in SCHEMA.blocks.items()},
                           "feature_names": SCHEMA.feature_names})
 
     def log_step(self, packet: StepPacket) -> None:
+        # COUPLING [C8] -> quantra/diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/doctor.py:
+        # both filter records by r.get("kind")=="step"; this literal must stay "step".
         d = packet.to_dict(); d["kind"] = "step"; self._buf.append(d)
 
     def log_trade(self, trade: Dict[str, Any]) -> None:

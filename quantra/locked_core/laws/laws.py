@@ -36,7 +36,13 @@ from __future__ import annotations
 
 import numpy as np
 
+# COUPLING [C1] -> market_pipeline/feature_builder/indicators.py: ADF_CRIT_5PCT is the
+# locked 5% DF critical value the Stationarity gate compares against; changing it there
+# silently shifts the stat_gate flag here (and the legal space the mask derives from it).
 from quantra.market_pipeline.feature_builder.indicators import ADF_CRIT_5PCT
+# COUPLING [C1] -> market_pipeline/feature_builder/schema.py: PRECOMPUTED_NAMES order +
+# SCHEMA.blocks["law"] are consumed below (_IDX map + LAW_NAMES). Adding/renaming/reordering
+# precomputed features or law names there must change _IDX/LAW_NAMES usage here in lockstep.
 from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES, SCHEMA
 
 # The 12 law/gate names, in schema `law` block order. compute_law_states returns
@@ -78,6 +84,10 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
     mat = np.atleast_2d(matrix).astype(np.float32)
 
     # ---- SUPER TREND ----
+    # COUPLING [C1] -> market_pipeline/feature_builder/schema.py + feature_builder/builder.py:
+    # every "boll_*"/"ssma_align_*"/"atr_dev_*"/"spread_range_ratio_*"/"adf_stat_*" string
+    # below must exist (same spelling) in PRECOMPUTED_NAMES and be emitted by the builder,
+    # else _c() raises KeyError on _IDX. Renaming a feature there breaks every law that reads it.
     # ST1 Bollinger: above BOTH outer upper bands (BB20+BB200) on 5m AND 30m -> buy.
     st1_buy = (_c(mat, "boll_bb20_up_5m") > 0) & (_c(mat, "boll_bb200_up_5m") > 0) \
         & (_c(mat, "boll_bb20_up_30m") > 0) & (_c(mat, "boll_bb200_up_30m") > 0)
@@ -87,6 +97,10 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
     # ST2 CCI: all four CCIs (30,100 on 5m,30m) above applied SMA AND above +100.
     # CCI is RAW now: "above applied SMA" = raw cci > raw cci_sma; "above +100" = raw cci > 100.
     # COUPLING: column names mirror schema/builder; thresholds mirror SOW-D4 (±100).
+    # COUPLING [C7] -> market_pipeline/feature_builder/schema.py + feature_builder/builder.py:
+    # the cci{p}_{tf} / cci{p}_sma_{tf} name templates (periods 30,100 here; 10,100 in PB2)
+    # must match schema._market_names / RAW_FEATURE_NAMES and what builder emits; curriculum
+    # masks cci{p}_1m. Change a CCI period/name there => update these f-string templates.
     _cci_pairs = [(p, tf) for tf in ("5m", "30m") for p in (30, 100)]
     cci_above = [_c(mat, f"cci{p}_{tf}") > _c(mat, f"cci{p}_sma_{tf}") for (p, tf) in _cci_pairs]
     cci_below = [_c(mat, f"cci{p}_{tf}") < _c(mat, f"cci{p}_sma_{tf}") for (p, tf) in _cci_pairs]
@@ -147,6 +161,10 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
     # engine applies Mode A/B; the observed flag is the raw stationary indicator.
     stat_gate = (_c(mat, "adf_stat_1m") < ADF_CRIT_5PCT).astype(np.float32)
 
+    # COUPLING [C4] -> market_pipeline/law_mask_engine/engine.py + feature_builder/builder.py:
+    # this stack ORDER (9 directional then atr/spread/stat gates) IS the law block; the mask
+    # engine slices law_states[:9]/[9:] + _GATE_IDX by position and the builder drops these 12
+    # columns into the schema "law" block. Reordering rows here desyncs both — keep == LAW_NAMES.
     states = np.stack([
         _state(st1_buy, st1_sell), _state(st2_buy, st2_sell), _state(st3_buy, st3_sell),
         _state(t1_buy, t1_sell), _state(t2_buy, t2_sell), _state(t3_buy, t3_sell),
@@ -159,6 +177,9 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
 
 def law_states_dict(row_states: np.ndarray) -> dict:
     """Name->value for one row's 12 states (telemetry + LLM Risk Doctor readability)."""
+    # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
+    # the keys are LAW_NAMES (Term-2 law-context fields). The Risk Doctor reads these exact
+    # names; renaming a law in schema._law_names changes these keys and breaks that contract.
     return {name: float(v) for name, v in zip(LAW_NAMES, row_states)}
 
 

@@ -46,6 +46,11 @@ def ppo_loss(
     """Return (loss_to_minimize, diagnostics). Defaults sit inside the law-school
     aggression ranges (clip 0.25-0.35, entropy 0.03-0.08); the trainer (M8) sets the
     live values from the missed-opportunity scheduler."""
+    # COUPLING -> ppo_agent/agent.py: arg ORDER here matches PPOAgent.evaluate_actions
+    # (obs, dir_mask, ptr_mask, a_dir, a_size, a_ptr) and the 3-tuple it returns.
+    # COUPLING -> rollout_buffer/buffer.py: these batch KEYS (obs/dir_mask/ptr_mask/
+    # a_direction/a_size/a_pointer/logp_old) are exactly the dict keys RolloutBuffer.get()
+    # emits; renaming a field there silently KeyErrors here.
     new_logp, entropy, values = agent.evaluate_actions(
         batch["obs"], batch["dir_mask"], batch["ptr_mask"],
         batch["a_direction"], batch["a_size"], batch["a_pointer"],

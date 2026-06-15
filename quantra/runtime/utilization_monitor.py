@@ -40,6 +40,9 @@ except Exception:  # pragma: no cover
     pynvml = None
 
 
+# COUPLING -> __main__.py: __main__ calls UtilizationMonitor as a context manager then
+# prints summary.render(); the trainer/telemetry may also fold these fields in. The field
+# names + render() string shape are the consumed contract.
 @dataclass
 class UtilizationSummary:
     """Aggregated utilisation over a monitored window."""

@@ -28,6 +28,8 @@ class ManualHalt:
     """Operator circuit-breaker. Flattens everything and latches until reset."""
 
     def __init__(self):
+        # COUPLING -> quantra/live_bridge/live_runner.py + live_session.py: they read .is_halted
+        # and set ._halted = True directly on breach auto-flat; keep this attr name + property in sync.
         self._halted = False
 
     @property
@@ -37,6 +39,8 @@ class ManualHalt:
     def halt(self, broker, price: float = 0.0) -> int:
         """Force-flatten ALL open positions and latch HALTED. Returns # closed."""
         closed = 0
+        # COUPLING -> quantra/locked_core/platform_adapter/adapters.py: relies on broker.positions()
+        # yielding objects with a .ticket attr + close_position(ticket)->bool. Called via live_runner.manual_halt.
         for pos in list(broker.positions()):
             if broker.close_position(pos.ticket, price):
                 closed += 1

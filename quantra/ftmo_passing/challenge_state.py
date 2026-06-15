@@ -33,6 +33,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# COUPLING [C5] -> quantra/runtime/config.py: ChallengeConfig fields read below
+# (daily_risk_pct, phase_b_trailing_pct, daily_target_pct, ftmo_account_size) must keep
+# these exact names/units (%) or wall/target math here silently breaks.
 from quantra.runtime.config import ChallengeConfig
 
 
@@ -40,6 +43,10 @@ from quantra.runtime.config import ChallengeConfig
 class ChallengeState:
     """Mutable shared account. One instance per episode, read by all 4 symbols."""
 
+    # COUPLING [C5] -> quantra/env/trading_env.py: env constructs ChallengeState(account_size,
+    # challenge) and reads attrs (equity, peak_equity, account_size, remaining_buffer, breached,
+    # should_autoflat) + methods (mark_to_market, realize, charge, enter_phase_b, account_block).
+    # Renaming any of these breaks the env's account wiring; live_bridge/live_session.py too.
     account_size: float
     challenge: ChallengeConfig = field(default_factory=ChallengeConfig)
 
@@ -130,6 +137,10 @@ class ChallengeState:
         daily_buf = (self.equity - self.wall_equity) / self.account_size  # same anchor (Phase A)
         day_progress = self.day_pnl / ((self.challenge.daily_target_pct / 100.0) * self.account_size)
         overall_progress = (self.equity - self.account_size) / self.account_size
+        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 7-scalar
+        # order MUST equal schema._account_names() (equity_norm, equity_dev, equity_slope,
+        # trailing_buffer, daily_buffer, day_progress, overall_progress); also consumed via
+        # env/trading_env.py _obs()/_reward() (reads index [5]=day_progress). Reorder -> breaks both.
         return np.array([
             eq_norm, eq_dev, 0.0, trailing_buf, daily_buf, day_progress, overall_progress
         ], dtype=np.float32)

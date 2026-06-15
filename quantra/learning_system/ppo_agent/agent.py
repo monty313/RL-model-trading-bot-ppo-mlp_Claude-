@@ -43,7 +43,14 @@ import torch
 import torch.nn as nn
 from torch.distributions import Beta, Categorical
 
+# COUPLING [C1] -> market_pipeline/feature_builder/schema.py: STATE_DIM is the trunk
+# input width; if schema's FEATURE_NAMES/EXPECTED_WIDTHS change, this network's input
+# layer changes too (and runtime/config.nominal_state_dim must match).
 from quantra.market_pipeline.feature_builder import STATE_DIM
+# COUPLING [C2/C3] -> market_pipeline/law_mask_engine/engine.py: the direction action
+# ints (HOLD/OPEN_LONG/OPEN_SHORT/CLOSE), N_DIR_ACTIONS and N_SLOTS are defined there;
+# the gating (_gates) and head widths below MUST stay in lockstep with that file +
+# runtime/device.py (RepresentativePolicy mirrors these head sizes).
 from quantra.market_pipeline.law_mask_engine.engine import (
     CLOSE,
     N_DIR_ACTIONS,
@@ -73,6 +80,9 @@ def _masked_categorical(logits: torch.Tensor, mask: torch.Tensor) -> Categorical
 
 @dataclass
 class AgentStep:
+    # COUPLING -> learning_system/trainer/trainer.py: collect_rollout reads these field
+    # NAMES (step.a_direction/a_size/a_pointer/log_prob/value); renaming/reordering here
+    # breaks the buffer.add() call there. Fields also map to RolloutBuffer FIELDS.
     """One forward pass result (training): action + bookkeeping for the buffer."""
 
     a_direction: torch.Tensor
@@ -161,6 +171,8 @@ class PPOAgent:
         beta = self.net._beta(slog)
         a_size = (beta.concentration1 / (beta.concentration1 + beta.concentration0))
         a_ptr = (plog + pm).argmax(dim=-1)
+        # COUPLING -> live_bridge/live_session.py + live_runner.py + acceptance.py: this
+        # 4-tuple order (a_dir, a_size, a_ptr, value) is unpacked positionally there.
         return a_dir, a_size, a_ptr, value
 
     def evaluate_actions(self, obs, dir_mask, ptr_mask, a_dir, a_size, a_ptr):
@@ -174,6 +186,8 @@ class PPOAgent:
         og, cg = self._gates(a_dir)
         logp = ddist.log_prob(a_dir) + og * sdist.log_prob(a_size) + cg * pdist.log_prob(a_ptr)
         ent = ddist.entropy() + og * sdist.entropy() + cg * pdist.entropy()
+        # COUPLING -> learning_system/ppo_agent/loss.py: ppo_loss unpacks this 3-tuple as
+        # (new_logp, entropy, values) in that exact order — keep them aligned.
         return logp, ent, value
 
 

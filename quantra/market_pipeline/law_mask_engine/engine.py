@@ -36,6 +36,9 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py: GATES + LAW_NAMES (12 names, 9
+# directional then 3 gates) and compute_law_states are imported here; _GATE_IDX/_LAW_IDX
+# below and the [:9] dir-slice assume that exact order. Reorder/rename in laws.py => break this.
 from quantra.locked_core.laws.laws import GATES, LAW_NAMES, compute_law_states
 
 # Direction action indices. COUPLING [C2 in COUPLINGS.md]: these integer meanings are
@@ -54,6 +57,9 @@ FLAT, LONG, SHORT = 0, 1, -1
 MODE_LIVE = "live"
 MODE_SCHOOL = "school"
 
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py: the hardcoded offset 9 assumes
+# laws.LAW_NAMES is exactly 9 directional laws followed by the 3 GATES; this mirrors
+# schema._law_names order. If laws.py changes the count/order, fix the 9 here.
 _GATE_IDX = {name: 9 + i for i, name in enumerate(GATES)}  # gates are the last 3
 _LAW_IDX = {name: i for i, name in enumerate(LAW_NAMES)}
 
@@ -62,6 +68,10 @@ _LAW_IDX = {name: i for i, name in enumerate(LAW_NAMES)}
 class MaskResult:
     """Per-step mask + the inputs that produced it (logged for the Risk Doctor)."""
 
+    # COUPLING [C2/C3] -> quantra/env/trading_env.py + quantra/ppo_agent/agent.py: these
+    # field names + array widths (direction (4,) per N_DIR_ACTIONS, pointer (5,) per
+    # N_SLOTS, law_states (12,)) are unpacked by the env step and added to the agent's
+    # head logits; rename a field or change a width => fix the consumers + telemetry.
     direction_mask: np.ndarray   # (4,) additive {0, -1e9}
     pointer_mask: np.ndarray     # (5,) additive {0, -1e9}
     law_states: np.ndarray       # (12,)
@@ -156,6 +166,9 @@ def build_pointer_mask(occupied: Sequence[float]) -> np.ndarray:
 
 
 # Default "required laws" if a school stage doesn't specify (all 9 directional laws).
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py + quantra/learning_system/curriculum_manager/curriculum.py:
+# the [:9] slice assumes the first 9 LAW_NAMES are the directional laws; curriculum
+# passes required_laws by these exact law-name strings into MODE_SCHOOL masking.
 DIRECTIONAL_DEFAULT: List[str] = list(LAW_NAMES[:9])
 
 
@@ -170,6 +183,9 @@ class LawMask:
 
     def step(self, market_row: np.ndarray, position: int, occupied: Sequence[float]) -> MaskResult:
         """Compute the full mask for one symbol at one bar."""
+        # COUPLING [C1] -> quantra/locked_core/laws/laws.py + feature_builder/schema.py:
+        # market_row must be in PRECOMPUTED_NAMES order — laws._IDX indexes it by feature name.
+        # If schema reorders the precomputed block, laws._IDX (and this caller's row) must match.
         states = compute_law_states(np.asarray(market_row, dtype=np.float32))
         n_open = int(np.sum(np.asarray(occupied) > 0.5))
         dmask = build_direction_mask(

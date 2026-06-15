@@ -34,6 +34,9 @@ from typing import List
 class RunResult:
     """One (window, seed) episode outcome — the raw input to the scoreboard."""
 
+    # COUPLING -> quantra/ftmo_passing/validation/walk_forward.py: eval_fn there builds
+    # RunResult(...) and WalkForwardRunner.run reads r.passed; these field NAMES + the
+    # `passed` semantics are the contract. Removing/renaming a field breaks the runner.
     passed: bool          # hit DAILY_TARGET and avoided the trailing breach
     breached: bool        # touched the 4% wall
     target_hit: bool      # reached the daily target at least once
@@ -55,6 +58,8 @@ class Scoreboard:
     def pass_rate(self) -> float:
         return sum(r.passed for r in self.results) / self.n if self.n else 0.0
 
+    # COUPLING -> quantra/ftmo_passing/validation/walk_forward.py: PromotionGate.promote
+    # compares candidate.breach_count vs baseline.breach_count (the "no worse breach" I3 gate).
     @property
     def breach_count(self) -> int:
         return sum(r.breached for r in self.results)
@@ -72,6 +77,8 @@ class Scoreboard:
         return (self.pass_rate, -self.breach_count,
                 self.target_hit_consistency, -self.max_drawdown_path)
 
+    # COUPLING -> quantra/ftmo_passing/validation/walk_forward.py: PromotionGate.promote
+    # calls candidate.better_than(baseline) as the "scoreboard improved" I3 gate.
     def better_than(self, other: "Scoreboard") -> bool:
         return self.rank_key() > other.rank_key()
 

@@ -94,6 +94,8 @@ class RepresentativePolicy(nn.Module):
 
     def forward(self, x: torch.Tensor):
         h = self.trunk(x)
+        # COUPLING -> throughput_benchmark.py: _bench_one unpacks this 4-tuple in order
+        # (dlog, size, plog, v). Reorder/extend these heads => benchmark loss line breaks.
         return (
             self.direction_head(h),
             self.size_head(h),
