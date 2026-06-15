@@ -92,6 +92,27 @@ def _gates_allow_opens(states: np.ndarray, stationarity_mode: str) -> bool:
     return bool(atr_ok and spread_ok and stat_ok)
 
 
+def _apply_training_wheels(mask: np.ndarray, wheel_states: Optional[Sequence[float]]) -> None:
+    """Operator-directed semi-permanent counter-trend OPEN blocks (mutates `mask`).
+
+    wheel_states = (tw_cci_block, tw_bb_block), each +1 (uptrend) / 0 / -1 (downtrend).
+    The two wheels are INDEPENDENT — each bans on its own (union with the rest):
+      +1 (uptrend context)  -> forbid OPEN_SHORT (no selling into the 30m+4H uptrend)
+      -1 (downtrend context)-> forbid OPEN_LONG  (no buying into the 30m+4H downtrend)
+    HOLD/CLOSE are never touched here, and these never RE-enable an already-forbidden
+    action (mask is additive -1e9). 4H is used by explicit operator override of the
+    locked 4H-observation-only rule; these wheels are isolated from the 9 locked laws
+    and gated by config.TRAINING_WHEELS so they can be removed. COUPLING [C9].
+    """
+    if wheel_states is None:
+        return
+    for s in wheel_states:                 # each flag bans independently
+        if s == 1:
+            mask[OPEN_SHORT] = NEG
+        elif s == -1:
+            mask[OPEN_LONG] = NEG
+
+
 def build_direction_mask(
     law_states: np.ndarray,
     position: int,
@@ -99,12 +120,16 @@ def build_direction_mask(
     mode: str = MODE_LIVE,
     required_laws: Optional[Sequence[str]] = None,
     stationarity_mode: str = "A",
+    training_wheels: bool = False,
+    wheel_states: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """Additive direction mask (4,) of {0, -1e9}. HOLD is never masked.
 
     Order of restriction: base position legality -> slot limits -> gates (ban opens)
-    -> directional laws (LIVE ban / SCHOOL permission). This mirrors SOW §2.3-2.4 +
-    THE_TRADING_CODE.md so the legal set is exactly what the blueprint prescribes.
+    -> directional laws (LIVE ban / SCHOOL permission) -> training wheels (operator
+    counter-trend OPEN blocks). This mirrors SOW §2.3-2.4 + THE_TRADING_CODE.md so the
+    locked legal set is exactly the blueprint's; the wheels are an additive operator
+    override applied last (they only ever REMOVE more, never re-open).
     """
     mask = np.zeros(N_DIR_ACTIONS, dtype=np.float32)
 
@@ -153,6 +178,10 @@ def build_direction_mask(
             mask[OPEN_SHORT] = NEG
     else:
         raise ValueError(f"unknown enforcement mode: {mode!r}")
+
+    # 5) Training wheels (operator override): counter-trend OPEN blocks, applied last.
+    if training_wheels:
+        _apply_training_wheels(mask, wheel_states)
 
     mask[HOLD] = 0.0  # HOLD is always legal — a legal action always exists.
     return mask
@@ -210,3 +239,16 @@ class LawMask:
 #   C: Breach-bound and out-of-context directions are now mechanically impossible to
 #      sample, in both training and live, so the discipline transfers and the bot
 #      stops losing challenges to directional/regime mistakes.
+# [2026-06-15] Operator override — training wheels (counter-trend OPEN blocks).
+#   I: The operator wants semi-permanent "training wheels" forbidding opens against a
+#      strong 30m+4H trend (2 CCI 5/15 above/below SMA20; price above/below BB 10/100
+#      dev0.5), to stop the bot wasting episodes opening into breach-bound trends.
+#   R: Operator decision 2026-06-15. Additive + applied LAST (only removes options,
+#      never re-opens); the two wheels ban INDEPENDENTLY; isolated from the locked 9
+#      laws (their 4H-observation-only invariant is untouched — wheels are a separate
+#      operator override that does read 4H); gated by config.TRAINING_WHEELS.
+#   A: build_direction_mask gained training_wheels + wheel_states; _apply_training_wheels
+#      bans OPEN_SHORT on +1 (uptrend) / OPEN_LONG on -1 (downtrend) per flag.
+#   C: While the wheels are on, the policy cannot open counter-trend on the 30m+4H
+#      context, so fewer breaches per window and faster convergence to a passing brain —
+#      with HOLD always legal and the wheels removable once discipline is learned.

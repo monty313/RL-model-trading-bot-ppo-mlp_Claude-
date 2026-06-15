@@ -52,6 +52,23 @@ Z_LOOKBACKS = (10, 100)
 ADX_PERIODS = (5, 15)
 CCI_PERIODS = (10, 30, 100)
 
+# ---------------------------------------------------------------------------
+# TRAINING-WHEEL indicator params [operator decision 2026-06-15]. These are NEW,
+# ADDITIVE configs used ONLY by the semi-permanent "training wheels" block masks
+# (counter-trend OPEN blocks on 30m+4H) — they do NOT touch the locked SOW-D4
+# laws above. Reuse the same vectorized cci()/bollinger()/applied_sma_shift().
+#   * CCI 5 & 15 with applied SMA period 20, shift 0 (NOT the locked 2/sh4)
+#   * Bollinger 10 & 100 with deviation 0.5 (NOT the locked 20/200 dev1)
+# Read by feature_builder.builder (emits the ingredients) + law_mask_engine
+# (consumes the derived block flags). 4H is intentionally used here (operator
+# override of the locked "4H observation-only" rule) — these are training wheels,
+# kept isolated + toggleable via config.TRAINING_WHEELS. See COUPLINGS.md [C9].
+WHEEL_CCI_PERIODS = (5, 15)
+WHEEL_CCI_SMA = 20
+WHEEL_CCI_SHIFT = 0
+WHEEL_BB_FAST, WHEEL_BB_SLOW, WHEEL_BB_DEV = 10, 100, 0.5
+WHEEL_TFS = ("30m", "4H")
+
 
 def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
@@ -195,6 +212,17 @@ def rolling_df_stat(close: pd.Series, window: int = 100) -> pd.Series:
 #      rolling/shift of past bars (no forward peek); inf->nan for clean downstream fill.
 #   C: The legal space stays identical to the blueprint and transfers to live, so the
 #      bot trains on — and keeps passing — the real challenge, not a drifted variant.
+# [2026-06-15] Operator — training-wheel indicator params (CCI 5/15 SMA20 sh0; BB 10/100 dev0.5).
+#   I: The operator wants semi-permanent counter-trend OPEN blocks ("training wheels")
+#      keyed off CCI 5/15 (applied SMA 20, shift 0) and BB 10/100 (dev 0.5) on 30m+4H —
+#      indicator configs that did not exist (locked CCI is 10/30/100 SMA2 sh4; BB 20/200 dev1).
+#   R: Operator decision 2026-06-15; additive — must NOT alter the locked SOW-D4 params
+#      or the 9-law legal space (kept verbatim above).
+#   A: Added WHEEL_CCI_PERIODS/WHEEL_CCI_SMA/WHEEL_CCI_SHIFT + WHEEL_BB_* + WHEEL_TFS as
+#      new constants; the builder reuses cci()/applied_sma_shift()/bollinger() with them.
+#   C: The bot gains hard counter-trend "training wheels" (fewer breach-bound opens =
+#      fewer wasted episodes), so it converges toward passing faster, with the locked
+#      laws untouched and the wheels removable via config.TRAINING_WHEELS.
 # [2026-06-13] M3 — added rolling Dickey-Fuller stat for the Stationarity gate.
 #   I: The Stationarity Regime Gate (F4) needs a 100-bar ADF p<0.05 signal, but
 #      statsmodels.adfuller per bar over ~1.8M bars/symbol is far too slow.

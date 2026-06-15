@@ -7,15 +7,15 @@ blocks, so the total width is fixed and asserted everywhere. This is the contrac
 the FeatureBuilder fills, the env assembles, the PPO trunk consumes, and the
 TelemetryLogger labels (the data contract requires "grouped feature block names").
 
-Block widths (default INCLUDE_RAW_INPUTS=True -> total 185):
-    market     110   market+time + gate ingredients + RAW CCI(value & SMA) + RAW Bollinger levels
+Block widths (default INCLUDE_RAW_INPUTS=True -> total 203):
+    market     128   market+time + gate ingredients + RAW CCI + RAW Bollinger + training wheels
     market_raw  18   RAW price-SMA inputs (operator-directed; precomputed)
     law         12   9 laws + 3 gates (filled by LawMask, M3)
     trade x5    35   7 features x 5 slots (env, M4)
     portfolio    3   aggregates across slots (env, M4)
     account      7   equity/buffers + 2 challenge-progress (env, M4)
     ------------------
-    TOTAL      185   (167 when INCLUDE_RAW_INPUTS=False)
+    TOTAL      203   (185 when INCLUDE_RAW_INPUTS=False)
 
 CCI is kept RAW (operator decision 2026-06-13): no /100, no normalized deviation —
 the raw CCI value + its raw shifted-forward SMA(2, shift4) are exposed so the policy
@@ -76,6 +76,16 @@ ADX_TFS = ["1m", "30m", "4H"]
 _BB_BANDS = ["bb20_mid", "bb20_up", "bb20_lo", "bb200_mid", "bb200_up", "bb200_lo"]
 _CCI_PERIODS = [10, 30, 100]
 
+# TRAINING-WHEEL feature set [operator decision 2026-06-15]. Ingredients for the two
+# semi-permanent counter-trend OPEN-block masks (CCI-based + BB-based), computed on
+# 30m+4H. ADDITIVE + observation-only as ingredients; the derived block flags
+# (tw_cci_block / tw_bb_block) are what the mask engine enforces when
+# config.TRAINING_WHEELS is on. 4H is used here by operator override of the locked
+# "4H observation-only" rule — kept isolated from the locked 9 laws. COUPLING [C9]
+# -> feature_builder/indicators.py (WHEEL_* params), feature_builder/builder.py
+# (emits these), law_mask_engine/engine.py (reads the flags by name via env._COL).
+_WHEEL_TFS = ["30m", "4H"]
+
 # Raw-input groupings (operator override). Raw SMA on the trend TFs; raw CCI on the
 # full CCI observation TF set.
 # COUPLING [C1] -> feature_builder/builder.py: RAW_SMA_TFS is imported there to gate which
@@ -123,6 +133,22 @@ def _market_names() -> List[str]:
     # Stationarity Regime Gate (rolling Dickey-Fuller stat). Observable per the
     # law-ingredient coverage rule so the bot sees why a gate opened/closed.
     names += ["spread_atr_1m", "spread_range_ratio_1m", "adf_stat_1m"]
+    # TRAINING-WHEEL ingredients + block flags [operator 2026-06-15]. APPENDED at the
+    # END of the market block so every pre-existing feature index is unchanged. 8 RAW
+    # CCI(5,15) value+SMA(20,sh0) on 30m/4H (in RAW_FEATURE_NAMES, unclipped) + 8
+    # NORMALIZED BB(10,100,dev0.5) upper/lower distances (close-band)/ATR on 30m/4H
+    # (clipped) + 2 aggregate three-way block flags. The flags are what the mask
+    # engine reads; the ingredients make them interpretable (the "acts" the operator
+    # wants observable before they become enforced "laws").
+    for tf in _WHEEL_TFS:
+        for p in (5, 15):
+            names.append(f"tw_cci{p}_{tf}")        # RAW CCI value (unclipped)
+            names.append(f"tw_cci{p}_sma_{tf}")     # RAW applied SMA(20, shift 0)
+        for p in (10, 100):
+            names.append(f"tw_bb{p}_up_{tf}")       # (close - upper band) / ATR14
+            names.append(f"tw_bb{p}_lo_{tf}")       # (close - lower band) / ATR14
+    # +1 = uptrend context (blocks OPEN_SHORT) / -1 = downtrend (blocks OPEN_LONG).
+    names += ["tw_cci_block", "tw_bb_block"]
     return names
 
 
@@ -248,14 +274,14 @@ SCHEMA = build_schema()
 # quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
 # (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
 # logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
-STATE_DIM = SCHEMA.dim                                   # 185 (raw on) / 167 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 203 (raw on) / 185 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
 # COUPLING: this ORDER is the FeatureBuilder's output column order AND the index map
 # used by laws._IDX, env._COL, and the live session. Reorder here => reorder there.
 PRECOMPUTED_NAMES = SCHEMA.blocks["market"] + SCHEMA.blocks["market_raw"]
-PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 128 (raw on) / 110 (raw off)
+PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 146 (raw on) / 128 (raw off)
 
 # Backwards-compatible aliases (the normalized block only).
 MARKET_NAMES = SCHEMA.blocks["market"]
@@ -271,13 +297,18 @@ _RAW_CCI_NAMES = ([f"cci{p}_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS]
                   + [f"cci{p}_sma_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS])
 # RAW Bollinger band levels [operator 2026-06-15] are price levels -> also unclipped.
 _RAW_BOLL_NAMES = [f"boll_{band}_raw_{tf}" for tf in BOLL_TFS for band in _BB_BANDS]
-RAW_FEATURE_NAMES = set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES) | set(_RAW_BOLL_NAMES)
+# Training-wheel RAW CCI values + their SMAs [operator 2026-06-15] are unbounded
+# (~[-300,300]) -> unclipped + standardized by the M5 agent, like the other CCI block.
+_RAW_WHEEL_CCI_NAMES = ([f"tw_cci{p}_{tf}" for tf in _WHEEL_TFS for p in (5, 15)]
+                        + [f"tw_cci{p}_sma_{tf}" for tf in _WHEEL_TFS for p in (5, 15)])
+RAW_FEATURE_NAMES = (set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES)
+                     | set(_RAW_BOLL_NAMES) | set(_RAW_WHEEL_CCI_NAMES))
 
 # Canonical block widths — asserted by the master suite so a refactor can't silently
 # drop a challenge-critical feature. COUPLING: must equal the real block_spans; the
 # master suite (Section D) asserts both, and config.nominal_state_dim must equal STATE_DIM.
 EXPECTED_WIDTHS = {
-    "market": 110,  # 92 + 18 RAW Bollinger band levels [operator 2026-06-15: keep both]
+    "market": 128,  # 92 + 18 RAW Bollinger + 18 training-wheel (16 ingredients + 2 flags)
     "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
     "law": 12, "trade": 35, "portfolio": 3, "account": 7,
 }
@@ -371,3 +402,16 @@ def state_vector_fingerprint() -> dict:
 #      5m/30m/4H) in RAW_FEATURE_NAMES (unclipped); market 92->110, STATE_DIM 167->185.
 #   C: The policy sees both the ATR-relative band distance AND the raw band positions/width
 #      (volatility in price terms) - more signal, with the masks/legal space untouched.
+# [2026-06-15] Operator decision — training-wheel ingredients + block flags.
+#   I: The operator wants semi-permanent counter-trend OPEN-block "training wheels"
+#      (CCI 5/15 SMA20-sh0 + BB 10/100 dev0.5 on 30m+4H). Their ingredients did not exist
+#      in the observation, and the operator wants them visible ("acts") AND enforced ("laws").
+#   R: Operator decision 2026-06-15; additive + APPENDED at the end of `market` (no existing
+#      index shifts); 4H used by explicit operator override of the 4H-observation-only rule,
+#      isolated from the locked 9 laws; removable via config.TRAINING_WHEELS.
+#   A: Appended 16 ingredients (8 RAW tw_cci{5,15}(_sma) + 8 normalized tw_bb{10,100}_{up,lo})
+#      + 2 three-way flags (tw_cci_block, tw_bb_block). RAW CCI values added to RAW_FEATURE_NAMES;
+#      market 110->128, STATE_DIM 185->203. Snapshot guard flags the drift (re-pinned --update).
+#   C: The flags become hard counter-trend masks (engine), so the bot can't open into the
+#      wheels' uptrend/downtrend - fewer breach-bound opens, faster convergence to passing -
+#      while the locked laws stay untouched and the wheels can be removed later.

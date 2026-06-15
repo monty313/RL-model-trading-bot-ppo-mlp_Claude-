@@ -190,6 +190,20 @@ DRIVE_FOLDER_ID: str = "1azEnCfwQjxPkBemmv9mxY3GyVAMcjF-3"
 INCLUDE_RAW_INPUTS: bool = True
 
 
+# ---------------------------------------------------------------------------
+# TRAINING WHEELS [operator decision 2026-06-15]. Semi-permanent counter-trend
+# OPEN-block masks (CCI 5/15 SMA20-sh0 + BB 10/100 dev0.5 on 30m+4H). When True the
+# env/live session forbid opening AGAINST the wheels' trend context. These are
+# "training wheels": ON by default so the bot can't open into a strong 30m+4H trend
+# (fewer breach-bound trades => faster convergence to passing), removable by flipping
+# this to False once the policy is disciplined. The wheel INGREDIENTS + flags are in
+# the observation regardless (operator wants them visible); this flag only gates
+# ENFORCEMENT. COUPLING -> env/trading_env.py + live_bridge/live_session.py default
+# their `training_wheels` arg to this; law_mask_engine.build_direction_mask applies it.
+# ---------------------------------------------------------------------------
+TRAINING_WHEELS: bool = True
+
+
 # COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
 # env/trading_env.py + live_bridge/live_session.py: they read these exact field names
 # (daily_target_pct, daily_risk_pct, pain_zone_start_pct, hard_wall_pct, ...) to set the
@@ -285,8 +299,8 @@ class RuntimeConfig:
     # on; 146 off) without importing it (avoids an import cycle); the master suite
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
-    # suite). 167 with raw inputs on (CCI kept raw + raw price-SMA), 149 off.
-    nominal_state_dim: int = field(default_factory=lambda: 185 if INCLUDE_RAW_INPUTS else 167)
+    # suite). 203 with raw inputs on (raw CCI + raw price-SMA + training wheels), 185 off.
+    nominal_state_dim: int = field(default_factory=lambda: 203 if INCLUDE_RAW_INPUTS else 185)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss
@@ -375,6 +389,16 @@ def in_colab() -> bool:
 #      clamps target/risk to the mode bounds and pins wall+pain-zone to the trailing input.
 #   C: The operator can dial each account's target/stop/leverage and the bot trades the same
 #      normalized policy against it - consistent passing on the priority, safe scale when off.
+# [2026-06-15c] Training wheels flag + nominal_state_dim -> 203.
+#   I: Operator added semi-permanent counter-trend OPEN-block masks ("training wheels")
+#      with their own ingredients/flags; nothing toggled enforcement and the benchmark
+#      width no longer matched the schema (185->203).
+#   R: Operator decision 2026-06-15; COUPLING [C1] nominal_state_dim == schema.STATE_DIM
+#      (master-suite asserted); wheels must be removable.
+#   A: Added TRAINING_WHEELS (default True); nominal_state_dim 203 (raw on)/185 (off).
+#   C: The bot can't open against a strong 30m+4H trend while learning (fewer breaches =
+#      faster path to a passing policy), the wheels come off with one flag, and the
+#      hardware race still times the true observation width.
 # [2026-06-15b] Added stop_for_day toggle (OFF mode).
 #   I: OFF still needs a target (the aim) but the operator may want to bank+stop at it.
 #   R: Operator correction 2026-06-15.

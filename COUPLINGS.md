@@ -78,6 +78,21 @@ indexes gates as the LAST 3 (`_GATE_IDX`); `curriculum_manager` references law n
 `llm_risk_doctor` (reads the per-step fields). Field renames must propagate to both.
 **Why:** the interpreter + Risk Doctor reason from exact field names (the data contract).
 
+## C9 — Training-wheel feature names + block flags `tw_*` [2026-06-15 operator]
+**Defined in** `indicators.py` (`WHEEL_CCI_PERIODS/WHEEL_CCI_SMA/WHEEL_CCI_SHIFT`,
+`WHEEL_BB_FAST/SLOW/DEV`, `WHEEL_TFS`) + `schema.py::_market_names` (the `tw_cci{5,15}*`,
+`tw_bb{10,100}_{up,lo}_*` ingredients + the `tw_cci_block` / `tw_bb_block` flags) +
+`config.TRAINING_WHEELS` (the on/off toggle).
+**Consumers:** `builder.py` (emits the ingredients + computes the 2 flags),
+`law_mask_engine.build_direction_mask` (`_apply_training_wheels` bans counter-trend opens
+from the flags), `env/trading_env.py::_wheel_states` + `live_bridge/live_session.py`
+(read the flags by name and pass them to the mask — train/live parity).
+**Why:** these are a SEPARATE operator override (semi-permanent counter-trend "training
+wheels"), isolated from the locked 9 laws — they DO read 4H by explicit operator decision,
+unlike the laws. Rename a `tw_*` name in one place and the mask reads a missing column or
+bans nothing; flip `TRAINING_WHEELS` and enforcement lifts everywhere at once. The flags
+are observation features too (the "acts"), so a rename also shifts the pinned STATE_DIM.
+
 ---
 
 ## Update Log (IRAC) — standing rule since 2026-06-13

@@ -131,6 +131,22 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
             sell = (cci_vals[30] < cci_smas[30]) & (cci_vals[100] < cci_smas[100]) & (cci_vals[10] > cci_smas[10])
             out["cci_pullback_5m"] = _flag_three_way(buy, sell)
 
+    # --- TRAINING-WHEEL ingredients (30m/4H) [operator 2026-06-15] ---
+    # NEW additive configs (NOT the locked SOW-D4 params): CCI 5/15 with applied SMA
+    # period 20 shift 0 (RAW value + SMA), and Bollinger 10/100 dev 0.5 upper/lower
+    # distances in ATR units. These feed the two counter-trend block flags computed in
+    # build_market_matrix. 4H is used here by operator override (training wheels only).
+    # COUPLING [C9] -> indicators.WHEEL_* + schema._WHEEL_TFS + law_mask_engine (reads flags).
+    if tf in ind.WHEEL_TFS:
+        for p in ind.WHEEL_CCI_PERIODS:                 # (5, 15)
+            cp = ind.cci(h, l, c, p)
+            out[f"tw_cci{p}_{tf}"] = cp                  # RAW (unclipped via RAW_FEATURE_NAMES)
+            out[f"tw_cci{p}_sma_{tf}"] = ind.applied_sma_shift(cp, ind.WHEEL_CCI_SMA, ind.WHEEL_CCI_SHIFT)
+        for p in (ind.WHEEL_BB_FAST, ind.WHEEL_BB_SLOW):  # (10, 100)
+            _mid, up, lo = ind.bollinger(c, p, ind.WHEEL_BB_DEV)
+            out[f"tw_bb{p}_up_{tf}"] = (c - up) / atr_tf   # >0 => price above upper band
+            out[f"tw_bb{p}_lo_{tf}"] = (c - lo) / atr_tf   # <0 => price below lower band
+
     # --- ATR regime (1m/30m/4H): level, shifted ref, normalized deviation ---
     if tf in ("1m", "30m", "4H"):
         atr_t = ind.atr(h, l, c, ind.ATR_PERIOD)
@@ -234,6 +250,28 @@ def build_market_matrix(df_1m: pd.DataFrame, point_size: float = 1e-5) -> Market
     for tf in ("5m", "30m", "4H"):
         feat = _compute_tf_features(frames[tf], tf)
         cols = cols.join(_asof_onto(df_1m.index, feat))
+
+    # TRAINING-WHEEL block flags [operator 2026-06-15]. Computed here (not per-TF)
+    # because each flag aggregates BOTH 30m AND 4H, which only coexist on the 1m index
+    # after the as-of merges above. +1 = uptrend context (blocks OPEN_SHORT later) when
+    # the condition holds on BOTH timeframes; -1 = downtrend (blocks OPEN_LONG); else 0.
+    # NaN during warmup => comparisons are False => flag 0 (safe: no wheel before warmup).
+    # COUPLING [C9] -> law_mask_engine/engine.py reads tw_cci_block/tw_bb_block by name.
+    cci_above = np.logical_and.reduce([
+        (cols[f"tw_cci{p}_{tf}"] > cols[f"tw_cci{p}_sma_{tf}"]).to_numpy()
+        for tf in ("30m", "4H") for p in (5, 15)])
+    cci_below = np.logical_and.reduce([
+        (cols[f"tw_cci{p}_{tf}"] < cols[f"tw_cci{p}_sma_{tf}"]).to_numpy()
+        for tf in ("30m", "4H") for p in (5, 15)])
+    cols["tw_cci_block"] = np.where(cci_above, 1.0, np.where(cci_below, -1.0, 0.0))
+    # BB: "price above both BBs" = above the upper band of bb10 AND bb100 on both TFs.
+    bb_above = np.logical_and.reduce([
+        (cols[f"tw_bb{p}_up_{tf}"] > 0).to_numpy()
+        for tf in ("30m", "4H") for p in (10, 100)])
+    bb_below = np.logical_and.reduce([
+        (cols[f"tw_bb{p}_lo_{tf}"] < 0).to_numpy()
+        for tf in ("30m", "4H") for p in (10, 100)])
+    cols["tw_bb_block"] = np.where(bb_above, 1.0, np.where(bb_below, -1.0, 0.0))
 
     # Order to the canonical precomputed-block schema; missing = coding error.
     missing = [n for n in PRECOMPUTED_NAMES if n not in cols.columns]
@@ -382,3 +420,14 @@ __all__ = [
 #      (unclipped via RAW_FEATURE_NAMES). 18 new features; market 92->110.
 #   C: The policy gets the raw band positions/width alongside the ATR-scaled distance,
 #      with the masks unchanged - richer volatility/structure signal, same legal space.
+# [2026-06-15] Operator decision — emit training-wheel ingredients + block flags.
+#   I: The new counter-trend "training wheels" need CCI 5/15 (SMA20 sh0) + BB 10/100
+#      (dev0.5) on 30m/4H as ingredients, plus the two derived block flags the mask reads.
+#   R: Operator decision 2026-06-15; reuse the locked-safe vectorized indicator fns with
+#      the new WHEEL_* params; flags aggregate BOTH TFs (computed post as-of-merge).
+#   A: _compute_tf_features emits tw_cci{5,15}(_sma) + tw_bb{10,100}_{up,lo} for 30m/4H;
+#      build_market_matrix computes tw_cci_block / tw_bb_block (+1 up / -1 down / 0) from
+#      them. RAW CCI cols bypass ±CLIP; normalized BB dists are clipped; flags are ±1/0.
+#   C: The wheels' uptrend/downtrend context is now both observable (acts) and available
+#      to the mask (laws) as a precomputed, cache-cheap signal - no hot-loop cost, so it
+#      speeds convergence to passing without slowing training.

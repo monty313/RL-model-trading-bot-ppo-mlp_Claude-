@@ -120,6 +120,7 @@ class TradingEnv:
         stationarity_mode: str = "A",
         risk_cfg: Optional[cfg.RiskConfig] = None,
         cost_cfg: Optional[cfg.CostConfig] = None,
+        training_wheels: Optional[bool] = None,
     ):
         self.symbols: List[str] = list(data.keys())            # fixed processing order
         self.data = data
@@ -127,6 +128,9 @@ class TradingEnv:
         self.mask_mode = mask_mode
         self.required_laws = list(required_laws) if required_laws else None
         self.stationarity_mode = stationarity_mode
+        # Training wheels [operator 2026-06-15]: semi-permanent counter-trend OPEN blocks.
+        # Default follows config.TRAINING_WHEELS so a global flip removes them everywhere.
+        self.training_wheels = cfg.TRAINING_WHEELS if training_wheels is None else bool(training_wheels)
 
         lengths = {len(d.matrix) for d in data.values()}
         assert len(lengths) == 1, "all symbols must share one aligned index/length"
@@ -254,10 +258,18 @@ class TradingEnv:
     def _law_states(self, sym: str) -> np.ndarray:
         return compute_law_states(self.data[sym].matrix[self.t])
 
+    def _wheel_states(self, sym: str) -> np.ndarray:
+        """(tw_cci_block, tw_bb_block) for the current bar — precomputed market flags.
+        COUPLING [C9] -> feature_builder/builder.py emits these; engine consumes them."""
+        row = self.data[sym].matrix[self.t]
+        return np.array([row[_COL["tw_cci_block"]], row[_COL["tw_bb_block"]]], dtype=np.float32)
+
     def direction_mask(self, sym: str) -> np.ndarray:
         return build_direction_mask(
             self._law_states(sym), self._position(sym), self._n_open(sym),
             self.mask_mode, self.required_laws, self.stationarity_mode,
+            training_wheels=self.training_wheels,
+            wheel_states=self._wheel_states(sym) if self.training_wheels else None,
         )
 
     def _obs(self) -> np.ndarray:
@@ -564,3 +576,14 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #   C: The dominant learning signal now reaches the asset that actually held the position, and
 #      each day is its own fresh 2.5%/4% challenge — the credit assignment the bot needs to LEARN
 #      to pass. Demonstrated: 15/15 synthetic challenge-days banked +2.5%, 0 breached (worst DD 2.86%).
+# [2026-06-15d] Training wheels — counter-trend OPEN blocks wired into direction_mask.
+#   I: Operator wants semi-permanent "training wheels" that forbid opening against a strong
+#      30m+4H trend (CCI 5/15 + BB 10/100 context) so the bot stops wasting episodes on
+#      breach-bound counter-trend trades.
+#   R: Operator decision 2026-06-15; same masks must run in train + live (discipline transfers);
+#      isolated from the locked 9 laws; removable via config.TRAINING_WHEELS.
+#   A: Added self.training_wheels (defaults to cfg.TRAINING_WHEELS) + _wheel_states(sym) reading
+#      the precomputed tw_cci_block/tw_bb_block flags; direction_mask passes them to
+#      build_direction_mask. live_session does the same for parity.
+#   C: The policy can no longer open into the wheels' trend, so fewer breaches per window =>
+#      more banked days per seed => faster, cheaper convergence to a consistently-passing brain.

@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "include_raw_inputs": true,
-  "state_dim": 185,
-  "precomputed_dim": 128,
+  "state_dim": 203,
+  "precomputed_dim": 146,
   "block_widths": {
-    "market": 110,
+    "market": 128,
     "market_raw": 18,
     "law": 12,
     "trade": 35,
@@ -14,27 +14,27 @@
   "blocks": {
     "market": [
       0,
-      110
-    ],
-    "market_raw": [
-      110,
       128
     ],
-    "law": [
+    "market_raw": [
       128,
-      140
+      146
+    ],
+    "law": [
+      146,
+      158
     ],
     "trade": [
-      140,
-      175
+      158,
+      193
     ],
     "portfolio": [
-      175,
-      178
+      193,
+      196
     ],
     "account": [
-      178,
-      185
+      196,
+      203
     ]
   },
   "raw_feature_names": [
@@ -97,7 +97,15 @@
     "raw_sma30_5m",
     "raw_sma50_30m",
     "raw_sma50_4H",
-    "raw_sma50_5m"
+    "raw_sma50_5m",
+    "tw_cci15_30m",
+    "tw_cci15_4H",
+    "tw_cci15_sma_30m",
+    "tw_cci15_sma_4H",
+    "tw_cci5_30m",
+    "tw_cci5_4H",
+    "tw_cci5_sma_30m",
+    "tw_cci5_sma_4H"
   ],
   "feature_names": [
     "boll_bb20_mid_5m",
@@ -210,6 +218,24 @@
     "spread_atr_1m",
     "spread_range_ratio_1m",
     "adf_stat_1m",
+    "tw_cci5_30m",
+    "tw_cci5_sma_30m",
+    "tw_cci15_30m",
+    "tw_cci15_sma_30m",
+    "tw_bb10_up_30m",
+    "tw_bb10_lo_30m",
+    "tw_bb100_up_30m",
+    "tw_bb100_lo_30m",
+    "tw_cci5_4H",
+    "tw_cci5_sma_4H",
+    "tw_cci15_4H",
+    "tw_cci15_sma_4H",
+    "tw_bb10_up_4H",
+    "tw_bb10_lo_4H",
+    "tw_bb100_up_4H",
+    "tw_bb100_lo_4H",
+    "tw_cci_block",
+    "tw_bb_block",
     "raw_sma1_sh0_5m",
     "raw_sma1_sh1_5m",
     "raw_sma1_sh2_5m",
@@ -286,7 +312,7 @@
     "acct_day_progress",
     "acct_overall_progress"
   ],
-  "sha256": "1c2c0322feefba00d3ef92e1f4bd5955cd930bd77883e8d3a733592a1758442f",
+  "sha256": "03920d635b25d6e2ef5478e38a3bed7d2863cb59bea817754a08949b37fdb813",
   "_llm_interpretation": {
     "purpose": "This snapshot pins the observation the PPO policy sees. Judged against repeated FTMO passing, not PnL. A drift means the policy's WORLD changed.",
     "blocks": {

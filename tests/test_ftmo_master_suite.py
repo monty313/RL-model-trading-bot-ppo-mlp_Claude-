@@ -258,14 +258,16 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_185_with_raw_cci_bollinger_and_gate_ingredients():
-    # market 110 (incl. RAW CCI value+SMA + RAW Bollinger levels) + 18 raw price-SMA
-    # + 12 law + 35 trade + 3 portfolio + 7 account = 185
-    assert STATE_DIM == 185
+def test_schema_total_is_203_with_raw_bollinger_and_training_wheels():
+    # market 128 (RAW CCI value+SMA + RAW Bollinger + 18 training-wheel feats) + 18 raw
+    # price-SMA + 12 law + 35 trade + 3 portfolio + 7 account = 203
+    assert STATE_DIM == 203
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
-    assert EXPECTED_WIDTHS["market"] == 110 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["market"] == 128 and EXPECTED_WIDTHS["market_raw"] == 18
+    # the two training-wheel block flags exist (the operator's enforced "acts")
+    assert "tw_cci_block" in SCHEMA.feature_names and "tw_bb_block" in SCHEMA.feature_names
     assert len(SCHEMA.feature_names) == STATE_DIM
     assert len(set(SCHEMA.feature_names)) == STATE_DIM  # names unique
 
@@ -298,7 +300,7 @@ def test_raw_block_present_finite_and_unclipped(make_1m):
     """
     mm = build_market_matrix(make_1m(n_bars=4000, seed=26))
     raw_idx = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n in RAW_FEATURE_NAMES]
-    assert len(raw_idx) == 60      # 18 raw price-SMA + 24 raw CCI + 18 raw Bollinger levels
+    assert len(raw_idx) == 68      # 18 raw price-SMA + 24 raw CCI + 18 raw Bollinger + 8 raw wheel CCI
     assert np.isfinite(mm.matrix[:, raw_idx]).all()
     # a raw Bollinger band level exists and is a real price (unclipped, > the ±10 clip)
     boll_raw = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n.startswith("boll_") and "_raw_" in n]
@@ -534,6 +536,95 @@ def test_lawmask_wrapper_end_to_end():
     assert res.opens_allowed_by_gates is True
     assert res.direction_mask[OPEN_SHORT] < -1e8           # buy super-trend bans shorts
     assert res.direction_mask[OPEN_LONG] == 0
+
+
+# =============================================================================
+# SECTION TW — TRAINING WHEELS (operator counter-trend OPEN blocks, 2026-06-15)
+# FTMO link: these semi-permanent masks forbid opening AGAINST a strong 30m+4H trend
+# (CCI 5/15 vs SMA20-sh0; price vs BB10/100 dev0.5). Fewer breach-bound counter-trend
+# opens => fewer wasted episodes => faster convergence to a consistently-passing brain.
+# They are isolated from the locked 9 laws and removable via config.TRAINING_WHEELS.
+# =============================================================================
+def _wheel_df(n, seed):
+    """A long 1m frame with a slow oscillation over a random walk — long enough to warm
+    the 4H bands and varied enough that CCI diverges from its SMA in both directions, so
+    the wheel flags actually fire (the slow 4H BB100 needs ~24k 1m bars to come alive)."""
+    idx = pd.date_range("2025-01-01", periods=n, freq="1min")
+    rng = np.random.RandomState(seed)
+    steps = rng.randn(n) * 0.05 + np.sin(np.arange(n) / 3000.0) * 0.04
+    close = 100.0 + np.cumsum(steps)
+    return pd.DataFrame({"open": close, "high": close + 0.1, "low": close - 0.1,
+                         "close": close, "tick_volume": np.full(n, 100.0),
+                         "spread": np.full(n, 10.0)}, index=idx)
+
+
+def test_wheel_ingredients_and_flags_present_and_bounded():
+    """The wheel ingredients + the two block flags exist, are finite, and ∈ {-1,0,1}."""
+    mm = build_market_matrix(_wheel_df(9000, seed=3))
+    for tf in ("30m", "4H"):
+        for p in (5, 15):
+            assert f"tw_cci{p}_{tf}" in PRECOMPUTED_NAMES and f"tw_cci{p}_sma_{tf}" in PRECOMPUTED_NAMES
+        for p in (10, 100):
+            assert f"tw_bb{p}_up_{tf}" in PRECOMPUTED_NAMES and f"tw_bb{p}_lo_{tf}" in PRECOMPUTED_NAMES
+    for flag in ("tw_cci_block", "tw_bb_block"):
+        col = mm.matrix[:, PRECOMPUTED_NAMES.index(flag)]
+        assert np.isfinite(col).all()
+        assert set(np.unique(col)).issubset({-1.0, 0.0, 1.0})
+
+
+def test_wheel_flags_fire_in_both_directions():
+    """Over a long oscillating series the CCI wheel flags BOTH uptrend (+1) and downtrend
+    (-1), and the BB wheel flags an uptrend (+1) — the precomputed 'acts' are real signals,
+    not dead constants. (Needs ~24k bars so the 4H BB100 warms.)"""
+    mm = build_market_matrix(_wheel_df(26000, seed=1))
+    cci = mm.matrix[mm.valid_from:, PRECOMPUTED_NAMES.index("tw_cci_block")]
+    bb = mm.matrix[mm.valid_from:, PRECOMPUTED_NAMES.index("tw_bb_block")]
+    assert (cci == 1).sum() > 0 and (cci == -1).sum() > 0, "CCI wheel never fired both ways"
+    assert (bb == 1).sum() > 0, "BB wheel never flagged an uptrend breakout"
+
+
+def test_wheel_mask_blocks_counter_trend_open_each_direction():
+    """Uptrend flag bans OPEN_SHORT; downtrend bans OPEN_LONG; CCI/BB ban independently."""
+    s = _gates_open()                                   # gates open, no directional law
+    up_cci = build_direction_mask(s, 0, 0, training_wheels=True, wheel_states=np.array([1.0, 0.0]))
+    assert up_cci[OPEN_SHORT] < -1e8 and up_cci[OPEN_LONG] == 0 and up_cci[HOLD] == 0
+    down_bb = build_direction_mask(s, 0, 0, training_wheels=True, wheel_states=np.array([0.0, -1.0]))
+    assert down_bb[OPEN_LONG] < -1e8 and down_bb[OPEN_SHORT] == 0
+    # independent: only the BB wheel up -> only shorts banned (CCI flag neutral)
+    bb_only = build_direction_mask(s, 0, 0, training_wheels=True, wheel_states=np.array([0.0, 1.0]))
+    assert bb_only[OPEN_SHORT] < -1e8 and bb_only[OPEN_LONG] == 0
+
+
+def test_wheels_off_is_a_noop_and_hold_always_legal():
+    s = _gates_open()
+    on = build_direction_mask(s, 0, 0, training_wheels=True, wheel_states=np.array([1.0, -1.0]))
+    off = build_direction_mask(s, 0, 0, training_wheels=False, wheel_states=np.array([1.0, -1.0]))
+    assert off[OPEN_LONG] == 0 and off[OPEN_SHORT] == 0   # disabled -> no bans
+    assert on[HOLD] == 0 and off[HOLD] == 0               # HOLD always legal either way
+
+
+def test_wheels_only_remove_never_reopen_a_law_ban():
+    """Applied last + additive: a law-banned direction stays banned; wheels can't re-open."""
+    s = _gates_open(); s[_LIDX["law_super_trend_bb"]] = -1   # sell law -> bans OPEN_LONG
+    # a -1 (downtrend) BB wheel also bans OPEN_LONG; a +1 CCI wheel would ban OPEN_SHORT.
+    m = build_direction_mask(s, 0, 0, mode=MODE_LIVE, training_wheels=True,
+                             wheel_states=np.array([1.0, -1.0]))
+    assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+
+
+def test_env_direction_mask_applies_wheels_when_enabled():
+    """End-to-end through the env: the precomputed tw flags drive the live mask."""
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3,
+                    adf_stat_1m=-3.5, tw_cci_block=1.0)     # gates open + CCI uptrend wheel
+    T = 3
+    mat = np.tile(row, (T, 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.full(T, 100.0), atr=np.full(T, 1.0),
+                    spread=np.full(T, 10.0), valid_from=0)
+    on = TradingEnv({"EURUSD": sd}, training_wheels=True)
+    assert on.direction_mask("EURUSD")[OPEN_SHORT] < -1e8   # uptrend wheel bans shorts
+    assert on.direction_mask("EURUSD")[OPEN_LONG] == 0
+    off = TradingEnv({"EURUSD": sd}, training_wheels=False)
+    assert off.direction_mask("EURUSD")[OPEN_SHORT] == 0    # wheels off -> short legal
 
 
 # =============================================================================
@@ -1457,14 +1548,15 @@ def test_mt5_close_and_order_are_implemented_not_stubs():
     assert "retcode" in inspect.getsource(MT5Adapter._send)     # order_send result is checked
 
 
-def test_live_session_builds_179_obs_and_decides_on_a_bar_stream(make_1m):
+def test_live_session_builds_full_obs_and_decides_on_a_bar_stream(make_1m):
     df = make_1m(n_bars=6700, seed=3)
     sym = "EURUSD"
     ex = ExecutionAdapter(SimBrokerAdapter(), [sym])
     sess = LiveSession(PPOAgent(state_dim=STATE_DIM), ReplayBarFeed({sym: df}),
                        ex, RiskManager(account_size=10_000), [sym])
-    obs, price, atr, law = sess._observe(sym)
-    assert obs.shape == (STATE_DIM,) and law.shape == (12,)    # full 179 obs from live bars
+    obs, price, atr, law, wheel = sess._observe(sym)
+    assert obs.shape == (STATE_DIM,) and law.shape == (12,)    # full STATE_DIM obs from live bars
+    assert wheel.shape == (2,)                                 # tw_cci_block + tw_bb_block flags
     infos = sess.run_steps(2)                                   # process 2 closed bars
     assert infos and all("action" in i for i in infos)
     assert all(i["action"] in ("OPEN", "CLOSE", "HOLD", "OPEN_SKIPPED", "HALTED",

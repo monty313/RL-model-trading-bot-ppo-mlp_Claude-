@@ -206,8 +206,15 @@ class LiveSession:
     def __init__(self, agent: PPOAgent, feed: BarFeed, execution: ExecutionAdapter,
                  risk: RiskManager, symbols: List[str], halt: Optional[ManualHalt] = None,
                  challenge: Optional[cfg.ChallengeConfig] = None,
-                 point_sizes: Optional[Dict[str, float]] = None):
+                 point_sizes: Optional[Dict[str, float]] = None,
+                 training_wheels: Optional[bool] = None):
         self.agent = agent
+        # Training wheels [operator 2026-06-15]: same counter-trend OPEN blocks as the env,
+        # so the discipline learned in training transfers to live. Defaults to the global
+        # config flag. COUPLING [C9] -> reads the precomputed tw_cci_block/tw_bb_block flags.
+        self.training_wheels = cfg.TRAINING_WHEELS if training_wheels is None else bool(training_wheels)
+        self._wheel_idx = (PRECOMPUTED_NAMES.index("tw_cci_block"),
+                           PRECOMPUTED_NAMES.index("tw_bb_block"))
         self.feed = feed
         self.exec = execution
         self.risk = risk
@@ -237,14 +244,18 @@ class LiveSession:
                              trade=self.portfolio.trade_block(sym),
                              portfolio=self.portfolio.portfolio_block(sym),
                              account=self.portfolio.account.account_block())
-        return obs, price, atr, law
+        wheel = np.array([market_row[self._wheel_idx[0]], market_row[self._wheel_idx[1]]],
+                         dtype=np.float32)
+        return obs, price, atr, law, wheel
 
     def step_symbol(self, sym: str) -> dict:
         """Process one symbol at the latest bar: decide + execute deterministically."""
         if self.halt.is_halted:
             return {"action": "HALTED", "symbol": sym}
-        obs, price, atr, law = self._observe(sym)
-        dm = build_direction_mask(law, self.portfolio.position(sym), self.portfolio.n_open(sym))
+        obs, price, atr, law, wheel = self._observe(sym)
+        dm = build_direction_mask(law, self.portfolio.position(sym), self.portfolio.n_open(sym),
+                                  training_wheels=self.training_wheels,
+                                  wheel_states=wheel if self.training_wheels else None)
         pm = build_pointer_mask([sl.occupied for sl in self.portfolio.slots[sym]])
         # COUPLING -> quantra/learning_system/ppo_agent/agent.py: unpacks act_deterministic's
         # 4-tuple (a_dir, a_size, a_ptr, value) positionally (same as live_runner.py); reorder there -> wrong here.
@@ -338,3 +349,13 @@ class LiveSession:
 #   A: LivePortfolio.max_lot (set from risk.cfg.max_lot); portfolio_block divides by it.
 #   C: The port_net_size obs scalar matches the env for any max_lot, preserving train/live
 #      parity so the learned behaviour reproduces live. (Live obs-warmup + LiveRunner are queued.)
+# [2026-06-15d] Training wheels mirrored live (train/live mask parity).
+#   I: The env gained operator counter-trend OPEN-block "training wheels"; live must apply
+#      the IDENTICAL mask or the live legal space would differ from what the bot trained under.
+#   R: Operator decision 2026-06-15; the same masks run in train + live (discipline transfers).
+#   A: __init__ takes training_wheels (defaults cfg.TRAINING_WHEELS) + caches the
+#      tw_cci_block/tw_bb_block column indices; _observe returns the 2 flags from market_row;
+#      step_symbol passes them to build_direction_mask.
+#   C: The live policy is forbidden the same counter-trend opens as in training, so the
+#      breach-avoidance discipline transfers to the real challenge - and lifts identically
+#      everywhere when config.TRAINING_WHEELS is flipped off.
