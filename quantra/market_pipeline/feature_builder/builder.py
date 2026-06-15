@@ -54,7 +54,6 @@ from .schema import (
     MARKET_NAMES,
     PRECOMPUTED_DIM,
     PRECOMPUTED_NAMES,
-    RAW_CCI_TFS,
     RAW_FEATURE_NAMES,
     RAW_SMA_TFS,
     SCHEMA,
@@ -96,27 +95,29 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
         ]:
             out[f"boll_{base}_{tf}"] = (c - line) / atr_tf
 
-    # --- CCI (1m/5m/30m/4H): normalized + deviation-from-shifted-SMA + sync ---
+    # --- CCI (1m/5m/30m/4H): RAW value + RAW shifted-forward SMA + sync flags ---
+    # CCI is kept RAW [operator decision 2026-06-13]: NO /100, NO normalized deviation.
+    # We expose the raw CCI and the raw shifted SMA(CCI,2,sh4) so the policy compares
+    # current CCI to its smoothed location 4 bars ago itself.
+    # COUPLING: these column names (cci{p}_{tf}, cci{p}_sma_{tf}) MUST match schema
+    # ._market_names + RAW_FEATURE_NAMES; the CCI laws (laws.py) read them; curriculum
+    # masks cci{p}_1m. Rename here => change all four.
     if tf in ("1m", "5m", "30m", "4H"):
-        cci_dev = {}
+        cci_vals, cci_smas = {}, {}
         for p in ind.CCI_PERIODS:
             cp = ind.cci(h, l, c, p)
             csma = ind.applied_sma_shift(cp, ind.CCI_APPLIED_SMA, ind.SHIFT)
-            out[f"cci{p}_norm_{tf}"] = cp / 100.0
-            dev = (cp - csma) / 100.0
-            out[f"cci{p}_dev_{tf}"] = dev
-            cci_dev[p] = dev
-            if INCLUDE_RAW_INPUTS and tf in RAW_CCI_TFS:
-                # RAW CCI level (operator override) — UNNORMALIZED (~[-300, 300]),
-                # added ALONGSIDE the normalized cci_norm/cci_dev above.
-                out[f"raw_cci{p}_{tf}"] = cp
-        all_pos = (cci_dev[10] > 0) & (cci_dev[30] > 0) & (cci_dev[100] > 0)
-        all_neg = (cci_dev[10] < 0) & (cci_dev[30] < 0) & (cci_dev[100] < 0)
+            out[f"cci{p}_{tf}"] = cp            # RAW CCI value (unclipped via RAW_FEATURE_NAMES)
+            out[f"cci{p}_sma_{tf}"] = csma       # RAW shifted-forward SMA(CCI, 2, shift 4)
+            cci_vals[p], cci_smas[p] = cp, csma
+        # Flags from the RAW CCI-vs-SMA comparison (sign-identical to the old (CCI-SMA)).
+        all_pos = (cci_vals[10] > cci_smas[10]) & (cci_vals[30] > cci_smas[30]) & (cci_vals[100] > cci_smas[100])
+        all_neg = (cci_vals[10] < cci_smas[10]) & (cci_vals[30] < cci_smas[30]) & (cci_vals[100] < cci_smas[100])
         out[f"cci_sync_{tf}"] = _flag_three_way(all_pos, all_neg)
         if tf == "5m":
-            # Pull Back ingredient: large CCIs aligned while small (10) desyncs.
-            buy = (cci_dev[30] > 0) & (cci_dev[100] > 0) & (cci_dev[10] < 0)
-            sell = (cci_dev[30] < 0) & (cci_dev[100] < 0) & (cci_dev[10] > 0)
+            # Pull Back ingredient: large CCIs above their SMA while small (10) is below.
+            buy = (cci_vals[30] > cci_smas[30]) & (cci_vals[100] > cci_smas[100]) & (cci_vals[10] < cci_smas[10])
+            sell = (cci_vals[30] < cci_smas[30]) & (cci_vals[100] < cci_smas[100]) & (cci_vals[10] > cci_smas[10])
             out["cci_pullback_5m"] = _flag_three_way(buy, sell)
 
     # --- ATR regime (1m/30m/4H): level, shifted ref, normalized deviation ---
@@ -345,3 +346,11 @@ __all__ = [
 #   C: The policy gets the requested raw signal without corrupting it, while the raw
 #      block stays isolated + flagged so we can standardize/ablate it — protecting
 #      training stability and the pass rate if raw inputs turn out to hurt.
+# [2026-06-13] Operator decision — CCI computed RAW (value + raw shifted SMA).
+#   I: CCI was emitted normalized (cp/100, (cp-sma)/100); operator wants raw CCI + raw
+#      shifted SMA(2,sh4). raw_cci in market_raw then duplicated it.
+#   R: Operator override; flags recomputed from raw CCI-vs-SMA (sign-identical, laws unchanged).
+#   A: Emit cci{p}_{tf}=cp, cci{p}_sma_{tf}=applied_sma_shift(cp); flags from raw compare;
+#      dropped raw_cci (now == cci{p}); these CCI cols are in RAW_FEATURE_NAMES (unclipped).
+#   C: The policy sees CCI's true magnitude + its 4-bar-ago smoothed location, the
+#      operator's intended trend signal, with the legal space (laws) unchanged.

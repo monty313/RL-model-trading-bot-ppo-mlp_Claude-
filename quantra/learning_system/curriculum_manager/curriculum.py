@@ -41,10 +41,13 @@ from quantra.market_pipeline.law_mask_engine.engine import MODE_LIVE, MODE_SCHOO
 # 1m TIMING features masked in early stages (structure-first). We KEEP the law-binding
 # 1m ingredients (shifted-SMA + ATR + the gate ingredients) so the laws still activate;
 # we mask the pure observation/timing features the slower structure already implies.
+# COUPLING: each name MUST exist in schema.PRECOMPUTED_NAMES or it silently no-ops.
+# CCI 1m names changed to raw (cci{p}_1m) when CCI was un-normalized [2026-06-13];
+# CCI 1m is observation-only (no law binds 1m CCI), so masking it early is safe.
 _EARLY_MASK_1M = [
     "candle_return_1m", "candle_range_1m", "candle_uwick_1m", "candle_lwick_1m",
     "z10_1m", "z100_1m", "adx5_1m", "adx15_1m",
-    "cci10_norm_1m", "cci30_norm_1m", "cci100_norm_1m",
+    "cci10_1m", "cci30_1m", "cci100_1m",
 ]
 
 
@@ -130,3 +133,10 @@ class CurriculumManager:
 #      feature_mask zeroing 1m timing features (keeping law-binding ingredients), graduate().
 #   C: The bot learns to respect the laws by habit before fine timing, so it makes fewer
 #      law-adjacent mistakes -> fewer breaches -> a higher, steadier pass rate.
+# [2026-06-13] _EARLY_MASK_1M CCI names follow the CCI-raw rename.
+#   I: The 1m mask listed cci{p}_norm_1m; those names were removed when CCI went raw,
+#      so the mask would silently no-op (guarded by `if name in PRECOMPUTED_NAMES`).
+#   R: COUPLING with schema feature names (mask entries must be real columns).
+#   A: Renamed to cci{p}_1m (raw CCI 1m; observation-only, no law binds 1m CCI).
+#   C: Structure-first masking still zeros 1m CCI timing early, so the curriculum keeps
+#      teaching law-respect before fine timing - unchanged effect on the pass rate.

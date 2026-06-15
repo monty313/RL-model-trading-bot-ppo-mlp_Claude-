@@ -48,8 +48,10 @@ GATES = LAW_NAMES[9:]              # 0/1
 # Column index of each precomputed feature name (laws read normalized features).
 _IDX = {name: i for i, name in enumerate(PRECOMPUTED_NAMES)}
 
-# +100 / -100 CCI thresholds expressed in the normalized encoding (cci_norm = CCI/100).
-_CCI_HI, _CCI_LO = 1.0, -1.0
+# +100 / -100 CCI thresholds on the RAW CCI value [operator decision 2026-06-13: CCI
+# is kept raw, so the Super-Trend ±100 check reads raw CCI vs ±100, not cci_norm vs ±1].
+# COUPLING: must match SOW-D4's ±100 + the raw cci{p}_{tf} features in schema/builder.
+_CCI_HI, _CCI_LO = 100.0, -100.0
 
 
 def _c(mat: np.ndarray, name: str) -> np.ndarray:
@@ -79,12 +81,15 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
         & (_c(mat, "boll_bb20_lo_30m") < 0) & (_c(mat, "boll_bb200_lo_30m") < 0)
 
     # ST2 CCI: all four CCIs (30,100 on 5m,30m) above applied SMA AND above +100.
-    cci_dev = [f"cci{p}_dev_{tf}" for tf in ("5m", "30m") for p in (30, 100)]
-    cci_nrm = [f"cci{p}_norm_{tf}" for tf in ("5m", "30m") for p in (30, 100)]
-    st2_buy = np.all([_c(mat, n) > 0 for n in cci_dev], axis=0) \
-        & np.all([_c(mat, n) > _CCI_HI for n in cci_nrm], axis=0)
-    st2_sell = np.all([_c(mat, n) < 0 for n in cci_dev], axis=0) \
-        & np.all([_c(mat, n) < _CCI_LO for n in cci_nrm], axis=0)
+    # CCI is RAW now: "above applied SMA" = raw cci > raw cci_sma; "above +100" = raw cci > 100.
+    # COUPLING: column names mirror schema/builder; thresholds mirror SOW-D4 (±100).
+    _cci_pairs = [(p, tf) for tf in ("5m", "30m") for p in (30, 100)]
+    cci_above = [_c(mat, f"cci{p}_{tf}") > _c(mat, f"cci{p}_sma_{tf}") for (p, tf) in _cci_pairs]
+    cci_below = [_c(mat, f"cci{p}_{tf}") < _c(mat, f"cci{p}_sma_{tf}") for (p, tf) in _cci_pairs]
+    cci_hi = [_c(mat, f"cci{p}_{tf}") > _CCI_HI for (p, tf) in _cci_pairs]
+    cci_lo = [_c(mat, f"cci{p}_{tf}") < _CCI_LO for (p, tf) in _cci_pairs]
+    st2_buy = np.all(cci_above, axis=0) & np.all(cci_hi, axis=0)
+    st2_sell = np.all(cci_below, axis=0) & np.all(cci_lo, axis=0)
 
     # ST3 Shifted SMA: price above both shifted lines on 1m, 5m AND 30m.
     st3_buy = (_c(mat, "ssma_align_1m") == 1) & (_c(mat, "ssma_align_5m") == 1) \
@@ -100,8 +105,8 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
         & (_c(mat, "boll_bb20_mid_30m") < 0) & (_c(mat, "boll_bb200_mid_30m") < 0)
 
     # T2 CCI: all four CCIs above their applied SMA (no +100 requirement).
-    t2_buy = np.all([_c(mat, n) > 0 for n in cci_dev], axis=0)
-    t2_sell = np.all([_c(mat, n) < 0 for n in cci_dev], axis=0)
+    t2_buy = np.all(cci_above, axis=0)
+    t2_sell = np.all(cci_below, axis=0)
 
     # T3 Shifted SMA: price above both lines on 5m AND 30m.
     t3_buy = (_c(mat, "ssma_align_5m") == 1) & (_c(mat, "ssma_align_30m") == 1)
@@ -115,10 +120,13 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
         & (_c(mat, "boll_bb200_mid_5m") < 0) & (_c(mat, "boll_bb20_mid_5m") > 0)
 
     # PB2 CCI: 30m both CCIs (10,100) above SMA; 5m LARGE(100) above while SMALL(10) below.
-    pb2_buy = (_c(mat, "cci10_dev_30m") > 0) & (_c(mat, "cci100_dev_30m") > 0) \
-        & (_c(mat, "cci100_dev_5m") > 0) & (_c(mat, "cci10_dev_5m") < 0)
-    pb2_sell = (_c(mat, "cci10_dev_30m") < 0) & (_c(mat, "cci100_dev_30m") < 0) \
-        & (_c(mat, "cci100_dev_5m") < 0) & (_c(mat, "cci10_dev_5m") > 0)
+    # (RAW: "above/below SMA" = raw cci vs raw cci_sma.)
+    def _cci_above(p, tf):
+        return _c(mat, f"cci{p}_{tf}") > _c(mat, f"cci{p}_sma_{tf}")
+    pb2_buy = _cci_above(10, "30m") & _cci_above(100, "30m") \
+        & _cci_above(100, "5m") & ~_cci_above(10, "5m")
+    pb2_sell = ~_cci_above(10, "30m") & ~_cci_above(100, "30m") \
+        & ~_cci_above(100, "5m") & _cci_above(10, "5m")
 
     # PB3 Shifted SMA: 5m AND 30m above both lines; 1m BELOW both lines.
     pb3_buy = (_c(mat, "ssma_align_5m") == 1) & (_c(mat, "ssma_align_30m") == 1) \
@@ -164,3 +172,10 @@ def law_states_dict(row_states: np.ndarray) -> dict:
 #   C: The legal space is now defined exactly per the blueprint, so the mask can
 #      forbid breach-bound directions before the policy ever acts — the foundation
 #      of not breaching, which is the foundation of passing.
+# [2026-06-13] CCI laws read RAW CCI (operator un-normalized CCI).
+#   I: ST2/T2/PB2 read cci_dev>0 and cci_norm>±1; those features became raw.
+#   R: Operator CCI-raw decision; legal space must stay IDENTICAL (sign-preserving).
+#   A: ST2/T2 read raw cci{p}_{tf} vs raw cci{p}_sma_{tf} (was cci_dev>0) + raw cci>±100
+#      (was cci_norm>±1; _CCI_HI/_CCI_LO 1.0->100.0); PB2 likewise. Same comparisons.
+#   C: The masks forbid exactly the same directions as before (Section F tests verify),
+#      so the breach protection is unchanged while CCI is exposed raw.

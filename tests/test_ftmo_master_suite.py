@@ -258,13 +258,13 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_179_with_raw_block_and_gate_ingredients():
-    # 89 market+time + 3 gate ingredients (M3) + 30 raw + 12 law + 35 trade + 3 + 7
-    assert STATE_DIM == 179
+def test_schema_total_is_167_with_raw_cci_and_gate_ingredients():
+    # market 92 (incl. RAW CCI value + RAW cci-SMA) + 18 raw price-SMA + 12 law + 35 + 3 + 7
+    assert STATE_DIM == 167
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
-    assert EXPECTED_WIDTHS["market"] == 92 and EXPECTED_WIDTHS["market_raw"] == 30
+    assert EXPECTED_WIDTHS["market"] == 92 and EXPECTED_WIDTHS["market_raw"] == 18
     assert len(SCHEMA.feature_names) == STATE_DIM
     assert len(set(SCHEMA.feature_names)) == STATE_DIM  # names unique
 
@@ -297,16 +297,18 @@ def test_raw_block_present_finite_and_unclipped(make_1m):
     """
     mm = build_market_matrix(make_1m(n_bars=4000, seed=26))
     raw_idx = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n in RAW_FEATURE_NAMES]
-    assert len(raw_idx) == 30
+    assert len(raw_idx) == 42      # 18 raw price-SMA + 24 raw CCI (value + shifted-SMA)
     assert np.isfinite(mm.matrix[:, raw_idx]).all()
-    cci_cols = [i for i, n in enumerate(PRECOMPUTED_NAMES) if n.startswith("raw_cci")]
-    assert np.abs(mm.matrix[1000:, cci_cols]).max() > 10.0  # proves no clip on raw
+    # raw CCI value (not the cci_sma) is unbounded -> proves no clip on the raw block
+    cci_cols = [i for i, n in enumerate(PRECOMPUTED_NAMES)
+                if n in RAW_FEATURE_NAMES and n.startswith("cci") and "_sma_" not in n]
+    assert np.abs(mm.matrix[1000:, cci_cols]).max() > 10.0
 
 
 def test_market_features_carry_signal(make_1m):
     """Fast 1m features must vary after warmup (real signal, not a dead constant)."""
     mm = build_market_matrix(make_1m(n_bars=4000, seed=21))
-    for feat in ["z10_1m", "cci10_norm_1m", "candle_return_1m"]:
+    for feat in ["z10_1m", "cci10_1m", "candle_return_1m"]:
         col = mm.matrix[1000:, MARKET_NAMES.index(feat)]
         assert col.std() > 0, f"{feat} is constant"
 
@@ -431,13 +433,15 @@ def test_super_trend_bb_buy_and_sell():
 
 
 def test_super_trend_cci_requires_above_100():
-    dev_only = _feat_row(cci30_dev_5m=0.2, cci100_dev_5m=0.2, cci30_dev_30m=0.2, cci100_dev_30m=0.2,
-                         cci30_norm_5m=0.5, cci100_norm_5m=0.5, cci30_norm_30m=0.5, cci100_norm_30m=0.5)
-    assert _law(dev_only, "law_super_trend_cci") == 0   # not above +100
-    assert _law(dev_only, "law_trend_cci") == 1         # trend (no +100) DOES fire
-    full = _feat_row(cci30_dev_5m=0.2, cci100_dev_5m=0.2, cci30_dev_30m=0.2, cci100_dev_30m=0.2,
-                     cci30_norm_5m=1.5, cci100_norm_5m=1.5, cci30_norm_30m=1.5, cci100_norm_30m=1.5)
-    assert _law(full, "law_super_trend_cci") == 1
+    # RAW CCI: all four above their SMA but NOT above +100 -> super-trend OFF, trend ON
+    above_sma = _feat_row(cci30_5m=20, cci30_sma_5m=10, cci100_5m=20, cci100_sma_5m=10,
+                          cci30_30m=20, cci30_sma_30m=10, cci100_30m=20, cci100_sma_30m=10)
+    assert _law(above_sma, "law_super_trend_cci") == 0   # raw CCI 20 is not > +100
+    assert _law(above_sma, "law_trend_cci") == 1         # trend (no +100) DOES fire
+    # raw CCI above +100 AND above its SMA -> super-trend ON
+    extreme = _feat_row(cci30_5m=150, cci30_sma_5m=120, cci100_5m=150, cci100_sma_5m=120,
+                        cci30_30m=150, cci30_sma_30m=120, cci100_30m=150, cci100_sma_30m=120)
+    assert _law(extreme, "law_super_trend_cci") == 1
 
 
 def test_shifted_sma_laws_use_align_flags():
@@ -450,7 +454,9 @@ def test_shifted_sma_laws_use_align_flags():
 
 
 def test_pullback_cci_desync():
-    buy = _feat_row(cci10_dev_30m=0.2, cci100_dev_30m=0.2, cci100_dev_5m=0.2, cci10_dev_5m=-0.2)
+    # RAW: 30m both CCIs above their SMA; 5m large(100) above while small(10) below
+    buy = _feat_row(cci10_30m=20, cci10_sma_30m=10, cci100_30m=20, cci100_sma_30m=10,
+                    cci100_5m=20, cci100_sma_5m=10, cci10_5m=-5, cci10_sma_5m=10)
     assert _law(buy, "law_pullback_cci") == 1
 
 

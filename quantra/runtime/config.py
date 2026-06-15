@@ -215,7 +215,9 @@ class RuntimeConfig:
     # quantra.market_pipeline.feature_builder.schema.STATE_DIM (176 with raw inputs
     # on; 146 off) without importing it (avoids an import cycle); the master suite
     # asserts they match. We never let this nominal value leak into training shapes.
-    nominal_state_dim: int = field(default_factory=lambda: 179 if INCLUDE_RAW_INPUTS else 149)
+    # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
+    # suite). 167 with raw inputs on (CCI kept raw + raw price-SMA), 149 off.
+    nominal_state_dim: int = field(default_factory=lambda: 167 if INCLUDE_RAW_INPUTS else 149)
 
     def to_dict(self) -> dict:
         """Flatten for telemetry's run-config block (M9 data contract)."""
@@ -281,3 +283,9 @@ def in_colab() -> bool:
 #   C: Trades are sized + costed in the same dollars as the 4% wall, so the
 #      no-overshoot invariant is enforceable and the learned edge survives real fees —
 #      both prerequisites for passing rather than looking profitable.
+# [2026-06-13] nominal_state_dim -> 167 (CCI un-normalized).
+#   I: CCI raw decision removed the duplicate raw_cci block (179->167); the benchmark
+#      width must track the schema.
+#   R: COUPLING - config.nominal_state_dim must equal schema.STATE_DIM (master-suite asserted).
+#   A: 167 (raw inputs on) / 149 (off).
+#   C: The hardware race times the true observation width, so the device/cost choice stays honest.

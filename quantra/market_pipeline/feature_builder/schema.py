@@ -7,18 +7,21 @@ blocks, so the total width is fixed and asserted everywhere. This is the contrac
 the FeatureBuilder fills, the env assembles, the PPO trunk consumes, and the
 TelemetryLogger labels (the data contract requires "grouped feature block names").
 
-Block widths (default INCLUDE_RAW_INPUTS=True -> total 179):
-    market      92   normalized market+time + 3 gate ingredients (precomputed)
-    market_raw  30   RAW SMA + RAW CCI inputs (operator-directed; precomputed)
+Block widths (default INCLUDE_RAW_INPUTS=True -> total 167):
+    market      92   market+time + 3 gate ingredients + RAW CCI value & RAW shifted-SMA(CCI)
+    market_raw  18   RAW price-SMA inputs (operator-directed; precomputed)
     law         12   9 laws + 3 gates (filled by LawMask, M3)
     trade x5    35   7 features x 5 slots (env, M4)
     portfolio    3   aggregates across slots (env, M4)
     account      7   equity/buffers + 2 challenge-progress (env, M4)
     ------------------
-    TOTAL      179   (149 when INCLUDE_RAW_INPUTS=False)
+    TOTAL      167   (149 when INCLUDE_RAW_INPUTS=False)
 
-The first TWO blocks (market + market_raw = 122) are action-independent and are the
-FeatureBuilder's precomputed output (``PRECOMPUTED_NAMES`` / ``PRECOMPUTED_DIM``).
+CCI is kept RAW (operator decision 2026-06-13): no /100, no normalized deviation —
+the raw CCI value + its raw shifted-forward SMA(2, shift4) are exposed so the policy
+compares CCI to its location 4 bars ago. Those CCI columns are in RAW_FEATURE_NAMES
+(unclipped). The first TWO blocks (market + market_raw = 110) are action-independent
+and are the FeatureBuilder's precomputed output (``PRECOMPUTED_NAMES`` / ``PRECOMPUTED_DIM``).
 
 OPERATOR OVERRIDE [2026-06-13]
 -----------------------------
@@ -82,12 +85,18 @@ def _market_names() -> List[str]:
     for tf in BOLL_TFS:
         for band in _BB_BANDS:
             names.append(f"boll_{band}_{tf}")
+    # CCI kept RAW [operator decision 2026-06-13]: expose the raw CCI value AND its
+    # raw shifted-forward SMA (period 2, shift 4) so the policy compares current CCI
+    # against the CCI's location 4 bars ago — NOT a normalized deviation. No /100.
+    # COUPLING: these exact names are read by quantra.locked_core.laws.laws (CCI laws),
+    # listed in builder._compute_tf_features, masked in curriculum._EARLY_MASK_1M (1m),
+    # and flagged RAW below (RAW_FEATURE_NAMES, unclipped). Rename here => change all.
     for tf in CCI_TFS:
         for p in _CCI_PERIODS:
-            names.append(f"cci{p}_norm_{tf}")
-            names.append(f"cci{p}_dev_{tf}")
-        names.append(f"cci_sync_{tf}")
-    names.append("cci_pullback_5m")
+            names.append(f"cci{p}_{tf}")          # RAW CCI value (~[-300, 300], unclipped)
+            names.append(f"cci{p}_sma_{tf}")       # RAW shifted-forward SMA(CCI, 2, sh4)
+        names.append(f"cci_sync_{tf}")             # +1/0/-1 flag (raw CCI vs its SMA)
+    names.append("cci_pullback_5m")                # +1/0/-1 flag
     for tf in ATR_TFS:
         names += [f"atr_level_{tf}", f"atr_ref_{tf}", f"atr_dev_{tf}"]
     for tf in SSMA_TFS:
@@ -106,10 +115,11 @@ def _market_names() -> List[str]:
 
 
 def _market_raw_names() -> List[str]:
-    """RAW indicator inputs (operator override). UNNORMALIZED level values.
+    """RAW price-SMA inputs (operator override). UNNORMALIZED level values.
 
-    18 raw SMA (sma1 shift 0-3, sma30, sma50 on 5m/30m/4H) + 12 raw CCI
-    (periods 10/30/100 on 1m/5m/30m/4H) = 30.
+    18 raw SMA: sma1 shift 0-3, sma30, sma50 on 5m/30m/4H.
+    (Raw CCI moved into the main `market` CCI block when CCI was un-normalized
+    [2026-06-13] — the old `raw_cci{p}` here was then a duplicate, so it was removed.)
     """
     if not INCLUDE_RAW_INPUTS:
         return []
@@ -119,9 +129,6 @@ def _market_raw_names() -> List[str]:
             names.append(f"raw_sma1_sh{k}_{tf}")     # SMA period 1 = price, shifted k
         names.append(f"raw_sma30_{tf}")
         names.append(f"raw_sma50_{tf}")
-    for tf in RAW_CCI_TFS:
-        for p in _CCI_PERIODS:
-            names.append(f"raw_cci{p}_{tf}")
     return names
 
 
@@ -206,12 +213,14 @@ def build_schema() -> StateVectorSchema:
 
 # Singleton + public constants.
 SCHEMA = build_schema()
-STATE_DIM = SCHEMA.dim                                   # 176 (raw on) / 146 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 167 (raw on) / 149 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
+# COUPLING: this ORDER is the FeatureBuilder's output column order AND the index map
+# used by laws._IDX, env._COL, and the live session. Reorder here => reorder there.
 PRECOMPUTED_NAMES = SCHEMA.blocks["market"] + SCHEMA.blocks["market_raw"]
-PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 119 (raw on) / 89 (raw off)
+PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 110 (raw on) / 92 (raw off)
 
 # Backwards-compatible aliases (the normalized block only).
 MARKET_NAMES = SCHEMA.blocks["market"]
@@ -220,13 +229,19 @@ MARKET_DIM = len(MARKET_NAMES)
 # RAW features bypass the FeatureBuilder ±CLIP and must be standardized by the M5
 # agent's input layer (they are unbounded price/CCI levels). The LLM reads this set
 # to know which observation indices are unnormalized.
-RAW_FEATURE_NAMES = set(SCHEMA.blocks["market_raw"])
+# COUPLING: builder.build_market_matrix clips ONLY columns NOT in this set; the M5
+# agent must standardize every name in here. CCI raw features live in the `market`
+# block but are listed here too (they are raw, ~[-300,300]).
+_RAW_CCI_NAMES = ([f"cci{p}_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS]
+                  + [f"cci{p}_sma_{tf}" for tf in CCI_TFS for p in _CCI_PERIODS])
+RAW_FEATURE_NAMES = set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES)
 
 # Canonical block widths — asserted by the master suite so a refactor can't silently
-# drop a challenge-critical feature.
+# drop a challenge-critical feature. COUPLING: must equal the real block_spans; the
+# master suite (Section D) asserts both, and config.nominal_state_dim must equal STATE_DIM.
 EXPECTED_WIDTHS = {
     "market": 92,  # 89 market+time + 3 gate ingredients (spread x2, adf) [M3]
-    "market_raw": 30 if INCLUDE_RAW_INPUTS else 0,
+    "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
     "law": 12, "trade": 35, "portfolio": 3, "account": 7,
 }
 
@@ -296,3 +311,13 @@ def state_vector_fingerprint() -> dict:
 #   C: Every gate's ingredients are now observable, so the bot learns gate-aware
 #      behaviour (trade only in live/stationary regimes) instead of treating gates as
 #      opaque on/off — fewer dead-market/illiquid trades that erode the pass rate.
+# [2026-06-13] Operator decision — CCI kept RAW (no normalization).
+#   I: CCI was exposed normalized (cci_norm=CCI/100, cci_dev=(CCI-SMA)/100). Operator
+#      wants RAW CCI + the RAW shifted-forward SMA (a 'where was CCI 4 bars ago'
+#      comparison, not a normalized deviation). The market_raw raw_cci then duplicated it.
+#   R: Operator override (locked-item approval per R5); applied SMA stays period 2, shift 4.
+#   A: Replaced cci{p}_norm/cci{p}_dev with cci{p}/cci{p}_sma (RAW, in RAW_FEATURE_NAMES,
+#      unclipped); removed the duplicate raw_cci from market_raw (30->18); STATE_DIM 179->167.
+#      Sign-identical so the laws' legal space is UNCHANGED (laws read raw value vs raw SMA).
+#   C: The policy sees CCI's true magnitude + its 4-bar-ago smoothed location in raw form
+#      (the operator's intended trend signal) with law semantics intact.
