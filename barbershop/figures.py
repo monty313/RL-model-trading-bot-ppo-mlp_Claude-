@@ -353,7 +353,9 @@ def shap_figure(shap: Dict[str, Any]) -> go.Figure:
         fig.add_trace(go.Bar(x=vals, y=names, orientation="h",
                              marker_color=config.COLOR_RED,
                              name=f"away from {action}"))
-    fig.update_layout(title=f"What CAUSED it (SHAP) — explained {shap.get('explained', 0):.0f}%",
-                      xaxis_title="SHAP contribution", template="plotly_white",
-                      height=300, barmode="overlay")
+    # Honest label: this is input x gradient attribution, NOT Shapley values.
+    fig.update_layout(
+        title=f"What CAUSED it — input×gradient attribution (top {shap.get('explained', 0):.0f}% shown)",
+        xaxis_title="attribution (toward + / away −)", template="plotly_white",
+        height=300, barmode="overlay")
     return fig

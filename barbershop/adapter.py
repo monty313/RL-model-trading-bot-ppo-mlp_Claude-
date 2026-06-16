@@ -39,6 +39,9 @@
 #                            feature names so the dashboard labels the obs correctly.
 #   [2026-06-16] [Claude] — WI-2: advantage now read from outcome.advantage (the
 #                            producer logs REAL per-day GAE); NaN only when truly absent.
+#   [2026-06-16] [Claude] — WI-3: load_attribution() reads the input-gradient sidecar
+#                            into the SHAP columns; list_real_runs() excludes the
+#                            *_attribution.jsonl sidecar so it's never read as a run.
 # ==========================================================================
 
 from __future__ import annotations
@@ -66,7 +69,31 @@ def list_real_runs(telemetry_dir: Optional[Path] = None) -> List[Path]:
     d = Path(telemetry_dir or config.REAL_TELEMETRY_DIR)
     if not d.exists():
         return []
-    return sorted(d.glob("*.jsonl"))
+    # Exclude sidecars (e.g. <run>_attribution.jsonl) so a sidecar is never mistaken
+    # for a run — otherwise runs[-1] would point at the sidecar, not the run.
+    return sorted(p for p in d.glob("*.jsonl") if not p.stem.endswith("_attribution"))
+
+
+def load_attribution(run_path: Path) -> pd.DataFrame:
+    """Load the input-gradient attribution sidecar for a real run (autopsy SHAP columns).
+
+    Reads: <run>_attribution.jsonl next to the run file (written by the producer for each
+    trade step). Returns a DataFrame in the SHAP contract shape
+    (timestamp, day_id, step, chosen_action, shap_toward, shap_away), or an empty frame
+    of those columns if no sidecar exists (older runs). The values are input x gradient
+    saliencies — a legitimate attribution, NOT Shapley values (the UI says so).
+    """
+    import json
+    p = Path(run_path)
+    side = p.with_name(p.stem + "_attribution.jsonl")
+    cols = ["timestamp", "day_id", "step", "chosen_action", "shap_toward", "shap_away"]
+    if not side.exists():
+        return pd.DataFrame(columns=cols)
+    rows = [json.loads(ln) for ln in side.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    df = pd.DataFrame(rows)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    return df
 
 
 def header_feature_names(records: List[dict]) -> Optional[List[str]]:

@@ -161,8 +161,9 @@ def load_quantra_bundle() -> Dict[str, Any]:
         prices = adapter.resample_prices_from_1m()
     except Exception:
         prices = data.make_mock_prices()
-    # SHAP isn't produced by the live pipeline yet -> an empty, correctly-typed frame.
-    shap = pd.DataFrame(columns=data.required_shap_columns())
+    # Real input-gradient attribution from the producer's sidecar (autopsy RIGHT column),
+    # or an empty frame for older runs without it.
+    shap = adapter.load_attribution(latest)
     bundle = {"trajectory": traj, "shap": shap, "prices": prices,
               "training_wall": _mock_training_wall(), "source": "quantra",
               "feature_names": fnames, "unavailable_fields": list(adapter.NOT_YET_PRODUCED)}

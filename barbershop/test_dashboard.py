@@ -343,3 +343,25 @@ def test_adapter_reads_real_advantage_from_outcome():
     # And a step with no logged advantage stays NaN (honest absence).
     df2 = adapter.real_to_trajectory([{"kind": "step", "episode_id": 0, "timestep": 0, **base}])
     assert df2["advantage"].isna().all()
+
+
+# --------------------------------------------------------------------------
+# WI-3 — the input-gradient attribution sidecar loads into the SHAP contract
+# columns (so the autopsy RIGHT column is real on real runs, not empty/fake).
+# --------------------------------------------------------------------------
+def test_adapter_loads_attribution_sidecar(tmp_path):
+    """WI-3 — attribution sidecar -> SHAP contract columns; missing sidecar -> empty frame."""
+    from barbershop import adapter
+    run = tmp_path / "run1.jsonl"
+    run.write_text('{"kind":"header"}\n', encoding="utf-8")
+    side = tmp_path / "run1_attribution.jsonl"
+    side.write_text(json.dumps({"timestamp": "2024-03-11T08:00:00Z", "day_id": 1, "step": 3,
+                                "chosen_action": "OPEN_SHORT",
+                                "shap_toward": {"cci10_5m": 0.5},
+                                "shap_away": {"atr_level_1m": 0.2}}) + "\n", encoding="utf-8")
+    df = adapter.load_attribution(run)
+    assert len(df) == 1 and df.iloc[0]["chosen_action"] == "OPEN_SHORT"
+    assert df.iloc[0]["shap_toward"] == {"cci10_5m": 0.5}
+    # No sidecar -> empty frame with the right columns (older runs degrade cleanly).
+    empty = adapter.load_attribution(tmp_path / "nope.jsonl")
+    assert empty.empty and "shap_toward" in empty.columns

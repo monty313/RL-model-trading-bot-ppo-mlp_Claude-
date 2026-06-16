@@ -28,9 +28,32 @@ from quantra.market_pipeline.data_loader import load_symbol                     
 from quantra.env.trading_env import TradingEnv, prepare_symbol_data, SymbolData  # noqa: E402
 from quantra.learning_system.ppo_agent.agent import PPOAgent                    # noqa: E402
 from quantra.market_pipeline.law_mask_engine.engine import build_pointer_mask   # noqa: E402
-from quantra.market_pipeline.feature_builder.schema import STATE_DIM            # noqa: E402
+from quantra.market_pipeline.feature_builder.schema import STATE_DIM, FEATURE_NAMES  # noqa: E402
 from quantra.learning_system.trainer.gae import compute_gae                    # noqa: E402
 from quantra.diagnostics.telemetry_logger.logger import TelemetryLogger, StepPacket  # noqa: E402
+
+
+_ACT = {0: "HOLD", 1: "OPEN_LONG", 2: "OPEN_SHORT", 3: "CLOSE"}   # engine int -> action str
+
+
+def compute_attribution(agent, obs, chosen_dir: int, top_k: int = 20):
+    """Input x gradient attribution of the chosen direction logit w.r.t. the observation.
+
+    Reads: the agent net + the obs that produced the decision. Returns (toward, away)
+    dicts {feature_name: magnitude} for the top_k features by |attribution|, split by
+    sign (toward = pushed the chosen logit up, away = pushed it down). This is a
+    legitimate, fast saliency — NOT Shapley values — and is labelled as such in the UI.
+    """
+    obs_t = torch.tensor(obs, dtype=torch.float32, requires_grad=True)
+    dlog, _slog, _plog, _value = agent.net(obs_t.unsqueeze(0))
+    agent.net.zero_grad(set_to_none=True)
+    dlog[0, chosen_dir].backward()                          # d(chosen logit)/d(obs)
+    attr = (obs_t.grad.detach().numpy() * np.asarray(obs, dtype=float))   # input x gradient
+    order = np.argsort(-np.abs(attr))[:top_k]               # strongest contributors first
+    names = FEATURE_NAMES
+    toward = {names[i]: float(attr[i]) for i in order if attr[i] > 0 and i < len(names)}
+    away = {names[i]: float(-attr[i]) for i in order if attr[i] < 0 and i < len(names)}
+    return toward, away
 
 
 def _regime_label(day_returns: np.ndarray) -> str:
@@ -97,6 +120,7 @@ def main():
     day_start_t = env.t
     day_rets: list = []
     day_steps: list = []        # (packet, reward, value) buffered to compute GAE at day close
+    attr_records: list = []     # input-gradient attribution for trade steps (autopsy RIGHT col)
     done = False
     step_in_day = 0
     total_steps = 0
@@ -175,6 +199,11 @@ def main():
             reward_decomposition={"total": float(reward)}, quad_signals={},
             risk_context=risk_context, outcome={"realized": float(info.get("realized", 0.0))})
         day_steps.append((packet, float(reward), float(value[0])))   # advantage filled at day close
+        # Real attribution for trade steps (entry/exit) -> the autopsy RIGHT column.
+        if a_dir in (1, 2, 3):
+            toward, away = compute_attribution(agent, obs, a_dir)
+            attr_records.append({"timestamp": ts, "day_id": episode_id + 1, "step": step_in_day,
+                                 "chosen_action": _ACT[a_dir], "shap_toward": toward, "shap_away": away})
         total_steps += 1
         step_in_day += 1
 
@@ -195,6 +224,14 @@ def main():
     path = log.flush()
     size_mb = path.stat().st_size / 1e6
     print(f"[emit] {total_steps:,} real steps across {episode_id + 1} day(s) -> {path}  ({size_mb:.1f} MB)")
+    # Sidecar: the input-gradient attribution for trade steps (autopsy RIGHT column).
+    if attr_records:
+        import json
+        attr_path = path.with_name(path.stem + "_attribution.jsonl")
+        with open(attr_path, "w", encoding="utf-8") as fh:
+            for rec in attr_records:
+                fh.write(json.dumps(rec) + "\n")
+        print(f"[attribution] {len(attr_records)} trade-step attributions -> {attr_path}")
     print(f"[done] {time.time()-t0:.1f}s total")
 
 

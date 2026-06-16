@@ -46,7 +46,10 @@ a `<run>_attribution.jsonl` sidecar; the adapter loads it into the SHAP contract
 **Label it honestly** in the UI ("input-gradient attribution, not Shapley").
 **Acceptance.** A real run's autopsy RIGHT column shows real, signed, sorted attributions
 grouped toward/away by real feature name; a test covers the sidecar load + grouping.
-**Status:** [ ]
+**Status:** [x] DONE 2026-06-16 — producer writes 16 trade-step attributions keyed on REAL
+feature names (cci100_sma_4H, …); adapter.load_attribution loads them; figure labelled
+"input×gradient attribution (not Shapley)". Caught+fixed a bug: list_real_runs was picking
+up the sidecar as a run. Unit test added.
 
 ## WI-4 — Dynamic placeholder detection + honest UI grey-out  🟠
 **Problem.** `unavailable_fields` is a static list; panels render empty/fake bars instead of
@@ -104,7 +107,7 @@ real series when present); a test covers the label/real-series branch.
 ## Checklist (mirror of the above — tick on commit)
 - [x] WI-1 Real feature names on real data
 - [x] WI-2 Real GAE advantage
-- [ ] WI-3 Real input-gradient attribution
+- [x] WI-3 Real input-gradient attribution
 - [ ] WI-4 Dynamic placeholder detection + grey-out
 - [ ] WI-5 Risk Doctor context budget
 - [ ] WI-6 Robust Doctor parsing
