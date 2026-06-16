@@ -59,7 +59,7 @@ all-NaN/empty in the mapped frame). The screens grey out + label any panel whose
 field is unavailable, instead of rendering an empty/fabricated figure.
 **Acceptance.** A run missing advantage/SHAP shows greyed, labelled panels (not empty bars);
 a run that HAS them shows real panels. Tested both ways.
-**Status:** [ ]
+**Status:** [x] DONE 2026-06-16 — unavailable_fields computed dynamically; advantage strip + attribution panel grey out honestly when absent. Real run now reports NOTHING unavailable (all real). Test added.
 
 ## WI-5 — Risk Doctor context budget  🟠
 **Problem.** The full 32 KB (~8k-token) manual is sent on every message; against the default
@@ -108,7 +108,7 @@ real series when present); a test covers the label/real-series branch.
 - [x] WI-1 Real feature names on real data
 - [x] WI-2 Real GAE advantage
 - [x] WI-3 Real input-gradient attribution
-- [ ] WI-4 Dynamic placeholder detection + grey-out
+- [x] WI-4 Dynamic placeholder detection + grey-out
 - [ ] WI-5 Risk Doctor context budget
 - [ ] WI-6 Robust Doctor parsing
 - [ ] WI-7 Single contract source

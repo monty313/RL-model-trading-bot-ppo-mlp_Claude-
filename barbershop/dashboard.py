@@ -59,6 +59,9 @@
 #   [2026-06-16] [Claude] — WI-1: bundle carries feature_names (real header names on a
 #                            quantra run); group_indicators + losing_trades receive them
 #                            so the SAW panel / heatmap / pattern-ATR are correct on real data.
+#   [2026-06-16] [Claude] — WI-3/4: quantra bundle loads real attribution + computes
+#                            unavailable_fields dynamically; advantage strip + attribution
+#                            panel grey out honestly (do not fake) when a run lacks them.
 # ==========================================================================
 
 from __future__ import annotations
@@ -166,7 +169,10 @@ def load_quantra_bundle() -> Dict[str, Any]:
     shap = adapter.load_attribution(latest)
     bundle = {"trajectory": traj, "shap": shap, "prices": prices,
               "training_wall": _mock_training_wall(), "source": "quantra",
-              "feature_names": fnames, "unavailable_fields": list(adapter.NOT_YET_PRODUCED)}
+              "feature_names": fnames,
+              # HONEST: compute what's genuinely missing on THIS run (not a static list),
+              # so a run that now HAS advantage/SHAP doesn't falsely show them as absent.
+              "unavailable_fields": data.detect_unavailable(traj, shap)}
     _QUANTRA_CACHE[key] = bundle
     return bundle
 
@@ -201,6 +207,19 @@ def error_banner(exc: "data.MissingDataFile") -> html.Div:
         html.Div(f"Produced by: {exc.producer}"),
     ], style={"background": config.COLOR_RED, "color": "#fff", "padding": "12px",
               "borderRadius": "8px", "margin": "8px 0", "whiteSpace": "pre-line"})
+
+
+def _unavailable_panel(title: str, reason: str) -> html.Div:
+    """A greyed, labelled placeholder for a panel whose backing data this run lacks.
+
+    Reads: nothing. Returns an html.Div that HONESTLY says "no data" + why, instead of
+    rendering empty or fabricated bars (the WI-4 anti-fabrication rule for the UI).
+    """
+    return html.Div([html.B(f"{title} — not available"),
+                     html.Div(reason, style={"fontSize": "12px", "marginTop": "4px"})],
+                    style={"background": "#2a2e36", "color": config.COLOR_GREY,
+                           "padding": "16px", "borderRadius": "8px",
+                           "textAlign": "center", "margin": "6px 0"})
 
 
 # ==========================================================================
@@ -293,9 +312,15 @@ def screen_day_replay(bundle: Dict[str, Any], day_id: int, tf: str = "1m",
     ]
     # Panels 2 + 3 are 1m-only (spec).
     if tf == "1m":
-        adv = data.advantage_series(traj, day_id)
-        children.append(dcc.Graph(id="replay-advantage",
-                                  figure=figures.advantage_figure(adv, window=window)))
+        unavailable = bundle.get("unavailable_fields") or []
+        if "advantage" in unavailable:                   # HONEST: grey out, don't fake it
+            children.append(_unavailable_panel(
+                "Advantage strip", "advantage is not logged for this run (the trainer "
+                "doesn't emit per-step GAE yet)."))
+        else:
+            adv = data.advantage_series(traj, day_id)
+            children.append(dcc.Graph(id="replay-advantage",
+                                      figure=figures.advantage_figure(adv, window=window)))
         fnames = bundle.get("feature_names")
         grouped = [data.group_indicators(r, fnames)
                    for _, r in day_rows.sort_values("timestamp").iterrows()]
@@ -328,13 +353,12 @@ def screen_autopsy(bundle: Dict[str, Any], day_id: int, trade_id: int) -> html.D
     groups = data.group_indicators(row, bundle.get("feature_names"))
     bars = data.action_probability_bars(row)
     masked, legal = data.masked_legal(row)
-    # SHAP for this trade step.
+    # Attribution for this trade step (real input-gradient on real runs; mock SHAP on mock).
     shap_df = bundle["shap"]
-    srows = shap_df[(shap_df["day_id"] == day_id) & (shap_df["step"] == int(row["step"]))]
-    if len(srows):
-        ss = data.shap_sorted(srows.iloc[0], row["action"])
-    else:
-        ss = {"chosen_action": row["action"], "toward": [], "away": [], "explained": 0.0}
+    srows = shap_df[(shap_df["day_id"] == day_id) & (shap_df["step"] == int(row["step"]))] \
+        if len(shap_df) else shap_df
+    has_attr = len(srows) > 0
+    ss = data.shap_sorted(srows.iloc[0], row["action"]) if has_attr else None
 
     left = html.Div([html.H4("What the bot SAW"),
                      html.Small(str(tr["entry_time"])),
@@ -346,16 +370,19 @@ def screen_autopsy(bundle: Dict[str, Any], day_id: int, trade_id: int) -> html.D
                        html.Div(f"MASKED: {', '.join(masked) or 'none'}",
                                 style={"color": config.COLOR_RED})],
                       style={"flex": "1"})
-    right = html.Div([html.H4("What CAUSED that probability"),
-                      dcc.Graph(figure=figures.shap_figure(ss))],
-                     style={"flex": "1"})
+    # RIGHT — real attribution if we have it for this trade, else an HONEST grey-out.
+    right_body = (dcc.Graph(figure=figures.shap_figure(ss)) if has_attr else
+                  _unavailable_panel("Attribution",
+                                     "no attribution recorded for this trade step "
+                                     "(produced only for trade entries/exits)."))
+    right = html.Div([html.H4("What CAUSED that probability"), right_body], style={"flex": "1"})
     return html.Div([html.H3(f"Screen 4 — Trade #{trade_id} Autopsy (Day {day_id})"),
                      html.Div([left, middle, right], style={"display": "flex", "gap": "10px"})])
 
 
 def screen_pattern_finder(bundle: Dict[str, Any]) -> html.Div:
     """Screen 5 — auto-scan losing trades, surface top 3 patterns, apply/ignore/modify."""
-    losing = data.losing_trades(bundle["trajectory"])
+    losing = data.losing_trades(bundle["trajectory"], bundle.get("feature_names"))
     # When the trajectory has too few losers to mine, demonstrate on the mock set.
     if len(losing) < 3:
         losing = data.make_mock_losing_trades()

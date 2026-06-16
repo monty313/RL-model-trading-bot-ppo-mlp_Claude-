@@ -25,6 +25,8 @@
 #                            dd_breached only on collapse bars, +__init__ docstring.
 #   [2026-06-16] [Claude] — WI-1: losing_trades takes feature_names so the ATR lookup
 #                            uses the REAL observation, not the 9-name mock fallback.
+#   [2026-06-16] [Claude] — WI-4: detect_unavailable() reports which contract fields are
+#                            genuinely absent (all-NaN/empty) so the UI greys them honestly.
 # ==========================================================================
 
 from __future__ import annotations
@@ -97,6 +99,24 @@ def validate_trajectory_columns(df: pd.DataFrame) -> List[str]:
 def required_shap_columns() -> List[str]:
     """Columns shap_values.parquet must contain (spec Section 4)."""
     return ["timestamp", "day_id", "step", "chosen_action", "shap_toward", "shap_away"]
+
+
+def detect_unavailable(trajectory: pd.DataFrame, shap: Optional[pd.DataFrame]) -> List[str]:
+    """Return the contract fields that are GENUINELY absent on this run (all-NaN/empty).
+
+    Reads: the mapped trajectory + shap frame. Returns the subset of
+    {advantage, shap, regime} that has no real data, so the UI can grey those panels
+    out HONESTLY (rather than rendering empty or fabricated bars). A field present on
+    a run drops off the list automatically — no static assumptions.
+    """
+    out: List[str] = []
+    if "advantage" in trajectory.columns and trajectory["advantage"].isna().all():
+        out.append("advantage")
+    if shap is None or len(shap) == 0:
+        out.append("shap")
+    if "regime" in trajectory.columns and (trajectory["regime"].astype(str) == "unlabelled").all():
+        out.append("regime")
+    return out
 
 
 # A small, representative observation schema for mock data, named like the real

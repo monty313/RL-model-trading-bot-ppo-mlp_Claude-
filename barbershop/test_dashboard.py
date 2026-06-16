@@ -365,3 +365,19 @@ def test_adapter_loads_attribution_sidecar(tmp_path):
     # No sidecar -> empty frame with the right columns (older runs degrade cleanly).
     empty = adapter.load_attribution(tmp_path / "nope.jsonl")
     assert empty.empty and "shap_toward" in empty.columns
+
+
+# --------------------------------------------------------------------------
+# WI-4 — unavailable_fields is computed DYNAMICALLY so panels grey out honestly
+# only when the data is genuinely absent (present fields drop off the list).
+# --------------------------------------------------------------------------
+def test_detect_unavailable_is_dynamic():
+    """WI-4 — present advantage/shap/regime -> nothing flagged; absent -> all flagged."""
+    import numpy as np
+    have = pd.DataFrame({"advantage": [0.1, -0.2], "regime": ["Trending", "Trending"]})
+    assert data.detect_unavailable(have, pd.DataFrame({"shap_toward": [{}]})) == []
+    miss = pd.DataFrame({"advantage": [np.nan, np.nan], "regime": ["unlabelled", "unlabelled"]})
+    assert set(data.detect_unavailable(miss, pd.DataFrame())) == {"advantage", "shap", "regime"}
+    # The greyed panel says "not available" instead of rendering empty/fake bars.
+    panel = str(dashboard._unavailable_panel("Advantage strip", "no GAE logged"))
+    assert "not available" in panel
