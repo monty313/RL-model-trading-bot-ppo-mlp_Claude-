@@ -128,6 +128,13 @@ DOCTOR_MAX_TOKENS: int = 800                          # keep responses short
 DOCTOR_TEMPERATURE: float = 0.2                       # low — diagnosis, not creativity
 DOCTOR_HISTORY_LIMIT: int = 6                         # last N exchanges in the system prompt
 DOCTOR_TRAJECTORY_TAIL: int = 10                      # last N trajectory rows in the context packet
+# The MLP manual is ~32 KB (~8k tokens). Sending it whole every call overflows a small
+# local model's context (default llama3 is ~8k). Condense it to this many chars when it
+# exceeds the budget, keeping the high-signal sections (safety rules, diagnostic template,
+# failure taxonomy, north star, core definitions). RECOMMENDATION: point DOCTOR_MODEL at a
+# long-context local model (e.g. llama3.1:8b-instruct-128k, qwen2.5, mistral-nemo) and raise
+# this if you want the full manual every call.
+DOCTOR_MANUAL_MAX_CHARS: int = 12000
 
 # --------------------------------------------------------------------------
 # CHALLENGE / DIAGNOSTIC THRESHOLDS. These mirror the FTMO geometry the bot is

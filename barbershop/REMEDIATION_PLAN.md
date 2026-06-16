@@ -71,7 +71,9 @@ Failure Taxonomy) when the manual exceeds budget; keep RULE-6's "manual present 
 intact. Document a long-context model recommendation in `config`.
 **Acceptance.** The assembled system prompt stays under a configurable char budget; a test
 asserts the trimmed manual still contains the safety rules + diagnostic template headers.
-**Status:** [ ]
+**Status:** [x] DONE 2026-06-16 — manual 32,028→11,779 chars (under the 12k budget),
+keeps safety rules + diagnostic template + north star; system prompt ~34KB→~12.5KB.
+DOCTOR_MANUAL_MAX_CHARS + long-context-model recommendation added. Test added.
 
 ## WI-6 — Robust Doctor response parsing  🟡
 **Problem.** Section split keys off exact emoji icons; prescription extraction greps one
@@ -109,7 +111,7 @@ real series when present); a test covers the label/real-series branch.
 - [x] WI-2 Real GAE advantage
 - [x] WI-3 Real input-gradient attribution
 - [x] WI-4 Dynamic placeholder detection + grey-out
-- [ ] WI-5 Risk Doctor context budget
+- [x] WI-5 Risk Doctor context budget
 - [ ] WI-6 Robust Doctor parsing
 - [ ] WI-7 Single contract source
 - [ ] WI-8 Perf + Screen-1 honesty

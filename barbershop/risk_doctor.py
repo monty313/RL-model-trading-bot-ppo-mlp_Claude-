@@ -35,6 +35,10 @@
 #                            placeholder columns from the packet + warn 'do not cite';
 #                            broaden RULE-7 live-trade detection (regex) without
 #                            refusing diagnostic questions about past trades.
+#   [2026-06-16] [Claude] — WI-5: condense_manual() trims the 32KB manual to a char
+#                            budget (DOCTOR_MANUAL_MAX_CHARS) for small local models,
+#                            always keeping the safety rules + diagnostic template +
+#                            north star; assemble_context_packet uses it for Part 1.
 # ==========================================================================
 
 from __future__ import annotations
@@ -67,6 +71,52 @@ def load_manual() -> str:
     if not path.exists():
         raise ManualMissing(str(path))
     return path.read_text(encoding="utf-8")
+
+
+# Sections the condensed manual MUST keep (the Doctor's safety + diagnosis backbone),
+# then these high-signal sections fill the remaining budget.
+_MANUAL_MUST_KEEP = ("SAFETY RULES", "DIAGNOSTIC OUTPUT TEMPLATE", "NORTH STAR")
+_MANUAL_PRIORITY = ("FAILURE TAXONOMY", "FLOW RULES", "CORE DEFINITIONS", "DATA CONTRACT",
+                    "TERM ", "WHAT THIS LAYER PROTECTS")
+
+
+def condense_manual(text: str, max_chars: int) -> str:
+    """Trim the manual to ~max_chars while keeping the high-signal sections (RULE 6-safe).
+
+    Reads: the full manual text. Returns it unchanged when already under budget; else a
+    condensed version that ALWAYS keeps the safety rules + diagnostic template + north
+    star, then fills the remaining budget with the next most useful sections (failure
+    taxonomy, flow rules, core definitions, ...), in original order. This keeps the
+    Doctor grounded against a small local model's context window without dropping the
+    safety backbone.
+    """
+    if len(text) <= max_chars:
+        return text
+    # Split into sections at markdown headers (lines starting with '#').
+    sections: List[Tuple[str, str]] = []
+    header, body = "PREAMBLE", []
+    for ln in text.splitlines():
+        if ln.startswith("#"):
+            sections.append((header, "\n".join(body)))
+            header, body = ln, [ln]
+        else:
+            body.append(ln)
+    sections.append((header, "\n".join(body)))
+
+    note = "[Manual condensed for the local model's context — high-signal sections kept.]\n"
+    keep_idx, total = set(), len(note)
+    # Pass 1: force-keep the must-have sections (safety backbone), regardless of budget.
+    for i, (h, b) in enumerate(sections):
+        if any(k in h.upper() for k in _MANUAL_MUST_KEEP):
+            keep_idx.add(i); total += len(b)
+    # Pass 2: add priority sections in original order until the budget is reached.
+    for i, (h, b) in enumerate(sections):
+        if i in keep_idx:
+            continue
+        if any(k in h.upper() for k in _MANUAL_PRIORITY) and total + len(b) <= max_chars:
+            keep_idx.add(i); total += len(b)
+    kept = [sections[i][1] for i in range(len(sections)) if i in keep_idx]
+    return note + "\n".join(kept)
 
 
 # The doc's exact 7-section diagnostic template (Full Diagnosis button, TEST 16).
@@ -105,6 +155,7 @@ def assemble_context_packet(question: str, screen_state: Dict[str, Any],
       Part 4 — the 4-line hard-rules reminder (always included).
     """
     manual = manual_text if manual_text is not None else load_manual()
+    manual = condense_manual(manual, config.DOCTOR_MANUAL_MAX_CHARS)   # fit the LLM's context
 
     parts: List[str] = []
     parts.append("=== PART 1: OPERATING MANUAL (MLP_INTERPRETABILITY_LAYER.md) ===\n" + manual)

@@ -300,3 +300,25 @@ def test_live_trade_paraphrases_refused(barbershop_tmp):
     assert client.calls == 0                                   # never reached the LLM
     # A diagnostic question about a PAST trade is NOT refused.
     assert risk_doctor.is_live_trade_question("why did the bot go long on day 2?") is False
+
+
+# --------------------------------------------------------------------------
+# WI-5 — the manual is condensed to fit a local model's context, but the safety
+# backbone (rules + diagnostic template + north star) is always kept (RULE 6-safe).
+# --------------------------------------------------------------------------
+def test_manual_condensed_keeps_safety_backbone_under_budget():
+    """WI-5 — manual condensed below budget yet keeps safety rules + diagnostic template."""
+    full = risk_doctor.load_manual()                       # the real ~32KB manual
+    assert len(full) > config.DOCTOR_MANUAL_MAX_CHARS       # it does exceed the budget
+    cond = risk_doctor.condense_manual(full, config.DOCTOR_MANUAL_MAX_CHARS)
+    assert len(cond) < len(full)                           # actually shortened
+    assert "SAFETY RULES" in cond                          # the safety backbone is kept
+    assert "DIAGNOSTIC OUTPUT TEMPLATE" in cond
+    assert "NORTH STAR" in cond
+    # The assembled system prompt uses the condensed manual (Part 1 no longer 32KB).
+    pk = risk_doctor.assemble_context_packet(
+        "q", {"screen": 3, "day_id": 2, "trade_id": None}, history=[])
+    assert "[Manual condensed" in pk["system"]
+    assert len(pk["system"]) < len(full)                   # much smaller than the full manual
+    # A short manual (e.g. the test marker) passes through unchanged.
+    assert risk_doctor.condense_manual("tiny manual", config.DOCTOR_MANUAL_MAX_CHARS) == "tiny manual"
