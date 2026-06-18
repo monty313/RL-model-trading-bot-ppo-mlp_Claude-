@@ -258,14 +258,14 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_203_with_raw_bollinger_and_training_wheels():
-    # market 128 (RAW CCI value+SMA + RAW Bollinger + 18 training-wheel feats) + 18 raw
-    # price-SMA + 12 law + 35 trade + 3 portfolio + 7 account = 203
-    assert STATE_DIM == 203
+def test_schema_total_is_206_with_raw_bollinger_and_training_wheels():
+    # market 131 (prev 128 + 3 new 5m-ATR feats for market_volatility_obs) + 18 raw
+    # price-SMA + 12 law + 35 trade + 3 portfolio + 7 account = 206
+    assert STATE_DIM == 206
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
-    assert EXPECTED_WIDTHS["market"] == 128 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["market"] == 131 and EXPECTED_WIDTHS["market_raw"] == 18
     # the two training-wheel block flags exist (the operator's enforced "acts")
     assert "tw_cci_block" in SCHEMA.feature_names and "tw_bb_block" in SCHEMA.feature_names
     assert len(SCHEMA.feature_names) == STATE_DIM
@@ -466,20 +466,21 @@ def test_pullback_cci_desync():
     assert _law(buy, "law_pullback_cci") == 1
 
 
-def test_gates_atr_spread_stationarity():
-    g = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
-    assert _law(g, "gate_atr_liquidity") == 1
-    assert _law(g, "gate_spread") == 1
-    assert _law(g, "gate_stationarity") == 1            # adf below -2.86 -> stationary
-    closed = _feat_row(atr_dev_1m=-0.1, spread_range_ratio_1m=2.0, adf_stat_1m=0.0)
-    assert _law(closed, "gate_atr_liquidity") == 0
-    assert _law(closed, "gate_spread") == 0
-    assert _law(closed, "gate_stationarity") == 0
+def test_market_condition_signals_volatility_spread_stationarity():
+    # Renamed gates -> observation signals (2026-06-18). Volatility now reads 5m + 4H ATR.
+    g = _feat_row(atr_dev_5m=0.1, atr_dev_4H=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    assert _law(g, "market_volatility_obs") == 1
+    assert _law(g, "market_spread_obs") == 1
+    assert _law(g, "market_stationarity_obs") == 1      # adf below -2.86 -> stationary
+    closed = _feat_row(atr_dev_5m=-0.1, atr_dev_4H=-0.1, spread_range_ratio_1m=2.0, adf_stat_1m=0.0)
+    assert _law(closed, "market_volatility_obs") == 0
+    assert _law(closed, "market_spread_obs") == 0
+    assert _law(closed, "market_stationarity_obs") == 0
 
 
 def _gates_open():
     s = np.zeros(12, dtype=np.float32)
-    s[9] = s[10] = s[11] = 1  # atr, spread, stationarity open; no directional law
+    s[9] = s[10] = s[11] = 1  # volatility, spread, stationarity favorable; no directional law
     return s
 
 
@@ -505,10 +506,22 @@ def test_mask_live_buy_law_bans_shorts():
     assert m[OPEN_SHORT] < -1e8 and m[OPEN_LONG] == 0 and m[HOLD] == 0
 
 
-def test_mask_closed_gate_bans_new_opens():
-    s = _gates_open(); s[9] = 0  # ATR gate closed
-    m = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
-    assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+def test_phase_gated_stationarity_blocks_opens_only_when_constrained():
+    # 2026-06-18: the 3 market-condition signals are observation-only by default (PHASE_FREE);
+    # only stationarity re-enforces, and only in PHASE_CONSTRAINED.
+    import quantra.runtime.config as _cfg
+    s = _gates_open(); s[11] = 0  # market_stationarity_obs = 0 (non-stationary)
+    # PHASE_FREE (default): observation-only -> the signal does NOT block opens.
+    m_free = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
+    assert m_free[OPEN_LONG] == 0 and m_free[OPEN_SHORT] == 0 and m_free[HOLD] == 0
+    # PHASE_CONSTRAINED: stationarity re-enforces -> opens blocked when non-stationary.
+    _orig = _cfg.TRAINING_PHASE
+    try:
+        _cfg.TRAINING_PHASE = _cfg.PHASE_CONSTRAINED
+        m_con = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
+        assert m_con[OPEN_LONG] < -1e8 and m_con[OPEN_SHORT] < -1e8 and m_con[HOLD] == 0
+    finally:
+        _cfg.TRAINING_PHASE = _orig
 
 
 def test_mask_school_permits_only_required_direction():
@@ -533,7 +546,7 @@ def test_lawmask_wrapper_end_to_end():
                     boll_bb20_up_5m=0.5, boll_bb200_up_5m=0.5,
                     boll_bb20_up_30m=0.5, boll_bb200_up_30m=0.5)
     res = LawMask(mode=MODE_LIVE).step(row, position=0, occupied=[0, 0, 0, 0, 0])
-    assert res.opens_allowed_by_gates is True
+    assert res.opens_allowed is True
     assert res.direction_mask[OPEN_SHORT] < -1e8           # buy super-trend bans shorts
     assert res.direction_mask[OPEN_LONG] == 0
 

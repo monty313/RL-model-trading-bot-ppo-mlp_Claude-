@@ -204,6 +204,27 @@ INCLUDE_RAW_INPUTS: bool = True
 TRAINING_WHEELS: bool = True
 
 
+# ---------------------------------------------------------------------------
+# TRAINING_PHASE — gates the ENFORCEMENT of the market-condition signals
+# (market_volatility_obs / market_stationarity_obs / market_spread_obs). These
+# signals are ALWAYS in the observation; this flag only controls whether they
+# additionally BLOCK new opens (they used to be hard "gates").
+#   PHASE_FREE        (default): signals are OBSERVATION-ONLY — the bot learns the
+#                     conditions itself and is never blocked by them. This is what
+#                     lets the policy actually trade enough to learn to pass FTMO
+#                     (the old hard gates shut ~98.7% of opens on real EURUSD).
+#   PHASE_CONSTRAINED: late-curriculum hardening — the stationarity signal re-enforces
+#                     (blocks new opens when the market is non-stationary). Volatility +
+#                     spread enforcement are deferred (see law_mask_engine/engine.py TODO).
+# COUPLING -> market_pipeline/law_mask_engine/engine.py reads cfg.TRAINING_PHASE /
+# cfg.PHASE_CONSTRAINED in build_direction_mask. Raising the phase RE-narrows the legal
+# space, so only raise it once the policy is disciplined (mirrors the TRAINING_WHEELS idea).
+# ---------------------------------------------------------------------------
+PHASE_FREE: int = 0
+PHASE_CONSTRAINED: int = 1
+TRAINING_PHASE: int = PHASE_FREE
+
+
 # COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
 # env/trading_env.py + live_bridge/live_session.py: they read these exact field names
 # (daily_target_pct, daily_risk_pct, pain_zone_start_pct, hard_wall_pct, ...) to set the
@@ -300,7 +321,7 @@ class RuntimeConfig:
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
     # suite). 203 with raw inputs on (raw CCI + raw price-SMA + training wheels), 185 off.
-    nominal_state_dim: int = field(default_factory=lambda: 203 if INCLUDE_RAW_INPUTS else 185)
+    nominal_state_dim: int = field(default_factory=lambda: 206 if INCLUDE_RAW_INPUTS else 188)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss

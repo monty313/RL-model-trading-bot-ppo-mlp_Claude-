@@ -68,7 +68,7 @@ from quantra.runtime.config import INCLUDE_RAW_INPUTS
 # ---------------------------------------------------------------------------
 BOLL_TFS = ["5m", "30m", "4H"]
 CCI_TFS = ["1m", "5m", "30m", "4H"]
-ATR_TFS = ["1m", "30m", "4H"]
+ATR_TFS = ["1m", "5m", "30m", "4H"]
 SSMA_TFS = ["1m", "5m", "30m", "4H"]
 Z_TFS = ["1m", "5m", "30m", "4H"]
 ADX_TFS = ["1m", "30m", "4H"]
@@ -171,15 +171,17 @@ def _market_raw_names() -> List[str]:
 
 
 # COUPLING [C4] -> quantra/locked_core/laws/laws.py (LAW_NAMES) + law_mask_engine/engine.py
-# (_GATE_IDX/_LAW_IDX, [:9] dir-slice): this is the canonical 12-name law block — 9
-# directional laws THEN 3 gates. laws.LAW_NAMES must mirror it exactly; the mask engine
-# hardcodes offset 9 for the gates. Reorder/rename here => break laws + the mask engine.
+# (_OBS_IDX/_LAW_IDX, [:9] dir-slice): this is the canonical 12-name law block — 9
+# directional laws THEN 3 market-condition observation signals (formerly "gates"). The 3
+# signals are OBSERVATION-ONLY by default (config.TRAINING_PHASE == PHASE_FREE); only the
+# stationarity signal re-enforces in PHASE_CONSTRAINED. laws.LAW_NAMES must mirror this
+# exactly; the mask engine hardcodes offset 9 for the signals. Reorder/rename => break both.
 def _law_names() -> List[str]:
     return [
         "law_super_trend_bb", "law_super_trend_cci", "law_super_trend_ssma",
         "law_trend_bb", "law_trend_cci", "law_trend_ssma",
         "law_pullback_bb", "law_pullback_cci", "law_pullback_ssma",
-        "gate_atr_liquidity", "gate_spread", "gate_stationarity",
+        "market_volatility_obs", "market_spread_obs", "market_stationarity_obs",
     ]
 
 
@@ -274,7 +276,7 @@ SCHEMA = build_schema()
 # quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
 # (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
 # logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
-STATE_DIM = SCHEMA.dim                                   # 203 (raw on) / 185 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 206 (raw on) / 188 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
@@ -308,7 +310,7 @@ RAW_FEATURE_NAMES = (set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES)
 # drop a challenge-critical feature. COUPLING: must equal the real block_spans; the
 # master suite (Section D) asserts both, and config.nominal_state_dim must equal STATE_DIM.
 EXPECTED_WIDTHS = {
-    "market": 128,  # 92 + 18 RAW Bollinger + 18 training-wheel (16 ingredients + 2 flags)
+    "market": 131,  # 128 + 3 new 5m-ATR feats (atr_level/ref/dev_5m for market_volatility_obs)
     "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
     "law": 12, "trade": 35, "portfolio": 3, "account": 7,
 }

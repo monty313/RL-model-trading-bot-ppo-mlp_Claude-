@@ -147,8 +147,10 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
             out[f"tw_bb{p}_up_{tf}"] = (c - up) / atr_tf   # >0 => price above upper band
             out[f"tw_bb{p}_lo_{tf}"] = (c - lo) / atr_tf   # <0 => price below lower band
 
-    # --- ATR regime (1m/30m/4H): level, shifted ref, normalized deviation ---
-    if tf in ("1m", "30m", "4H"):
+    # --- ATR regime (1m/5m/30m/4H): level, shifted ref, normalized deviation ---
+    # 5m added [market_volatility_obs reads atr_dev_5m & atr_dev_4H: execution-frame +
+    # macro-regime volatility]. COUPLING -> schema.ATR_TFS + laws.market_volatility_obs.
+    if tf in ("1m", "5m", "30m", "4H"):
         atr_t = ind.atr(h, l, c, ind.ATR_PERIOD)
         baseline = atr_t.rolling(100, min_periods=20).mean().replace(0, np.nan)
         ref = atr_t.rolling(ind.ATR_REF_PERIOD).mean().shift(ind.SHIFT)
@@ -193,7 +195,7 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
         spread_price = df["spread"].astype(float) * point_size
         out["spread_atr_1m"] = spread_price / atr_tf
         out["spread_range_ratio_1m"] = spread_price / (h - l).replace(0, np.nan)
-        out["adf_stat_1m"] = ind.rolling_df_stat(c, 100)
+        out["adf_stat_1m"] = ind.rolling_df_stat(c, 30)   # 30-bar window: faster warmup + more regime-responsive
 
     # --- RAW SMA inputs (operator override, 2026-06-13): UNNORMALIZED price-level
     # SMAs on 5m/30m/4H. SMA period 1 = price, so shifts 0-3 give a 4-tap price

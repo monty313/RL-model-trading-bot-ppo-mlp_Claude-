@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "include_raw_inputs": true,
-  "state_dim": 203,
-  "precomputed_dim": 146,
+  "state_dim": 206,
+  "precomputed_dim": 149,
   "block_widths": {
-    "market": 128,
+    "market": 131,
     "market_raw": 18,
     "law": 12,
     "trade": 35,
@@ -14,27 +14,27 @@
   "blocks": {
     "market": [
       0,
-      128
+      131
     ],
     "market_raw": [
-      128,
-      146
+      131,
+      149
     ],
     "law": [
-      146,
-      158
+      149,
+      161
     ],
     "trade": [
-      158,
-      193
-    ],
-    "portfolio": [
-      193,
+      161,
       196
     ],
-    "account": [
+    "portfolio": [
       196,
-      203
+      199
+    ],
+    "account": [
+      199,
+      206
     ]
   },
   "raw_feature_names": [
@@ -176,6 +176,9 @@
     "atr_level_1m",
     "atr_ref_1m",
     "atr_dev_1m",
+    "atr_level_5m",
+    "atr_ref_5m",
+    "atr_dev_5m",
     "atr_level_30m",
     "atr_ref_30m",
     "atr_dev_30m",
@@ -263,9 +266,9 @@
     "law_pullback_bb",
     "law_pullback_cci",
     "law_pullback_ssma",
-    "gate_atr_liquidity",
-    "gate_spread",
-    "gate_stationarity",
+    "market_volatility_obs",
+    "market_spread_obs",
+    "market_stationarity_obs",
     "slot0_dir",
     "slot0_upnl",
     "slot0_age",
@@ -312,7 +315,7 @@
     "acct_day_progress",
     "acct_overall_progress"
   ],
-  "sha256": "03920d635b25d6e2ef5478e38a3bed7d2863cb59bea817754a08949b37fdb813",
+  "sha256": "4f6bda46b2126d79e4c9bbe7a5ca37031ef382d216eb07ec030e24e4c118021b",
   "_llm_interpretation": {
     "purpose": "This snapshot pins the observation the PPO policy sees. Judged against repeated FTMO passing, not PnL. A drift means the policy's WORLD changed.",
     "blocks": {

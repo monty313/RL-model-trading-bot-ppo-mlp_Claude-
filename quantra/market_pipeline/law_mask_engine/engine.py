@@ -7,8 +7,9 @@ into the additive direction mask over {HOLD, OPEN_LONG, OPEN_SHORT, CLOSE} and t
 pointer mask over the 5 slots. Forbidden actions get -1e9 so the policy can never
 sample them. Supports BOTH enforcement modes:
 
-  LIVE  — laws BAN directions (an active buy-law forbids OPEN_SHORT, etc.); gates ban
-          NEW opens when closed. Everything else is legal.
+  LIVE  — laws BAN directions (an active buy-law forbids OPEN_SHORT, etc.). The 3 market-
+          condition signals are observation-only by default (PHASE_FREE); in PHASE_CONSTRAINED
+          the stationarity signal bans NEW opens when non-stationary. Everything else is legal.
   SCHOOL— curriculum permission mode: OPEN is allowed ONLY in the direction the
           stage's required law(s) currently permit, and only when active.
 
@@ -36,10 +37,12 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-# COUPLING [C4] -> quantra/locked_core/laws/laws.py: GATES + LAW_NAMES (12 names, 9
-# directional then 3 gates) and compute_law_states are imported here; _GATE_IDX/_LAW_IDX
-# below and the [:9] dir-slice assume that exact order. Reorder/rename in laws.py => break this.
-from quantra.locked_core.laws.laws import GATES, LAW_NAMES, compute_law_states
+# COUPLING [C4] -> quantra/locked_core/laws/laws.py: MARKET_SIGNALS + LAW_NAMES (12 names, 9
+# directional then 3 market-condition signals) and compute_law_states are imported here;
+# _OBS_IDX/_LAW_IDX below and the [:9] dir-slice assume that order. Reorder/rename => break this.
+from quantra.locked_core.laws.laws import MARKET_SIGNALS, LAW_NAMES, compute_law_states
+# config.TRAINING_PHASE drives whether the market-condition signals re-enforce (phase-gated).
+from quantra.runtime import config as cfg
 
 # Direction action indices. COUPLING [C2 in COUPLINGS.md]: these integer meanings are
 # assumed by ppo_agent.agent (direction head + OPEN/CLOSE gating), runtime.device
@@ -58,9 +61,9 @@ MODE_LIVE = "live"
 MODE_SCHOOL = "school"
 
 # COUPLING [C4] -> quantra/locked_core/laws/laws.py: the hardcoded offset 9 assumes
-# laws.LAW_NAMES is exactly 9 directional laws followed by the 3 GATES; this mirrors
-# schema._law_names order. If laws.py changes the count/order, fix the 9 here.
-_GATE_IDX = {name: 9 + i for i, name in enumerate(GATES)}  # gates are the last 3
+# laws.LAW_NAMES is exactly 9 directional laws followed by the 3 MARKET_SIGNALS; this
+# mirrors schema._law_names order. If laws.py changes the count/order, fix the 9 here.
+_OBS_IDX = {name: 9 + i for i, name in enumerate(MARKET_SIGNALS)}  # signals are the last 3
 _LAW_IDX = {name: i for i, name in enumerate(LAW_NAMES)}
 
 
@@ -74,22 +77,22 @@ class MaskResult:
     # head logits; rename a field or change a width => fix the consumers + telemetry.
     direction_mask: np.ndarray   # (4,) additive {0, -1e9}
     pointer_mask: np.ndarray     # (5,) additive {0, -1e9}
-    law_states: np.ndarray       # (12,)
-    opens_allowed_by_gates: bool
+    law_states: np.ndarray       # (12,) — 9 directional + 3 market-condition signals
+    opens_allowed: bool          # whether the phase-gated market signals currently permit NEW opens
 
 
-def _gates_allow_opens(states: np.ndarray, stationarity_mode: str) -> bool:
-    """Do the 3 gates permit NEW opens? Closed gate -> no new trades (mgmt unaffected)."""
-    atr_ok = states[_GATE_IDX["gate_atr_liquidity"]] == 1
-    spread_ok = states[_GATE_IDX["gate_spread"]] == 1
-    stat = states[_GATE_IDX["gate_stationarity"]]
-    if stationarity_mode == "A":          # trade only when stationary
-        stat_ok = stat == 1
-    elif stationarity_mode == "B":        # trade only when NOT stationary
-        stat_ok = stat == 0
-    else:                                  # gate disabled for this stage
-        stat_ok = True
-    return bool(atr_ok and spread_ok and stat_ok)
+def _opens_allowed(states: np.ndarray) -> bool:
+    """Do the (phase-gated) market-condition signals permit NEW opens right now?
+
+    PHASE_FREE (default): always True — the 3 signals are OBSERVATION-ONLY (the bot sees
+    them in the state and learns to use them; nothing is hard-blocked). This is what lets
+    the policy trade enough to learn to pass FTMO (the old hard gates shut ~98.7% of opens).
+    PHASE_CONSTRAINED: the stationarity signal re-enforces — opens blocked when the market is
+    non-stationary. Volatility + spread enforcement are deferred (see the TODO at file end).
+    """
+    if cfg.TRAINING_PHASE >= cfg.PHASE_CONSTRAINED:
+        return bool(states[_OBS_IDX["market_stationarity_obs"]] == 1)
+    return True
 
 
 def _apply_training_wheels(mask: np.ndarray, wheel_states: Optional[Sequence[float]]) -> None:
@@ -125,11 +128,11 @@ def build_direction_mask(
 ) -> np.ndarray:
     """Additive direction mask (4,) of {0, -1e9}. HOLD is never masked.
 
-    Order of restriction: base position legality -> slot limits -> gates (ban opens)
-    -> directional laws (LIVE ban / SCHOOL permission) -> training wheels (operator
-    counter-trend OPEN blocks). This mirrors SOW §2.3-2.4 + THE_TRADING_CODE.md so the
-    locked legal set is exactly the blueprint's; the wheels are an additive operator
-    override applied last (they only ever REMOVE more, never re-open).
+    Order of restriction: base position legality -> slot limits -> market-condition signals
+    (phase-gated open-block) -> directional laws (LIVE ban / SCHOOL permission) -> training
+    wheels (operator counter-trend OPEN blocks). This mirrors SOW §2.3-2.4 + THE_TRADING_CODE.md;
+    the market signals only narrow the set in PHASE_CONSTRAINED (observation-only otherwise),
+    and the wheels are an additive operator override applied last (only REMOVE, never re-open).
     """
     mask = np.zeros(N_DIR_ACTIONS, dtype=np.float32)
 
@@ -148,8 +151,12 @@ def build_direction_mask(
     if n_open <= 0:
         mask[CLOSE] = NEG
 
-    # 3) Gates: closed gate forbids NEW opens (open-position management unaffected).
-    if not _gates_allow_opens(law_states, stationarity_mode):
+    # 3) Market-condition signals (formerly "gates"): PHASE-GATED. In PHASE_FREE (default)
+    #    they NEVER block — they are observation-only. In PHASE_CONSTRAINED the stationarity
+    #    signal forbids NEW opens when non-stationary (open-position management is unaffected).
+    #    `stationarity_mode` is still accepted for call-site compatibility but no longer drives
+    #    enforcement — config.TRAINING_PHASE does (see _opens_allowed + the TODO at file end).
+    if not _opens_allowed(law_states):
         mask[OPEN_LONG] = NEG
         mask[OPEN_SHORT] = NEG
 
@@ -221,8 +228,7 @@ class LawMask:
             states, position, n_open, self.mode, self.required_laws, self.stationarity_mode
         )
         pmask = build_pointer_mask(occupied)
-        return MaskResult(dmask, pmask, states,
-                          _gates_allow_opens(states, self.stationarity_mode))
+        return MaskResult(dmask, pmask, states, _opens_allowed(states))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -252,3 +258,28 @@ class LawMask:
 #   C: While the wheels are on, the policy cannot open counter-trend on the 30m+4H
 #      context, so fewer breaches per window and faster convergence to a passing brain —
 #      with HOLD always legal and the wheels removable once discipline is learned.
+# [2026-06-18] Gates -> phase-gated market-condition signals (operator/Perplexity redesign).
+#   I: The 3 hard gates shut ~98.7% of opens on real EURUSD, so the policy never traded
+#      enough to learn to pass. Market context should be LEARNED, not hard-blocked.
+#   R: Operator decision 2026-06-18 (phase-gated): the 3 signals (now market_volatility_obs/
+#      market_spread_obs/market_stationarity_obs) are observation-only in PHASE_FREE (default);
+#      only stationarity re-enforces, and only in PHASE_CONSTRAINED, this session.
+#   A: Replaced _gates_allow_opens(states, stationarity_mode) with _opens_allowed(states)
+#      keyed off cfg.TRAINING_PHASE; renamed GATES->MARKET_SIGNALS, _GATE_IDX->_OBS_IDX,
+#      MaskResult.opens_allowed_by_gates->opens_allowed. Directional-law/slot/position/wheels
+#      masking is UNCHANGED. stationarity_mode kept in signatures for call-site compatibility.
+#   C: In PHASE_FREE the policy can finally trade and learn which conditions help it pass
+#      FTMO; the stationarity guard can be re-armed late (PHASE_CONSTRAINED) once disciplined.
+
+# ============================================================
+# TODO — FUTURE SESSION: Curriculum Reorganization
+# Three phase-gated enforcement blocks are planned but deferred:
+#   1. market_stationarity_obs  <- DONE (this session, CONSTRAINED phase)
+#   2. market_volatility_obs    <- needs its own dedicated training session
+#   3. market_spread_obs        <- needs its own dedicated training session
+#
+# When ready: add each signal to the CONSTRAINED open-block in _opens_allowed(),
+# one session at a time, verify full suite green before proceeding.
+# Also: reorganize and document the full curriculum stage progression
+# in a single clean pass once all three signals are enforced.
+# ============================================================

@@ -2,7 +2,7 @@
 
 WHAT THIS PACKAGE DOES
 ----------------------
-The 9 directional laws (3 super-trend, 3 trend, 3 pullback) + 3 gates (ATR Liquidity, Spread Filter, Stationarity) and the LawMask that turns their states into pre-mask logits (logit = -1e9 on forbidden actions).
+The 9 directional laws (3 super-trend, 3 trend, 3 pullback) + 3 market-condition observation signals (Volatility, Spread, Stationarity — formerly "gates", now observation-only by default) and the LawMask that turns law states into pre-mask logits (logit = -1e9 on forbidden directions).
 
 HOW IT SERVES REPEATED FTMO-STYLE PASSING
 -----------------------------------------
@@ -15,13 +15,13 @@ BINDING RULEBOOK FOR THE LLM RISK DOCTOR: ``docs/MLP_INTERPRETABILITY_LAYER.md``
 # the M2 features; the mask engine (market_pipeline/law_mask_engine) consumes them.
 from .laws import (
     DIRECTIONAL_LAWS,
-    GATES,
     LAW_NAMES,
+    MARKET_SIGNALS,
     compute_law_states,
     law_states_dict,
 )
 
-__all__ = ["LAW_NAMES", "DIRECTIONAL_LAWS", "GATES", "compute_law_states", "law_states_dict"]
+__all__ = ["LAW_NAMES", "DIRECTIONAL_LAWS", "MARKET_SIGNALS", "compute_law_states", "law_states_dict"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
