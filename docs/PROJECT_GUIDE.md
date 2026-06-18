@@ -4,7 +4,7 @@
 > project, written so an assistant (e.g. a Perplexity Space) can answer *"how do I use
 > this project?"* — covering the Barbershop diagnostics dashboard, training, backtesting,
 > live trading, and every feature, with exact file names, locations, and commands.
-> Last updated 2026-06-16.
+> Last updated 2026-06-18.
 
 ---
 
@@ -22,13 +22,35 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 - **Safety spine:** 9 "laws" + 3 "gates" + operator "training-wheel" masks forbid illegal/
   counter-trend/illiquid trades **before** the policy acts (logit −1e9), in both training
   and live. A RiskManager guarantees total open risk never exceeds the remaining buffer.
+  - **About the ADF (stationarity) gate:** it is **not just a blocker to remove**. Its
+    purpose is to teach the bot to trade **both stationary AND non-stationary** market
+    conditions by controlling *when* the gate is enforced vs relaxed. Loosening its
+    p-value threshold is a **diagnostic** move (let more bars through, watch the policy,
+    then decide if the *calibration* needs a permanent change) — the gate stays in the
+    architecture; only its calibration changes. (Stated again wherever the gate appears.)
 - **Barbershop:** a separate, **read-only** Dash dashboard (+ an LLM "Risk Doctor") used
   **after** training to understand *why* the bot did what it did and to write better
   reward/penalty rules.
 
-**Two repos hold the identical project** (kept in sync):
-`https://github.com/monty313/final-rl-model-6_13` and
-`https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`.
+**Two operating modes (entered freely, NOT sequential):**
+- **Barbershop mode** — *"get the haircut before going to school."* Fast, operator-driven
+  diagnose-and-shape: pick a small window of challenge days, run the policy fast, watch
+  what breaks (above all the **gate block rate**), make one educated `OVERRIDES` edit,
+  repeat. Can happen **before, during, or after** full training (§4.10).
+- **Full Training mode** — long walk-forward runs + curriculum phases (Law School → Setup
+  Recognition → Full Market) that *generalize* the shaped policy across regimes (§4.6,
+  `colab/Quantra_Train.ipynb`). Uses the Barbershop-shaped policy as starting weights.
+
+**Two repos — know which one you're in (full protocol in §4.13):**
+- **ACTIVE WORK** (all edits + commits happen here): `https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`
+- **FALLBACK / SAFE RESTORE** (NEVER edited — clean emergency revert only): `https://github.com/monty313/final-rl-model-6_13`
+
+**Known gaps (honest — stated in every overview; full detail in §7):** (1) the gates block
+~98.7% of trade opportunities on real EURUSD — the **#1 active blocker**, a *calibration*
+issue not a bug; (2) no real trained model yet (synthetic-trained, doesn't transfer);
+(3) the sim models ONE wall, real FTMO has TWO; (4) Barbershop Screen 1 is a labelled demo
+curve until a real pass-rate series is logged; (5) trade-autopsy attribution is
+input×gradient, not true SHAP.
 
 ---
 
@@ -138,10 +160,14 @@ final rl model 6_13/
 │   ├── snapshot.py                # state-vector snapshot guard (--check / --update)
 │   └── impact.py                  # change-impact graph
 │
-├── colab/Quantra_Train.ipynb      # Colab training notebook (walk-forward)
+├── colab/
+│   ├── Quantra_Train.ipynb        # FULL TRAINING mode notebook (7-seed walk-forward)
+│   └── Quantra_Barbershop.ipynb   # BARBERSHOP mode fast loop (8 cells; §4.10 / §4.14)
 │
 ├── data/        (gitignored)      # raw MT5 CSVs (data/raw/EURUSD_M1.csv, EURUSD_recent.csv, …)
-├── artifacts/   (gitignored)      # checkpoints + telemetry (artifacts/checkpoints, artifacts/telemetry)
+├── artifacts/   (gitignored*)     # checkpoints + telemetry (artifacts/checkpoints, artifacts/telemetry)
+│   └── policy_registry/           # one folder per policy (manifest/performance/compat — §4.11)
+│       └── README.md              # *the ONLY committed file under artifacts/ (registry guide)
 └── logs/        (gitignored)      # Barbershop runtime exports (suggested_rules.json, doctor_diagnoses.jsonl)
 ```
 
@@ -199,6 +225,14 @@ python scripts/real_backtest.py --symbol EURUSD --path data/raw/EURUSD_recent.cs
 ```
 Flags: `--updates` (PPO updates; 0 = untrained baseline), `--train_frac` (default 0.7),
 `--target` / `--risk` (daily % target / trailing %). Writes an equity-curve PNG to `data/`.
+
+> **`--path` now defaults to `None` (fix, 2026-06-18).** Omitting `--path` makes
+> `load_symbol` resolve the bars itself — Parquet cache → Drive mount → `gdown`
+> auto-download by registered Drive file ID — instead of raising `FileNotFoundError` on a
+> clean checkout. So on a fresh machine with no local CSV you can just run
+> `python scripts/real_backtest.py --symbol EURUSD --updates 40`. (Previously `--path`
+> defaulted to a hardcoded CSV and was always wrapped in `Path(...)`, which blocked the
+> very first real run — the gateway to a real FTMO pass. See the IRAC in the script header.)
 
 ### 4.3 Produce real telemetry for the Barbershop (the PRODUCER)
 `scripts/emit_real_telemetry.py` runs the deterministic policy over a held-out slice of
@@ -261,6 +295,172 @@ Inject per day with `env.reset(challenge=make_challenge(...))`.
 `ManualHalt` kill-switch and breach-auto-flat are armed. The live session uses the **same**
 laws/gates/training-wheel masks as training (discipline transfers). A one-command demo
 launcher is on the queue (see `INSTRUCTIONS.md`).
+
+### 4.10 The Barbershop Fast Loop (`colab/Quantra_Barbershop.ipynb`)
+
+> **Status:** 🟡 new system — the notebook is a runnable **skeleton**. Loop plumbing (live
+> output, checkpoint-on-interrupt, Policy Registry write with auto-naming, ngrok dashboard)
+> is real; the one integration point — `barbershop_run_day()` — ships as a clearly-labelled
+> `DEMO_MODE` stub (placeholder metrics) until it is wired to `TradingEnv`.
+
+**What it is.** Barbershop *mode* (§1) made operational: *"get the haircut before going to
+school."* You pick a small window of FTMO challenge days, run the policy fast, watch what
+breaks, make **one** educated edit (via `OVERRIDES`, §4.12), and repeat. It can run
+**before, during, or after** Full Training (§4.6) — the two modes are not sequential.
+
+**Inputs (top of the notebook, Cell 3):**
+- `POLICY_NAME` — operator label for the save (the *final* name is auto-generated, §4.11).
+- `START_DATE` — where in the data the challenge window starts (e.g. `"2023-03-01"`).
+- `N_DAYS` — consecutive FTMO challenge days to train on (e.g. `8`).
+- `N_PASSES` — how many times the loop repeats over those `N_DAYS`.
+- `CHECKPOINT_INTERVAL` — save weights + telemetry + registry every N passes.
+- `RESUME_FROM` — checkpoint path to continue from, or `None` to start fresh.
+
+**Live output (printed during training, after every pass — not at the end):**
+```
+Pass 3/20
+  Day 1: PASS   | +2.3% | DD -1.1% | 5 trades | Gate blocks: 43%
+  Day 2: FAIL   | -1.8% | DD -4.0% BREACHED | 2 trades | Gate blocks: 97%
+  Day 3: PASS   | +2.6% | DD -0.8% | 7 trades | Gate blocks: 31%
+  ...
+  Summary: 5/8 passed | Avg P&L: +0.9% | Avg DD: -1.9% | Avg gate block rate: 61%
+```
+The **gate block rate per day is the #1 diagnostic signal** — it tells you whether the
+policy is being *prevented* from trading (the gate-lockout gap, §7). A healthy shaping run
+shows it falling as you relax gates and the policy learns to pass.
+
+**Stop / resume.** Hit Colab's stop button any time: the loop **catches the interrupt and
+saves a clean checkpoint before dying** — you never lose weights on stop. Setting
+`RESUME_FROM` to a checkpoint continues from that exact point; the Policy Registry (§4.11)
+tracks what was already done.
+
+**Visualization (dual mode).** (1) **Inline** charts in the notebook (Cell 7) — Screen 1
+wall + Screen 3 day replay rendered via `barbershop/figures.py`
+(`training_wall_figure`, `candlestick_figure`). (2) **ngrok tunnel** (Cell 8) auto-starts
+the full Dash app (`barbershop.dashboard.make_app`) in a background thread so you can open
+all **5 screens + the Risk Doctor** in your browser. Telemetry is auto-emitted to
+`artifacts/telemetry/<run>.jsonl` after every checkpoint so the Barbershop always has fresh
+data (canonical real-bar producer: `scripts/emit_real_telemetry.py`).
+
+**ADF gate reminder.** When you loosen `adf_p_value_threshold` in `OVERRIDES`, you are using
+the stationarity gate as a **diagnostic** — letting more non-stationary bars through to see
+what the policy does — *not* deleting it. Its purpose is to teach the bot to trade **both
+stationary AND non-stationary** regimes; the gate stays, only its calibration changes (§4.12, §7).
+
+### 4.11 The Policy Registry (`artifacts/policy_registry/<policy_name>/`)
+
+Every policy gets a saved **identity** so you can answer: *"What is this policy's
+perspective on how to pass the FTMO challenge?"* — what config produced it, what it saw, and
+how well it passed. Written by the Barbershop notebook (Cell 6); read by you, the dashboard,
+and the Risk Doctor. **Three files per policy** (full reader's guide:
+`artifacts/policy_registry/README.md`):
+
+1. **`manifest.json`** — auto-generated at save time, **never hand-written**: `policy_name`
+   (auto, see below), `auto_name_basis` (the diff in plain tokens), `created`, `base_policy`
+   (what it resumed from, or `null`), `data_window` (`start` + `n_days`),
+   `n_passes_completed`, `state_dim`, `training_wheels`, `overrides_applied` (the full
+   `OVERRIDES` dict), `compatibility_signature`.
+2. **`performance.json`** — updated after every pass: `pass_history` (per pass:
+   `days_passed`/`days_failed`/`avg_pnl`/`avg_dd`/`breach_count`/`avg_gate_block_rate`),
+   `best_pass`, `overall_pass_rate`.
+3. **`compatibility.sig`** — a hash of **state_dim + reward-layer shape + law-parameter
+   fingerprint**, checked on `RESUME_FROM` (§4.12).
+
+**Auto-name generation (NEVER hardcoded).** The folder name is **derived from the
+`OVERRIDES` diff vs the baseline config** — never typed by hand or invented by an assistant.
+Each meaningful change becomes a short token; tokens join with `-` behind a `v<N>` that
+increments from `base_policy`. *Example:* loosen the ADF gate 2× **and** double the drawdown
+penalty, resumed from `v1-gate-test` → **`v2-adf2x-ddpenalty2x`**. (A gate token like
+`adf2x` means "shaped with the ADF gate relaxed 2×", **not** "the gate was removed" — §4.10.)
+Monty may rename a policy afterward, but the auto-name is always generated first and recorded.
+
+Registry contents are **git-ignored** (large + run-specific); only the `README.md` is
+committed. Persist real checkpoints/manifests to **Google Drive** (auto-saved every
+`CHECKPOINT_INTERVAL`). See §4.13 for why the repo is not your backup.
+
+### 4.12 Runtime Override System (the `OVERRIDES` dict)
+
+After a Barbershop run you decide what to change — and you make that change **inside the
+notebook**, not by editing source files and not by asking an LLM to patch code every time. A
+runtime `OVERRIDES` dict (Cell 3) is **injected into the env/training loop at launch without
+touching `quantra/runtime/config.py` or `laws.py`.** The exact dict used is saved to the
+Policy Registry (§4.11) for every run, so you always know which configuration produced which
+result. Tuneable knobs:
+
+| Knob | Default | What it does (relative to passing) |
+|---|---|---|
+| `adf_p_value_threshold` | `0.05` | Loosen the **stationarity** gate (let more non-stationary bars through). |
+| `atr_min_multiplier` | `1.0` | Loosen the **ATR-liquidity** gate. |
+| `spread_max_pips` | `2.0` | Tighten/loosen the **spread** gate. |
+| `reward_l1_pnl_weight` | `1.0` | Layer-0 net-PnL weight — **NEVER set to 0** (see below). |
+| `reward_l2_drawdown_penalty` | `1.0`→`2.0` | Drawdown-penalty multiplier (the L3 pain-zone ramp). |
+| `reward_l3_hold_penalty` | `0.0`→`0.5` | Penalty for holding too long (anti-stagnation). |
+| `reward_l4_gate_bonus` | `0.0`→`0.1` | Small bonus for **not** being blocked by the gate. |
+| `training_wheels` | `True` | Enforce (`True`) / remove (`False`) the counter-trend OPEN masks. |
+
+**ADF note (again, by rule):** loosening `adf_p_value_threshold` is a **diagnostic tool** to
+unblock training and observe the policy with more freedom — then you interpret the result to
+decide whether the *calibration* needs a permanent change. The gate stays in the
+architecture; you are tuning **both stationary AND non-stationary** trading, not disabling
+stationarity filtering.
+
+**What triggers a `CompatibilityError`.** If an override changes **`STATE_DIM`** or the
+**reward shape** in a way that breaks an existing checkpoint's assumptions, resuming raises a
+**`CompatibilityError`** with a plain-English reason for *why* the policy must start fresh —
+and it **saves the old checkpoint first**. Old policies are **never deleted automatically**.
+Safe to resume across: tuning gate thresholds, tuning reward *weights* (so long as Layer-0
+dominance holds — `reward_l1_pnl_weight` ≠ 0), toggling `training_wheels`.
+
+> 🔴 **Locked-parameter guard.** `reward_l1_pnl_weight = 0` would break **Layer-0 dominance**,
+> a locked invariant (§6). Likewise γ/λ, the 9 laws / 3 gates params, the action-mask logic,
+> and `STATE_DIM` are locked: changing them is a **proposed amendment requiring Monty's
+> sign-off**, not a routine override.
+
+### 4.13 Repo Safety Protocol (primary vs fallback)
+
+The project lives in **two GitHub repos**, and you must always know which one you're in:
+
+| Role | Repo | Rule |
+|---|---|---|
+| **ACTIVE WORK** | `github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-` | All code changes, new files, and commits happen here. Every session works here. |
+| **FALLBACK / SAFE RESTORE** | `github.com/monty313/final-rl-model-6_13` | **Never edited.** It is the last-known-clean snapshot you revert to if the working repo breaks beyond repair. |
+
+**Protocol.**
+1. Do all work in the **active** repo (this one).
+2. **Before any major code change, push the current working state** so the fallback can be
+   re-synced from a known-good commit — the fallback must stay a clean restore point.
+3. If the active repo breaks beyond repair: clone **`final-rl-model-6_13`** to restore, then
+   re-apply only the verified-good work on top.
+4. **Never delete or overwrite the fallback repo**, and never confuse the two — this protocol
+   exists so no session (human or LLM) ever edits the wrong one.
+
+### 4.14 Colab GPU Setup (80% target · cache-once · cell order)
+
+Monty runs **Colab Pro**; training should use **~80% of whatever GPU/CPU instance is
+assigned**. The hardware auto-optimizer (`quantra/runtime/optimizer.py`, `plan()` /
+`print_report()`) already does this — the Barbershop notebook **calls it at startup**
+(Cell 1, via `from quantra.runtime import plan, print_report, UtilizationMonitor`). It races
+CPU vs GPU on the real four-head workload, picks the faster device (preferring CPU on a
+near-tie to save GPU hours), and sizes parallelism to ~80%.
+
+**Critical performance rule — cache once, then live on GPU.** The data pipeline (CSV parse →
+feature build → memmap cache) runs **once at startup** and the cache is reused forever; every
+second of CPU setup is a second you're not seeing results. The notebook's **8-cell order**
+enforces this:
+
+| Cell | Does | Skips if… |
+|---|---|---|
+| 1 | Clone active repo · mount Drive · install deps · race hardware (~80%) | deps sentinel exists |
+| 2 | Load data + build features → memmap cache | cache exists |
+| 3 | Set `INPUTS` + `OVERRIDES` (**operator edits here**) | — |
+| 4 | Load or init policy (resume or fresh) + compatibility check | — |
+| 5 | **Training loop** (GPU-bound · live output · clean stop-on-interrupt) | — |
+| 6 | Auto-emit telemetry → write Policy Registry entry (auto-named) | — |
+| 7 | Inline Barbershop charts (`figures.py`) | — |
+| 8 | Start ngrok tunnel → full dashboard | — |
+
+Checkpoints auto-save to **Drive** every `CHECKPOINT_INTERVAL` passes, so a Colab disconnect
+resumes from the last Drive checkpoint (not from zero).
 
 ---
 
@@ -325,17 +525,24 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
   no-overshoot sizing, margin, PnL decomposition — is arithmetically correct.
 - The Barbershop: 37 tests pass; real telemetry flows end-to-end; honesty guards in place.
 
-**Known gaps / honest caveats (the things to fix next):**
-1. **The bot barely trades on real EURUSD** — the gates (chiefly the *stationarity* gate,
-   open ~5.6%, + ATR-liquidity) shut the trade window ~98.7% of the time. This is the
-   binding blocker to passing; it's a calibration issue, not an arithmetic bug.
-2. **No real trained model yet** — the brain has only been trained on synthetic data; it
-   doesn't transfer to real bars (≈9 trades / 5,565 bars). A real walk-forward run is needed.
-3. **One wall, not two** — the sim models a single daily-re-anchored trailing wall; real
-   FTMO has TWO limits (max daily loss from day-start AND a permanent max-overall loss).
-   A sim pass does not yet guarantee a live-legal pass.
-4. **Barbershop Screen 1 (training wall)** is a labelled demo curve until the trainer logs
-   a real pass-rate series; the autopsy's attribution is input×gradient, not true SHAP.
+**Known gaps / honest caveats (state these in every overview):**
+1. **GATE LOCKOUT — the #1 active work item.** The gates (chiefly the *stationarity* gate,
+   open ~5.6%, + ATR-liquidity) block **~98.7%** of trade opportunities on real EURUSD. This
+   is the binding blocker to passing — a **calibration** issue, not an arithmetic bug. Note
+   the ADF (stationarity) gate's purpose is to teach the bot to trade **both stationary AND
+   non-stationary** regimes by controlling when it is enforced vs relaxed; the fix is to
+   recalibrate it (use `OVERRIDES` diagnostically, §4.12), **not** to delete it. Watch the
+   per-day **gate block rate** in the Barbershop Fast Loop (§4.10) as the primary signal.
+2. **No real trained model yet.** The policy has only been trained on **synthetic data**; it
+   does not transfer to real bars (≈9 trades / 5,565 bars). A real **Barbershop run** is the
+   first step (then Full Training walk-forward).
+3. **One wall, not two.** The sim models a single daily-re-anchored trailing wall; real FTMO
+   has **TWO** limits (max daily loss from day-start AND a permanent max-overall drawdown). A
+   sim pass does **not** yet guarantee a live-legal pass.
+4. **Screen 1 demo curve.** Barbershop **Screen 1** shows a labelled **demo curve** until the
+   trainer logs a real pass-rate series.
+5. **input×gradient, not SHAP.** The trade-autopsy attribution (Screen 4) is
+   **input×gradient**, honestly labelled — not true Shapley values.
 
 ---
 
@@ -352,7 +559,21 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
   stable step.
 - **Laws (9) / Gates (3):** the legal-action spine — directional laws ban the wrong
   direction; gates (ATR-liquidity, spread, stationarity) ban new opens in bad conditions.
+- **ADF / stationarity gate:** the gate that bans new opens when bars look non-stationary.
+  Its purpose is **not** to be removed — it teaches the bot to trade **both stationary AND
+  non-stationary** regimes by controlling *when* it is enforced vs relaxed. Loosening its
+  p-value threshold is a **diagnostic** (unblock + observe), after which you decide if the
+  **calibration** needs a permanent change. The gate stays; only calibration moves (§4.12, §7).
 - **Training wheels:** operator counter-trend OPEN blocks (CCI/BB on 30m+4H).
+- **`OVERRIDES`:** the runtime override dict (§4.12) injected at launch — tune gates/reward
+  weights/training-wheels without editing `config.py` or `laws.py`; saved per run to the
+  Policy Registry.
+- **Policy Registry:** `artifacts/policy_registry/<name>/` — a policy's saved identity
+  (auto-named manifest + performance + compatibility signature, §4.11).
+- **Barbershop mode / Full Training mode:** the two operating modes (§1) — fast
+  diagnose-and-shape vs long walk-forward generalization; entered freely, not sequential.
+- **Gate block rate:** the per-day fraction of bars where the gates blocked a new open —
+  the **#1 diagnostic** in the Barbershop Fast Loop (§4.10).
 - **The wall / breach:** the trailing drawdown limit; touching it = breach = challenge failed.
 - **Target:** the daily profit goal (+2.5%).
 - **Barbershop:** the read-only diagnostics dashboard. **Risk Doctor:** the LLM that
@@ -365,3 +586,29 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
 *For deeper specs see `docs/` (THE_TRADING_CODE, STATE_VECTOR, REWARD_DESIGN, PPO_ENGINE,
 MLP_INTERPRETABILITY_LAYER). For the Barbershop fixes log see `barbershop/REMEDIATION_PLAN.md`.
 For cross-file couplings before any refactor see `COUPLINGS.md`.*
+
+---
+
+## Update Log (IRAC)
+
+- **[2026-06-18]** Added the Barbershop fast-loop system to the guide (§4.10–§4.14), rewrote
+  §1/§7 for the two-modes + repo-safety + five-known-gaps model, and applied the
+  `real_backtest.py --path` fix note (§4.2).
+  - **I:** The operator needed a fast, in-notebook diagnose-and-shape loop (Barbershop mode)
+    with a saved policy identity, a no-code-edit override system, an unambiguous primary/
+    fallback repo rule, and an honest Colab-performance pattern — none of which were
+    documented, and the repo roles in the brief contradicted the operator's correction.
+  - **R:** Operator brief Sections 1–11 + the corrected repo roles (ACTIVE =
+    `RL-model-trading-bot-ppo-mlp_Claude-`, FALLBACK = `final-rl-model-6_13`) + standing
+    rules (FTMO framing, ADF-purpose note everywhere, 5 gaps in every overview, auto-names
+    from the `OVERRIDES` diff, no invented files).
+  - **A:** Wrote §4.10 (Fast Loop), §4.11 (Policy Registry + auto-naming), §4.12 (Runtime
+    Override System + `CompatibilityError`), §4.13 (Repo Safety Protocol), §4.14 (Colab GPU
+    Setup); split §7 into 5 gaps with gate-lockout as #1; added the ADF stationary/
+    non-stationary note wherever the gate appears; created
+    `colab/Quantra_Barbershop.ipynb` (8-cell skeleton) and
+    `artifacts/policy_registry/README.md`; fixed `scripts/real_backtest.py` `--path`.
+  - **C:** Monty and any LLM can now run, save, resume, and reason about a Barbershop policy
+    against the single mission — repeatedly passing the FTMO challenge — and always know
+    which repo is safe to edit. New systems are clearly marked as a runnable skeleton, not
+    claimed as finished, preserving the project's honesty contract.

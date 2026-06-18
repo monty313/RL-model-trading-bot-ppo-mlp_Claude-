@@ -1,6 +1,12 @@
 # --- Quantra data + artifacts (never committed; large + run-specific) ---
 data/
-artifacts/
+# artifacts/ is ignored EXCEPT the policy-registry README, which is source docs
+# (a plain-English guide to reading registry entries). Real registry contents —
+# manifest.json / performance.json / compatibility.sig / weights — stay ignored.
+artifacts/*
+!artifacts/policy_registry/
+artifacts/policy_registry/*
+!artifacts/policy_registry/README.md
 *.parquet
 *.npy
 *.memmap

@@ -1768,7 +1768,11 @@ def test_real_backtest_runs_on_real_bars_when_enabled():
         pytest.skip("set QUANTRA_REAL_BACKTEST=1 with data/raw/EURUSD_recent.csv present")
     import subprocess
     import sys as _sys
-    r = subprocess.run([_sys.executable, "scripts/real_backtest.py", "--updates", "0"],
+    # Pass --path explicitly: real_backtest.py's --path now defaults to None (omitting it
+    # triggers the loader's gdown auto-download fallback). This gated test guards on the
+    # local CSV existing, so it must point at exactly that file to stay deterministic.
+    r = subprocess.run([_sys.executable, "scripts/real_backtest.py", "--updates", "0",
+                        "--path", "data/raw/EURUSD_recent.csv"],
                        capture_output=True, text=True, timeout=600)
     assert "QUANTRA BACKTEST" in r.stdout and "GROUND TRUTH" in r.stdout
 
@@ -1950,3 +1954,14 @@ if __name__ == "__main__":  # pragma: no cover
 #      real backtest (runs only with the real CSV + QUANTRA_REAL_BACKTEST=1).
 #   C: The suite no longer claims a pass it can't honestly back; performance is measured on
 #      REAL bars, so what we report about passing FTMO is true - not a fitted illusion.
+# [2026-06-18] Section V gated backtest now passes --path explicitly (real_backtest --path fix).
+#   I: scripts/real_backtest.py's --path now defaults to None so an OMITTED --path triggers the
+#      loader's Parquet/Drive/gdown fallback (operator brief Section 9). This gated test ran the
+#      script with NO --path, relying on the old hardcoded default; after the fix that would
+#      resolve via the fallback instead of the local CSV the test guards on.
+#   R: The test only runs when data/raw/EURUSD_recent.csv exists AND QUANTRA_REAL_BACKTEST=1, so
+#      it must point the harness at exactly that file to stay deterministic.
+#   A: Added "--path data/raw/EURUSD_recent.csv" to the subprocess invocation; compute_stats
+#      import and assertions unchanged.
+#   C: The real-bar proof still measures the exact CSV it guards on, while the shipped script
+#      gains the clean-checkout auto-download path - the gateway to a real FTMO pass.
