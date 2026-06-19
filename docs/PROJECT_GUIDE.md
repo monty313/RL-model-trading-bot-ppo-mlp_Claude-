@@ -248,9 +248,10 @@ python tools/snapshot.py --check  # verify the observation layout hasn't drifted
 ```
 
 ### 4.2 Honest backtest on real bars (train on a slice, test on held-out)
-`scripts/real_backtest.py` loads real MT5 bars, trains the PPO brain on the first 70%,
-then runs the **deterministic** policy on the held-out tail and prints an
-MT5-Strategy-Tester-style report (ground-truth net = real account change).
+`scripts/real_backtest.py` is the **current SINGLE-SPLIT out-of-sample tool** (one train/test split):
+it loads real MT5 bars, trains the PPO brain on the first 70%, then runs the **deterministic** policy
+on the held-out tail and prints an MT5-Strategy-Tester-style report (ground-truth net = real account
+change). It is **operational today**; the full *rolling* walk-forward is §4.2a.
 ```
 python scripts/real_backtest.py --symbol EURUSD --path data/raw/EURUSD_recent.csv \
     --updates 40 --target 2.5 --risk 4.0
@@ -265,6 +266,24 @@ Flags: `--updates` (PPO updates; 0 = untrained baseline), `--train_frac` (defaul
 > `python scripts/real_backtest.py --symbol EURUSD --updates 40`. (Previously `--path`
 > defaulted to a hardcoded CSV and was always wrapped in `Path(...)`, which blocked the
 > very first real run — the gateway to a real FTMO pass. See the IRAC in the script header.)
+
+### 4.2a Rolling walk-forward / out-of-sample validation (the locked protocol, operational)
+`scripts/walk_forward_eval.py` runs the **locked walk-forward protocol** — 12-month train / 2-month
+test / 1-month step, N seeds (default 7) — on real bars. It is **additive glue**: it supplies the
+real `eval_fn` that `quantra/ftmo_passing/validation/walk_forward.py` always required (the protocol +
+`PromotionGate` + `Scoreboard` are unchanged). Per (window, seed) it slices the cached features to the
+window's train/test spans (no feature rebuild), trains a **fresh seeded** brain on the train span,
+deterministic-evaluates on the held-out test span (via `barbershop_runner.run_pass`), and returns a
+`RunResult`; then it prints the `Scoreboard` summary + the `PromotionGate` decision.
+```
+python scripts/walk_forward_eval.py --symbol EURUSD --updates 200            # default 7 seeds
+python scripts/walk_forward_eval.py --symbol EURUSD --seeds 3 --updates 400  # fewer seeds, more updates
+```
+Flags: `--updates` (PPO updates per window×seed), `--seeds` (default 7), `--target`/`--risk`.
+**Needs ~14+ months of bars** to produce even one 12/2/1 window (a multi-year history to be
+meaningful); for a quick check use the single-split §4.2. *(Known gap: `real_backtest.py`'s report
+still uses a crude "hit target at least once" pass flag; real per-day pass counting there is deferred
+— the rolling harness above uses real per-day rows via `run_pass`.)*
 
 ### 4.3 Produce real telemetry for the Barbershop (the PRODUCER)
 `scripts/emit_real_telemetry.py` runs the deterministic policy over a held-out slice of
@@ -726,3 +745,18 @@ For cross-file couplings before any refactor see `COUPLINGS.md`.*
     one active repo, a live tunable reward, a complete 6-screen Barbershop, and a wired registry — and
     the new standing rule keeps every doc in lock-step with the code on future changes, protecting the
     docs == code honesty contract the whole project relies on.
+
+- **[2026-06-19]** Issue-3 (Phase C) — documented OOS validation: single-split + operational rolling
+  walk-forward.
+  - **I:** The only runnable OOS tool was the single-split `scripts/real_backtest.py`; the locked
+    walk-forward harness existed but had no eval_fn ("e2e wiring lands in M15"), so a real rolling
+    walk-forward couldn't be run, and the guide didn't distinguish the two.
+  - **R:** Operator Phase C (make walk-forward operational; ADD glue, don't touch the locked protocol)
+    + the standing docs-track-code rule (§1).
+  - **A:** Reframed §4.2 as the SINGLE-SPLIT OOS tool; added §4.2a for `scripts/walk_forward_eval.py`
+    (wires the locked 12/2/1-month, 7-seed protocol to a real eval_fn — train fresh per window×seed,
+    deterministic-eval via `run_pass`, Scoreboard + PromotionGate), with run commands and the honest
+    "needs ~14+ months of bars" + the deferred `real_backtest` per-day pass-rate note.
+  - **C:** Operators now know exactly which OOS tool to run today (single-split) vs the rolling
+    walk-forward, so a brain can be judged on rolling out-of-sample windows before promotion — the real
+    test of repeatable passing — with the docs matching the code.
