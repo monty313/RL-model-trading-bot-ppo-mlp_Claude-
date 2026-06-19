@@ -142,8 +142,12 @@ What does **not** change the signature (safe to resume across):
 - Toggling `training_phase` (`free` ↔ `constrained`) — enforcement only, not the input shape.
 - Toggling `training_wheels` (observable + enforced, but not part of the input shape).
 - Changing the challenge numbers (`daily_target_pct`, `daily_risk_pct`, `permanent_dd_pct`).
-- (Operator-tunable reward weights are PLANNED, not yet wired — `reward.py` uses internal
-  constants today.)
+- Operator-tunable reward **weights** (`RewardConfig`, C16) and re-pointed term **math** (C17):
+  these change a multiplier or *what a layer computes*, **not the layer arrangement** (the `L0…L5`
+  keys are unchanged), so they are safe to resume across. Only adding / removing / reordering a
+  reward layer changes the signature. *(The signature is computed by
+  `quantra/learning_system/policy_registry/registry.py`: `state_dim` + the reward decompose `L*`
+  keys + a hash of `laws.LAW_NAMES`.)*
 
 ---
 
@@ -226,3 +230,16 @@ acknowledged gaps:
     compatibility + safe-to-resume lists (phase/wheels/challenge knobs), and the known gaps.
   - **C:** Anyone reading a policy's identity now sees the real knobs and the true "learns
     market conditions in PHASE_FREE" story — no obsolete gate-threshold framing.
+
+- **[2026-06-19]** C18 — the registry CODE now exists (this README's contract is implemented).
+  - **I:** This README described manifest/performance/compatibility + auto-naming + the resume gate,
+    but no code produced or read them, and there was no Leaderboard to rank policies by passing.
+  - **R:** Operator brief "Policy Card + Leaderboard" + this README (the committed contract) +
+    PROJECT_GUIDE §4.11/§4.12 + the standing show-the-work rule.
+  - **A:** Added `quantra/learning_system/policy_registry/registry.py` (`PolicyCard` writes/reads the
+    3 files; `auto_name` derives `v<N>-tokens` from the OVERRIDES diff vs `baseline_overrides()`;
+    `compatibility_signature`/`check_compatibility`; `Leaderboard` ranks by pass-rate→best-days→
+    fewest-breaches) + `cfg.POLICY_REGISTRY_DIR`. Synced §4: operator-tunable reward weights (C16) +
+    re-pointed math (C17) are now wired and resume-safe (only the layer ARRANGEMENT changes the sig).
+  - **C:** Trained policies get a real, comparable identity + scoreboard, so the operator can see
+    which configuration passes best and safely resume/promote it toward a consistently-passing champion.

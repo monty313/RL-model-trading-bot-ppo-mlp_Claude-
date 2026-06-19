@@ -52,6 +52,10 @@ ARTIFACT_DIR: Path = REPO_ROOT / "artifacts"
 CHECKPOINT_DIR: Path = ARTIFACT_DIR / "checkpoints"
 TELEMETRY_DIR: Path = ARTIFACT_DIR / "telemetry"
 REPORT_DIR: Path = ARTIFACT_DIR / "reports"
+# COUPLING -> learning_system/policy_registry/registry.py (PolicyCard.save/load, Leaderboard) +
+# artifacts/policy_registry/README.md: one folder per policy lives here (manifest/performance/
+# compatibility). Only the README is committed; the rest is git-ignored (run-specific).
+POLICY_REGISTRY_DIR: Path = ARTIFACT_DIR / "policy_registry"
 DOCS_DIR: Path = REPO_ROOT / "docs"
 
 # The interpretability rulebook the LLM Risk Doctor MUST be able to read
@@ -406,7 +410,7 @@ def ensure_dirs() -> None:
     parquet cache, checkpoints, and telemetry without manual mkdir.
     """
     for d in (DATA_DIR, RAW_DIR, PARQUET_DIR, FEATURE_CACHE_DIR,
-              ARTIFACT_DIR, CHECKPOINT_DIR, TELEMETRY_DIR, REPORT_DIR):
+              ARTIFACT_DIR, CHECKPOINT_DIR, TELEMETRY_DIR, REPORT_DIR, POLICY_REGISTRY_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
