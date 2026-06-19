@@ -516,6 +516,25 @@ Claude Code MUST NOT:
 - Allow the Risk Doctor to infer diagnoses without telemetry evidence
 - Attach any execution authority to the LLM Risk Doctor
 
+## STANDING RULE — SHOW THE WORK [2026-06-19, operator]
+
+Applies to **every file in this project, present and future** (the per-file "UPDATE LOG (IRAC)"
+headers point here as the rulebook). On **every** edit, Claude Code must:
+
+1. **Append a dated IRAC entry** to that file's update log — `[YYYY-MM-DD] <tag> — <summary>` then
+   **I**ssue / **R**ule / **A**pplication / **C**onclusion (Conclusion = why it helps the bot pass
+   FTMO more consistently, with no new bug or inefficiency).
+2. **Document the cross-file RELATIONSHIPS** the change depends on, inline, with a `COUPLING ->`
+   comment that names the **other file(s)** and the **exact attribute / field / dict-key** relied on,
+   in **both directions** (what this file reads from there, and what there must keep stable for this
+   file). State what breaks if the coupled name changes.
+3. **Date the re-pointed logic** — tag changed math/branches with the edit date (e.g. `# C17
+   [2026-06-19] ...`) so a future reader sees *what* connects to *what*, *what breaks where*, and
+   *when it changed*.
+
+This is how the project stays legible and the LLM Risk Doctor can reconstruct the chronological
+"why". New files start with the same IRAC header + this rulebook reference and follow the same rule.
+
 ---
 
 # DONE CRITERIA [C]

@@ -953,21 +953,35 @@ from quantra.learning_system.reward_engine import (  # noqa: E402
 
 
 def test_e8_layer0_dominates_over_1000_rollouts():
-    """Over 1000 random rollouts, cumulative |L0| exceeds every shaping layer's."""
+    """Over 1000 random rollouts, cumulative |L0| exceeds every shaping layer's — RE-VERIFIED at the
+    C17 math (L2 daily-progress over a realistic intraday equity walk; L4 trade-quality on ~12% of
+    steps as a signed, account-normalized close)."""
     eng = RewardEngine()
+    acct = eng.challenge.ftmo_account_size
     rng = np.random.default_rng(7)
     fails = 0
     for _ in range(1000):
         sums = {k: 0.0 for k in ("L0", "L1", "L2", "L3", "L4")}
+        equity = day_start = acct
+        day_target = day_start * (1.0 + eng.challenge.daily_target_pct / 100.0)
         for _ in range(256):                       # a rollout of 256 steps
+            step_pnl = float(rng.normal(0, 2e-3)) * acct      # realistic per-step PnL (USD)
+            equity += step_pnl                                # intraday equity walk -> day_pnl
+            tq = 0.0
+            if rng.random() < 0.12:                           # a trade closed this step
+                realized = float(rng.normal(0, 3e-3)) * acct
+                ever = realized > 0 or rng.random() < 0.5
+                if realized > 0:   tq = realized / acct
+                elif ever:         tq = -abs(realized) / acct
             ctx = RewardContext(
-                net_pnl_delta=float(rng.normal(0, 2e-3)),   # realistic per-step PnL
+                net_pnl_delta=step_pnl / acct,
                 in_position=bool(rng.random() < 0.6),
                 momentum_aligned=bool(rng.random() < 0.5),
-                stagnation=bool(rng.random() < 0.3),
                 drawdown_pct=float(rng.uniform(0, 4.0)),
-                day_progress=float(rng.uniform(-1, 1)),
                 breach_risk=bool(rng.random() < 0.2),
+                day_pnl=equity - day_start,
+                day_target_equity=day_target,
+                trade_close_quality=tq,
             )
             d = eng.decompose(ctx)
             for k in sums:
@@ -988,9 +1002,10 @@ def test_pain_zone_is_zero_below_threshold_and_monotonic():
 
 def test_reward_layer0_passthrough_dominates_a_single_step():
     eng = RewardEngine()
-    # a meaningful L0 with all shaping on -> total is dominated by L0's sign/scale
-    d = eng.decompose(RewardContext(net_pnl_delta=0.01, in_position=True,
-                                    momentum_aligned=True, day_progress=1.0))
+    # a meaningful L0 with all shaping on (at target + a winning close) -> total is dominated by L0
+    d = eng.decompose(RewardContext(net_pnl_delta=0.01, in_position=True, momentum_aligned=True,
+                                    day_pnl=2500.0, day_target_equity=102500.0,
+                                    trade_close_quality=5e-3))
     assert d["L0"] == 0.01
     assert abs(d["shaped"]) < abs(d["L0"])          # shaping is a whisper
 
@@ -1032,14 +1047,52 @@ def test_c16_reward_config_named_weights_keys_unchanged():
     assert rc.drawdown_pain_steepness == 4.0 and rc.trade_quality_weight == 5e-5
     assert rc.failed_day_penalty == 5.0
     d = RewardEngine().decompose(RewardContext(
-        net_pnl_delta=0.01, in_position=True, momentum_aligned=True, stagnation=True,
-        drawdown_pct=3.8, day_progress=1.0, breach_risk=False))
+        net_pnl_delta=0.01, in_position=True, momentum_aligned=True,
+        drawdown_pct=3.8, day_pnl=1025.0, day_target_equity=102500.0,
+        trade_close_quality=0.02, breach_risk=False))
     assert set(d) == {"L0", "L1", "L2", "L3", "L4", "L5_mult", "shaped", "total"}  # keys UNCHANGED
-    assert d["L0"] == 0.01 and d["L1"] == 1e-4 and d["L2"] == -1e-3                 # weights applied
+    assert d["L0"] == 0.01 and d["L1"] == 1e-4
+    assert d["L2"] == 1e-3 * (1025.0 / 102500.0)        # C17 daily-progress whisper
+    assert d["L4"] == 5e-5 * 0.02                         # C17 trade-quality passthrough
     d2 = RewardEngine(reward_cfg=cfg.RewardConfig(step_pnl_weight=0.0, daily_progress_weight=0.0)
                       ).decompose(RewardContext(net_pnl_delta=0.01, in_position=True,
-                                                momentum_aligned=True, stagnation=True))
+                                                momentum_aligned=True, day_pnl=5000.0,
+                                                day_target_equity=102500.0))
     assert d2["L1"] == 0.0 and d2["L2"] == 0.0                                      # custom config wins
+
+
+def test_c17_daily_progress_grows_toward_target_and_off_when_negative():
+    """C17: L2 = daily_progress_weight * max(0, day_pnl)/day_target_equity — a positive whisper that
+    GROWS toward target and is exactly 0 once the day is flat or negative."""
+    eng = RewardEngine(); w = eng.reward_cfg.daily_progress_weight
+    base = dict(net_pnl_delta=0.0, day_target_equity=102500.0)
+    assert eng.decompose(RewardContext(day_pnl=-500.0, **base))["L2"] == 0.0   # day negative -> off
+    assert eng.decompose(RewardContext(day_pnl=0.0, **base))["L2"] == 0.0      # flat -> off
+    near = eng.decompose(RewardContext(day_pnl=500.0, **base))["L2"]
+    far = eng.decompose(RewardContext(day_pnl=2000.0, **base))["L2"]
+    assert 0.0 < near < far                                                     # grows toward target
+    assert far == w * (2000.0 / 102500.0)                                       # exact formula
+
+
+def test_c17_trade_quality_fires_only_on_close_and_keeps_sign():
+    """C17: L4 = trade_quality_weight * trade_close_quality — 0 with no close, sign preserved."""
+    eng = RewardEngine(); w = eng.reward_cfg.trade_quality_weight
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=0.0))["L4"] == 0.0
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=0.01))["L4"] == w * 0.01
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=-0.01))["L4"] == w * -0.01
+
+
+def test_c17_env_close_quality_sign_rules_and_normalization():
+    """C17: the env accumulator applies the operator's sign rules (+winner, -gave-back-a-winner,
+    0 for a never-profitable loser) and account-normalizes; _consume resets it for the next step."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    acct = env.account.account_size
+    env._pending_trade_quality = 0.0
+    env._record_close_quality(200.0, ever_in_profit=False)    # winner -> +200
+    env._record_close_quality(-150.0, ever_in_profit=True)    # gave back a winner -> -150
+    env._record_close_quality(-100.0, ever_in_profit=False)   # clean loss, never in profit -> 0
+    assert abs(env._consume_trade_quality() - (200.0 - 150.0) / acct) < 1e-12
+    assert env._pending_trade_quality == 0.0                    # consumed + reset
 
 
 def test_c16_env_threads_reward_config():

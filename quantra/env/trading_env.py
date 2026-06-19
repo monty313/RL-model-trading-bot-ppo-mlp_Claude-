@@ -171,6 +171,9 @@ class TradingEnv:
         self.done = False
         self._days_elapsed = 0            # C10: completed calendar-day boundaries this episode
         self._pending_day_penalty = 0.0   # C11: failed-day penalty for the day that just ended
+        # C17: signed, account-normalized trade-quality accrued by this step's closes; consumed in
+        # _reward() -> RewardContext.trade_close_quality -> reward_engine/reward.py decompose() L4.
+        self._pending_trade_quality = 0.0
         self.account = ChallengeState(self.challenge_cfg.ftmo_account_size, self.challenge_cfg)
         self.slots = {s: [Slot() for _ in range(N_SLOTS)] for s in self.symbols}
         # PER-SYMBOL reward attribution [2026-06-15 fix]: each symbol's L0 reflects ONLY its
@@ -366,6 +369,8 @@ class TradingEnv:
             self.account.realize(realized)
             self.account.charge(cc.total)
             self._sym_realized[sym] += realized - cc.total   # per-symbol attribution
+            # C17: feed L4 trade-quality (read sl.mfe BEFORE the slot is freed -> reward_engine L4).
+            self._record_close_quality(realized, sl.mfe > 0.0)
             info.update(executed="CLOSE", lots=sl.lots, cost=cc.total, realized=realized)
             self.slots[sym][idx] = Slot()  # free it
 
@@ -443,6 +448,9 @@ class TradingEnv:
                     self.account.realize(pnl)
                     self.account.charge(cost)
                     self._sym_realized[sym] += pnl - cost     # per-symbol attribution
+                    # C17: a forced close still feeds L4 trade-quality (read sl.mfe before freeing)
+                    # — round-tripping a winner into a breach/lockout is exactly a "gave back a winner".
+                    self._record_close_quality(pnl, sl.mfe > 0.0)
                     self.slots[sym][i] = Slot()
 
     def _failed_day_penalty(self) -> float:
@@ -463,13 +471,41 @@ class TradingEnv:
         account (or exhausting episode_days / end-of-data) ends the multi-day episode."""
         return self.account.equity <= cfg.ACCOUNT_FLOOR_EQUITY
 
+    def _record_close_quality(self, realized_gross: float, ever_in_profit: bool) -> None:
+        """C17 [2026-06-19]: accrue ONE closed trade's trade-quality whisper for the current step.
+        Operator sign rules: a profitable close rewards (+); a losing close that was EVER in profit
+        penalizes (-, "gave back a winner"); a losing close that was never in profit contributes 0
+        (it just didn't work — no penalty). `realized_gross` is the trade's uPnL at the close price
+        (gross, pre close-cost) — the SAME quantity used for `ever_in_profit` via Slot.mfe>0, so the
+        winner/loser test and the in-profit test are on one consistent basis (close costs already
+        live in L0). Normalized by account_size so it shares L0's units (account fraction) and can't
+        break the E8 Layer-0 dominance proof.
+        COUPLING -> learning_system/reward_engine/reward.py: this sum becomes
+        RewardContext.trade_close_quality, scaled in decompose() as L4 = trade_quality_weight * sum.
+        Call sites: _apply_action() CLOSE branch + _force_flatten() (every realization)."""
+        if realized_gross > 0.0:
+            q = realized_gross
+        elif realized_gross < 0.0 and ever_in_profit:
+            q = -abs(realized_gross)
+        else:
+            return  # losing trade that was never in profit (or exactly flat) -> no L4 signal
+        self._pending_trade_quality += q / self.account.account_size
+
+    def _consume_trade_quality(self) -> float:
+        """Return the trade-quality accrued this step and reset the accumulator (consumed once per
+        step by _reward, so each L4 contribution is counted on exactly the step its trade closed)."""
+        q = self._pending_trade_quality
+        self._pending_trade_quality = 0.0
+        return q
+
     def _reward(self, sym: str) -> float:
         """Build the RewardContext for the acting symbol and return the layered reward.
 
-        L0 = equity delta after costs / account (dominant). Momentum is a proxy
-        (in-position + CCI-sync agrees with trade dir + ATR alive); stagnation is left
-        False in M4/M6 (the 3x5m-bar tracker is a documented later refinement). The
-        full QUAD daily bonus is added at day boundaries by M7.
+        L0 = equity delta after costs / account (dominant). Momentum (L1) is a proxy
+        (in-position + CCI-sync agrees with trade dir + ATR alive). L2 daily-progress and L4
+        trade-quality are the C17 [2026-06-19] re-pointed terms — fed here from ChallengeState
+        (day_pnl / daily_target_equity) and from this step's accrued close-quality. The full QUAD
+        daily bonus is added at day boundaries by M7.
         """
         acct = self.account.account_size
         # PER-SYMBOL L0 [2026-06-15 fix]: reward this symbol's OWN PnL change since its last
@@ -491,13 +527,20 @@ class TradingEnv:
         dd_pct = max(0.0, (self.account.peak_equity - self.account.equity) / acct * 100.0)
         ctx = RewardContext(
             net_pnl_delta=l0, in_position=in_pos, momentum_aligned=momentum,
-            stagnation=False, drawdown_pct=dd_pct,
-            # COUPLING [C1] -> quantra/ftmo_passing/challenge_state.py: index [5] is day_progress
-            # in account_block()'s fixed 8-scalar order (C12 appended dist_to_perm_dd at [7], so
-            # [5] is unchanged); reorder the account block and this picks the wrong scalar.
-            # RewardContext field names couple to reward_engine/reward.py.
-            day_progress=float(self.account.account_block()[5]),
+            drawdown_pct=dd_pct,
             breach_risk=dd_pct >= self.challenge_cfg.pain_zone_start_pct,
+            # C17 [2026-06-19] re-pointed reward inputs. COUPLING -> quantra/ftmo_passing/
+            # challenge_state.py: day_pnl (= equity - day_start_equity) and daily_target_equity
+            # (= day_start_equity*(1+daily_target_pct/100)) are READ here by those property names —
+            # rename either there and L2 daily-progress breaks. COUPLING -> learning_system/
+            # reward_engine/reward.py: these keyword names must match RewardContext's fields, and
+            # decompose() turns them into L2 = daily_progress_weight*max(0,day_pnl)/day_target_equity.
+            day_pnl=self.account.day_pnl,
+            day_target_equity=self.account.daily_target_equity,
+            # trade_close_quality is the per-step sum the env accrued while CLOSING trades this step
+            # (_record_close_quality, called from _apply_action's CLOSE branch + _force_flatten);
+            # consume-and-reset it here so it lands on exactly this step's L4 trade-quality term.
+            trade_close_quality=self._consume_trade_quality(),
         )
         return self.reward_engine.reward(ctx)
 
@@ -596,6 +639,11 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13. I/R/A/C; Conclusion is always
 # why this helps the bot pass FTMO consistently. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
+# STANDING RULE [2026-06-19, operator] — applies to THIS file and EVERY file going forward: keep
+# SHOWING THE WORK. On every edit (1) append a DATED IRAC entry here, and (2) in the code comments
+# DOCUMENT the cross-file RELATIONSHIPS the change depends on (the COUPLING) — name the other file(s)
+# and the exact attr/field/key relied on, in BOTH directions — and date the re-pointed logic, so any
+# future reader/editor can see what connects to what, and what breaks where, and when it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] M4 — implemented the sequential 4-symbol env.
 #   I: Features/laws/risk/costs existed in isolation; nothing stepped them as the
@@ -666,3 +714,19 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #   C: The bot now trains on a faithful many-day account where a bad day costs real carried-forward
 #      equity AND a big reward hit, and a breached day reopens fresh next morning — so it learns the
 #      CONSISTENCY (pass most days, survive the account) that repeatedly passing FTMO actually requires.
+# [2026-06-19] C17 — feed the re-pointed daily-progress + trade-quality reward terms.
+#   I: After C16 the reward weights had plain-English names but proxy math; the operator re-pointed
+#      two terms to LITERALLY measure their names, which the env must now supply inputs for.
+#   R: Operator spec 2026-06-19 (C17: daily-progress = +reward growing with how far into profit the
+#      day is; trade-quality = +on a winning close, − on giving back a once-profitable trade, 0 on a
+#      never-profitable loser; re-verify E8; nothing else changes).
+#   A: _reward() now passes day_pnl + day_target_equity (read from ChallengeState.day_pnl /
+#      .daily_target_equity — COUPLING -> ftmo_passing/challenge_state.py) and trade_close_quality
+#      into RewardContext (COUPLING -> learning_system/reward_engine/reward.py decompose L2/L4).
+#      Added _record_close_quality() (Slot.mfe>0 = "ever in profit"; account-normalized; the operator
+#      sign rules) called from the CLOSE branch of _apply_action + from _force_flatten, accrued into
+#      _pending_trade_quality and consumed once per step by _consume_trade_quality(). Dropped the dead
+#      stagnation/day_progress ctx args.
+#   C: The reward the bot actually receives now rewards getting closer to each day's target and BANKING
+#      winners (and discourages round-tripping them into losses/breaches) — directly shaping the
+#      consistent, profit-locking behaviour that passing FTMO repeatedly requires, with L0 still dominant.

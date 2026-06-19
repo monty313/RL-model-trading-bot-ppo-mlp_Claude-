@@ -3,8 +3,9 @@
 WHAT THIS MODULE DOES
 ---------------------
 Computes the layered reward (REWARD_DESIGN.md):
-    r(t) = L0_dNetPnL + (a*L1_momentum - b*L2_stagnation + e*L4_target) * L5_category
-           - d*L3_painzone   [+ L6 daily bonus at end of day]
+    r(t) = L0_dNetPnL + (L1_momentum + L2_dailyProgress + L4_tradeQuality) * L5_category
+           - L3_painzone   [+ L6 daily bonus at end of day]
+(C17 2026-06-19: L2 is now per-step daily-progress, L4 is per-close trade-quality — see decompose.)
 Layer 0 (net PnL after costs) is the dominant driver; the shaping layers are tiny
 "whispers" (small coefficients) that help timing/restraint without ever winning the
 reward game while losing the trading game (the E8 rule). The QUAD daily bonus (E9)
@@ -45,18 +46,26 @@ from quantra.runtime.config import ChallengeConfig, RewardConfig
 
 @dataclass
 class RewardContext:
-    # COUPLING -> env/trading_env.py: _reward()/build-context constructs RewardContext by
-    # these exact keyword field NAMES (net_pnl_delta, in_position, momentum_aligned,
-    # stagnation, drawdown_pct, day_progress, breach_risk). Renaming a field breaks that call.
+    # COUPLING -> env/trading_env.py _reward(): constructs RewardContext by these exact keyword
+    # field NAMES every step; renaming/removing one here breaks that call (and vice-versa). The
+    # C17 re-pointed inputs are produced upstream and flow ACROSS three files:
+    #   day_pnl, day_target_equity  <- ftmo_passing/challenge_state.py (ChallengeState.day_pnl and
+    #                                  .daily_target_equity properties), read in env _reward().
+    #   trade_close_quality         <- env/trading_env.py _record_close_quality() (called from the
+    #                                  CLOSE branch of _apply_action + from _force_flatten), summed
+    #                                  per step and ALREADY signed + account-normalized there.
     """Everything the engine needs for one step — the env populates it."""
 
-    net_pnl_delta: float           # L0: equity change after costs this step / account
+    net_pnl_delta: float            # L0: equity change after costs this step / account (dominant)
     in_position: bool = False
-    momentum_aligned: bool = False  # small CCI back in sync + ATR alive, in trade dir
-    stagnation: bool = False        # favorable legal state, no improvement, 3x5m bars
-    drawdown_pct: float = 0.0       # current DAILY drawdown % (for the pain zone)
-    day_progress: float = 0.0       # day PnL vs target (1.0 = target hit)
-    breach_risk: bool = False       # in pain zone / near wall (the explicit L5 category)
+    momentum_aligned: bool = False  # L1: small CCI back in sync + ATR alive, in trade dir
+    drawdown_pct: float = 0.0       # L3: current DAILY drawdown % (for the pain zone)
+    breach_risk: bool = False       # L5: in pain zone / near wall (the explicit category multiplier)
+    # --- C17 [2026-06-19] re-pointed inputs (daily-progress L2 + trade-quality L4) ---------------
+    day_pnl: float = 0.0            # L2: equity - day_start_equity (USD); reward only while > 0
+    day_target_equity: float = 1.0  # L2: day_start_equity*(1+target%) (USD) — the progress denominator
+    trade_close_quality: float = 0.0  # L4: signed, account-normalized realized-on-close quality, summed
+    #                                   over trades CLOSED this step (0 on steps with no close)
 
 
 @dataclass
@@ -80,15 +89,22 @@ class RewardEngine:
 
     def decompose(self, ctx: RewardContext) -> Dict[str, float]:
         """Per-layer contributions (for telemetry + the E8 dominance proof). Weights come from
-        RewardConfig (C16); the layer KEYS + math are unchanged so E8 holds."""
+        RewardConfig (C16); L2 + L4 math was RE-POINTED (C17) to literally compute daily-progress
+        and trade-quality. The layer KEYS are unchanged so the Risk Doctor / E8 readers still work."""
         rc = self.reward_cfg
         l0 = rc.net_pnl_weight * ctx.net_pnl_delta             # dominant outcome base (weight 1.0)
         l1 = rc.step_pnl_weight if (ctx.in_position and ctx.momentum_aligned) else 0.0
-        l2 = -rc.daily_progress_weight if ctx.stagnation else 0.0
+        # L2 daily-progress (C17): every step, a positive whisper that GROWS as equity climbs toward
+        # the day's target and switches OFF while the day is flat/negative. day_pnl + day_target_equity
+        # come straight from ChallengeState (ftmo_passing/challenge_state.py) via env _reward(); the
+        # ratio is dimensionless (~0.024 at a 2.5% target) so it stays a whisper without a clamp.
+        l2 = rc.daily_progress_weight * (max(0.0, ctx.day_pnl) / max(1e-9, ctx.day_target_equity))
         l3 = -rc.drawdown_pain_weight * self._pain(ctx.drawdown_pct)
-        # Clamp at target (1.0): a whisper in ALL modes, incl. ftmo-OFF where day_progress is
-        # unbounded (~40 at 1% target / 40% envelope) and could otherwise rival L0 [2026-06-15 fix].
-        l4 = rc.trade_quality_weight * min(1.0, max(0.0, ctx.day_progress))
+        # L4 trade-quality (C17): nonzero ONLY on bars where a trade closed (else trade_close_quality
+        # is 0). env/trading_env.py _record_close_quality() already applied the operator's sign rules
+        # (reward winners; penalize giving back a once-profitable trade; ignore never-profitable
+        # losers) AND normalized by account_size, so here it is a pure scaled passthrough.
+        l4 = rc.trade_quality_weight * ctx.trade_close_quality
         # L5 category multiplier on the dense shaping (breach-risk = protect capital:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
@@ -174,6 +190,11 @@ class QuadBonus:
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13. I/R/A/C; Conclusion is always
 # why this helps the bot pass FTMO consistently. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
+# STANDING RULE [2026-06-19, operator] — applies to THIS file and EVERY file going forward: keep
+# SHOWING THE WORK. On every edit (1) append a DATED IRAC entry here, and (2) in the code comments
+# DOCUMENT the cross-file RELATIONSHIPS the change depends on (the COUPLING) — name the other file(s)
+# and the exact attr/field/key relied on, in BOTH directions — and date the re-pointed logic, so any
+# future reader/editor can see what connects to what, and what breaks where, and when it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] M6 — implemented the layered reward + QUAD bonus.
 #   I: The env returned a raw Layer-0 proxy; the bot needs the full layered objective
@@ -206,3 +227,20 @@ class QuadBonus:
 #   C: The training objective is now legible, tunable, and captured per run, the consistency driver is
 #      weighted up, and Layer-0 still provably dominates the per-step shaping — so the bot optimizes
 #      real net progress toward passing while the operator can shape HOW it gets there.
+# [2026-06-19] C17 — re-pointed two reward terms so their MATH matches their plain-English names.
+#   I: After C16 the names were a taxonomy over proxy math: daily_progress_weight scaled the old
+#      stagnation flag and trade_quality_weight scaled target-progress — neither literally measured
+#      what its name said, so tuning them was misleading.
+#   R: Operator spec 2026-06-19 (C17: re-point exactly these two terms, change nothing else;
+#      re-verify E8; full suite; IRAC). The other terms (L0/L1/L3/L5, QUAD) are untouched.
+#   A: L2 daily-progress = daily_progress_weight * max(0, day_pnl)/day_target_equity (per step, OFF
+#      when the day is flat/negative). L4 trade-quality fires only on a CLOSE: +winners,
+#      -gave-back-a-once-profitable-trade, 0 for never-profitable losers. CROSS-FILE WIRING:
+#      RewardContext gained day_pnl/day_target_equity/trade_close_quality; env/trading_env.py reads
+#      ChallengeState.day_pnl + .daily_target_equity and accrues close-quality in _record_close_quality()
+#      (using Slot.mfe>0 as the "ever in profit" signal, normalized by account_size). Dropped the now-dead
+#      stagnation/day_progress ctx fields. E8 re-verified at the new math (worst shaping/L0 ~0.05 over
+#      1000x256 rollouts; trade-quality term is the tiniest).
+#   C: The knobs now mean exactly what they say — daily_progress literally rewards getting closer to the
+#      day's target and trade_quality literally rewards banking winners / discourages round-tripping them
+#      — so the operator can shape consistent, winner-keeping behaviour while Layer-0 still dominates.

@@ -426,6 +426,11 @@ def in_colab() -> bool:
 #   bot pass FTMO MORE CONSISTENTLY, with no bug or inefficiency). The LLM Risk
 #   Doctor reads this log to reconstruct the chronological 'why' when
 #   triangulating a pass-rate regression. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
+# STANDING RULE [2026-06-19, operator] — applies to THIS file and EVERY file going forward: keep
+# SHOWING THE WORK. On every edit (1) append a DATED IRAC entry here, and (2) in the code comments
+# DOCUMENT the cross-file RELATIONSHIPS the change depends on (the COUPLING) — name the other file(s)
+# and the exact attr/field/key relied on, in BOTH directions — and date the re-pointed logic, so any
+# future reader/editor can see what connects to what, and what breaks where, and when it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] Runtime config documented + pinned by the master suite.
 #   I: FTMO target/loss defaults, Drive file IDs and paths had no change-log or test pin.
