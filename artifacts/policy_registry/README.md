@@ -6,8 +6,8 @@
 >
 > Everything in this folder exists to answer one question for a given policy:
 > **"What is this policy's perspective on how to pass the FTMO challenge?"** — i.e. what
-> configuration (gates, reward weights, training wheels) produced it, what data it saw,
-> and how well it actually passed (+2.5%/day without breaching the −4% trailing wall).
+> configuration (`training_phase`, `training_wheels`, the challenge numbers) produced it, what
+> data it saw, and how well it actually passed (+2.5%/day without breaching the −4% trailing wall).
 
 This README is the only file in `artifacts/` that is committed to git. The actual
 registry contents (`manifest.json`, `performance.json`, `compatibility.sig`, and policy
@@ -40,24 +40,24 @@ config** — it is never written by hand and never invented by an assistant. The
 - Diff the run's `OVERRIDES` dict against it.
 - Encode each meaningful change as a short token, then join with `-`.
 
-**Example.** If Monty loosened the ADF (stationarity) gate by 2× and doubled the
-drawdown penalty, the auto-name is:
+**Example.** If Monty set `training_phase = "constrained"` and turned `training_wheels`
+off, resumed from `v1-baseline`, the auto-name is:
 
 ```
-v2-adf2x-ddpenalty2x
+v2-constrained-wheelsoff
 ```
 
 The leading `v<N>` increments from the `base_policy` it resumed from. Monty *may* rename
 a policy after the fact, but the **auto-name is always generated first** and recorded in
 `manifest.json` under `auto_name_basis` so you can always reconstruct what changed.
 
-> **Why a gate token like `adf2x` is not "the gate was removed".** The ADF (stationarity)
-> gate is **not just a blocker to delete**. Its purpose is to teach the bot to trade in
-> **both stationary AND non-stationary** market conditions by controlling *when* it is
-> enforced vs relaxed. Loosening the ADF p-value threshold is a **diagnostic** move (let
-> more bars through, watch what the policy does, then decide if the calibration needs a
-> permanent change) — the gate stays in the architecture. So `adf2x` means "this policy
-> was shaped with the ADF gate relaxed 2×", not "this policy has no stationarity gate".
+> **The 3 market-condition signals are no longer tunable gates (2026-06-18 redesign).**
+> Volatility, spread, and stationarity became **observation-only** signals: the bot SEES them
+> and learns to trade both stationary AND non-stationary conditions itself. There is no
+> `adf_p_value_threshold` to encode in a name anymore — the enforcement knob is
+> `training_phase` (`free` = observation-only; `constrained` = the stationarity signal
+> re-enforces). So a token like `constrained` means "this policy was shaped with the
+> stationarity signal re-enforcing", not "a gate threshold was tuned".
 
 ---
 
@@ -65,18 +65,18 @@ a policy after the fact, but the **auto-name is always generated first** and rec
 
 ```jsonc
 {
-  "policy_name": "v2-adf2x-ddpenalty2x",   // auto-generated from the OVERRIDES diff
-  "auto_name_basis": {                       // the diff, in plain tokens
-    "gate_changes":   ["adf_threshold +100%"],
-    "reward_changes": ["drawdown_penalty +100%"],
-    "wheel_state":    "ON"
+  "policy_name": "v2-constrained-wheelsoff",   // auto-generated from the OVERRIDES diff
+  "auto_name_basis": {                          // the diff, in plain tokens
+    "changes":     ["training_phase=constrained", "training_wheels=OFF"],
+    "wheel_state": "OFF"
   },
   "created": "2026-06-18T14:32:00",
-  "base_policy": "v1-gate-test",             // what it was RESUME_FROM'd (or null = fresh)
+  "base_policy": "v1-baseline",              // what it was RESUME_FROM'd (or null = fresh)
   "data_window": {"start": "2023-03-01", "n_days": 8},
   "n_passes_completed": 40,
-  "state_dim": 203,                          // 🔴 locked dimension — see §6 of PROJECT_GUIDE
-  "training_wheels": true,
+  "state_dim": 207,                          // 🔴 locked dimension — see §6 of PROJECT_GUIDE
+  "training_wheels": false,
+  "training_phase": "constrained",
   "overrides_applied": { /* ...the full OVERRIDES dict used for this run... */ },
   "compatibility_signature": "sha256:abc123..."
 }
@@ -106,13 +106,14 @@ Read it top-to-bottom as the policy's "birth certificate":
 ```
 
 What to look at, in order of importance to passing:
-1. **`avg_gate_block_rate`** — the #1 diagnostic. If this is ~0.97–0.99 the policy is
-   being prevented from trading at all (the gate-lockout gap, see "Known gaps" below).
-   A healthy shaping run shows this *falling* as you relax gates and the policy learns.
+1. **`days_passed` / `overall_pass_rate`** — the real scoreboard (target hit + no breach),
+   not raw PnL.
 2. **`breach_count`** — any breach of the −4% trailing wall = a failed challenge day.
    A policy that passes by luck but breaches often is not a real pass.
-3. **`days_passed` / `overall_pass_rate`** — the real scoreboard (target hit + no breach),
-   not raw PnL.
+3. **`avg_dd` / trade count** — in `PHASE_FREE` the 3 market-condition signals are
+   observation-only (they never block), so a LOW trade count means the *policy* is choosing
+   not to trade (shape it via reward), NOT a gate lockout. (`avg_gate_block_rate` is retained
+   in the schema for continuity; it is ~0 in `PHASE_FREE` and >0 only in `PHASE_CONSTRAINED`.)
 4. **`best_pass`** — the single best pass over the window, useful for choosing a
    checkpoint to promote into Full Training mode.
 
@@ -126,7 +127,7 @@ saved signature against the *current* config + `OVERRIDES`:
 
 - **Match** → resume from that exact checkpoint, continue the pass history.
 - **Mismatch** → the system raises a **`CompatibilityError`** with a plain-English reason
-  (e.g. "STATE_DIM changed 203 → 185 because INCLUDE_RAW_INPUTS was toggled; the old
+  (e.g. "STATE_DIM changed 207 → 189 because INCLUDE_RAW_INPUTS was toggled; the old
   network's input layer no longer fits"), then offers to **start fresh or abort**. It
   **saves the old checkpoint first and never deletes it** — old policies are only ever
   superseded, never overwritten automatically.
@@ -138,11 +139,11 @@ What changes the signature (and therefore forces a fresh start):
 - Anything that changes a **locked law parameter fingerprint**.
 
 What does **not** change the signature (safe to resume across):
-- Tuning gate thresholds (`adf_p_value_threshold`, `atr_min_multiplier`, `spread_max_pips`).
-- Tuning reward **weights/multipliers** (the `reward_l*` knobs) — as long as the layer
-  *shape* is unchanged and Layer-0 dominance is preserved (`reward_l1_pnl_weight` is
-  never 0).
+- Toggling `training_phase` (`free` ↔ `constrained`) — enforcement only, not the input shape.
 - Toggling `training_wheels` (observable + enforced, but not part of the input shape).
+- Changing the challenge numbers (`daily_target_pct`, `daily_risk_pct`, `permanent_dd_pct`).
+- (Operator-tunable reward weights are PLANNED, not yet wired — `reward.py` uses internal
+  constants today.)
 
 ---
 
@@ -183,15 +184,17 @@ the working state so the fallback repo stays a clean restore point. See `PROJECT
 A registry entry's numbers are only as honest as the simulation behind them. The current,
 acknowledged gaps:
 
-1. **Gate lockout (#1 active work item).** The gates block ~98.7% of trade opportunities
-   on real EURUSD. This is a **calibration** issue, not a bug — watch `avg_gate_block_rate`.
-2. **No real trained model yet.** Policies so far were trained on synthetic data and do
-   not transfer to real bars. A real Barbershop run is the first step.
-3. **One wall, not two.** The sim models one daily trailing wall; real FTMO has TWO (daily
-   loss from day-start AND permanent max drawdown). A sim pass is not a guaranteed live pass.
-4. **Screen 1 demo curve.** Barbershop Screen 1 shows a labelled demo curve until a real
+1. **No real trained model yet (#1 active work item).** Policies so far were trained on
+   synthetic data and do not transfer to real bars. A real Barbershop run is the first step.
+   *(The former #1 — the ~98.7% gate lockout — is architecturally **fixed**: the 3 gates became
+   phase-gated observations (2026-06-18), so `PHASE_FREE` trades freely; unproven on real bars
+   until a real run.)*
+2. **One wall, not two.** The sim models one daily trailing wall; real FTMO has TWO (daily
+   loss from day-start AND permanent max drawdown). The −10% max is an **observation** (C12
+   `dist_to_perm_dd`), not enforced in training. A sim pass is not a guaranteed live pass.
+3. **Screen 1 demo curve.** Barbershop Screen 1 shows a labelled demo curve until a real
    pass-rate series is logged.
-5. **input×gradient, not SHAP.** Trade-autopsy attribution is input×gradient, not true
+4. **input×gradient, not SHAP.** Trade-autopsy attribution is input×gradient, not true
    Shapley values.
 
 ---
@@ -212,3 +215,14 @@ acknowledged gaps:
   - **C:** Anyone (operator or LLM) can now read a policy's "perspective on passing the
     FTMO challenge" and safely decide whether to resume, promote, or start fresh —
     without risking the large run-specific artifacts being committed.
+
+- **[2026-06-18]** Synced the registry guide to the gates→observations redesign + C12.
+  - **I:** The guide described tunable gate thresholds, `gate_changes`/`reward_changes` in
+    auto_name_basis, STATE_DIM=203, and "gate lockout" as the #1 gap — all now false.
+  - **R:** Operator/Perplexity redesign (2026-06-18) + the honesty rule (docs == code).
+  - **A:** Updated the auto-name example (`v2-constrained-wheelsoff`), the manifest sample
+    (auto_name_basis `changes`/`wheel_state`, state_dim 207, `training_phase`), the performance
+    diagnostics (pass-rate/breach first; `avg_gate_block_rate` is ~0 in PHASE_FREE), the
+    compatibility + safe-to-resume lists (phase/wheels/challenge knobs), and the known gaps.
+  - **C:** Anyone reading a policy's identity now sees the real knobs and the true "learns
+    market conditions in PHASE_FREE" story — no obsolete gate-threshold framing.

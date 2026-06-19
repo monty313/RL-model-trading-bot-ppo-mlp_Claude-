@@ -16,18 +16,19 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 
 - **Algorithm:** PPO (Proximal Policy Optimization) — an actor-critic with a clipped
   objective and GAE advantages.
-- **Policy I/O:** the agent sees a fixed observation vector (**STATE_DIM = 203**) and emits
+- **Policy I/O:** the agent sees a fixed observation vector (**STATE_DIM = 207**) and emits
   4 heads — direction `{HOLD, OPEN_LONG, OPEN_SHORT, CLOSE}`, a Beta-distributed size, a
   slot pointer (for closing), and a value estimate.
-- **Safety spine:** 9 "laws" + 3 "gates" + operator "training-wheel" masks forbid illegal/
-  counter-trend/illiquid trades **before** the policy acts (logit −1e9), in both training
-  and live. A RiskManager guarantees total open risk never exceeds the remaining buffer.
-  - **About the ADF (stationarity) gate:** it is **not just a blocker to remove**. Its
-    purpose is to teach the bot to trade **both stationary AND non-stationary** market
-    conditions by controlling *when* the gate is enforced vs relaxed. Loosening its
-    p-value threshold is a **diagnostic** move (let more bars through, watch the policy,
-    then decide if the *calibration* needs a permanent change) — the gate stays in the
-    architecture; only its calibration changes. (Stated again wherever the gate appears.)
+- **Safety spine:** 9 "laws" + operator "training-wheel" masks forbid illegal/counter-trend
+  trades **before** the policy acts (logit −1e9), in both training and live. A RiskManager
+  guarantees total open risk never exceeds the remaining buffer.
+  - **The 3 market-condition signals (formerly "gates"):** volatility (ATR 5m+4H), spread,
+    and stationarity (30-bar ADF) are now **OBSERVATION-ONLY by default** — the bot SEES them
+    in the state and learns to use them instead of being hard-blocked. Enforcement is
+    **phase-gated** (`config.TRAINING_PHASE`): in `PHASE_FREE` (default) they never block; in
+    `PHASE_CONSTRAINED` only the stationarity signal re-enforces. This turns the old
+    "stationary AND non-stationary" goal from a hard gate into a *learned* skill, and fixes the
+    ~98.7% open-lockout that stopped the policy ever training (2026-06-18 redesign).
 - **Barbershop:** a separate, **read-only** Dash dashboard (+ an LLM "Risk Doctor") used
   **after** training to understand *why* the bot did what it did and to write better
   reward/penalty rules.
@@ -35,7 +36,7 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 **Two operating modes (entered freely, NOT sequential):**
 - **Barbershop mode** — *"get the haircut before going to school."* Fast, operator-driven
   diagnose-and-shape: pick a small window of challenge days, run the policy fast, watch
-  what breaks (above all the **gate block rate**), make one educated `OVERRIDES` edit,
+  what breaks (which days fail and why), make one educated `OVERRIDES` edit,
   repeat. Can happen **before, during, or after** full training (§4.10).
 - **Full Training mode** — long walk-forward runs + curriculum phases (Law School → Setup
   Recognition → Full Market) that *generalize* the shaped policy across regimes (§4.6,
@@ -45,12 +46,14 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 - **ACTIVE WORK** (all edits + commits happen here): `https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`
 - **FALLBACK / SAFE RESTORE** (NEVER edited — clean emergency revert only): `https://github.com/monty313/final-rl-model-6_13`
 
-**Known gaps (honest — stated in every overview; full detail in §7):** (1) the gates block
-~98.7% of trade opportunities on real EURUSD — the **#1 active blocker**, a *calibration*
-issue not a bug; (2) no real trained model yet (synthetic-trained, doesn't transfer);
-(3) the sim models ONE wall, real FTMO has TWO; (4) Barbershop Screen 1 is a labelled demo
-curve until a real pass-rate series is logged; (5) trade-autopsy attribution is
-input×gradient, not true SHAP.
+**Known gaps (honest — stated in every overview; full detail in §7):** (1) **no real trained
+model yet** — the policy is synthetic-trained and hasn't run on real bars; this is the **#1
+active item** now that the gate-lockout blocker is fixed (the 3 gates became phase-gated
+observations, so `PHASE_FREE` trades freely — but that fix is **unproven on real EURUSD** until
+a real Barbershop run confirms it); (2) the sim models ONE daily trailing wall, real FTMO has
+TWO (the −10% max is an *observation* via C12, not enforced in training); (3) Barbershop
+Screen 1 is a labelled demo curve until a real pass-rate series is logged; (4) trade-autopsy
+attribution is input×gradient, not true SHAP.
 
 ---
 
@@ -72,7 +75,7 @@ final rl model 6_13/
 │   ├── 00_START_HERE.md
 │   ├── SCOPE_OF_WORK.md           # SOW (the spec)
 │   ├── SOW_2_BUILD_SPEC.md        # binding build spec
-│   ├── THE_TRADING_CODE.md        # the 9 laws + 3 gates (exact params/TFs)
+│   ├── THE_TRADING_CODE.md        # the 9 laws + 3 market-condition signals (exact params/TFs)
 │   ├── STATE_VECTOR.md            # every observation feature + group
 │   ├── REWARD_DESIGN.md           # the layered reward (L0–L6 + QUAD)
 │   ├── PPO_ENGINE.md              # actor/critic architecture + locked dials
@@ -94,12 +97,12 @@ final rl model 6_13/
 │   │   ├── resampler/resampler.py          # 1m → 5m/30m/4H, lookahead-safe as-of merge
 │   │   ├── feature_builder/
 │   │   │   ├── indicators.py               # BB, CCI, ATR, shifted-SMA, ADX, ADF, training-wheel params
-│   │   │   ├── schema.py                   # StateVectorSchema (STATE_DIM=203, block layout)
+│   │   │   ├── schema.py                   # StateVectorSchema (STATE_DIM=207, block layout)
 │   │   │   ├── builder.py                   # FeatureBuilder + offline precompute (memmap cache)
 │   │   │   └── RAW_INPUTS.md                # note on the raw-input block
 │   │   └── law_mask_engine/engine.py       # law states → action mask (incl. training wheels)
 │   ├── locked_core/               # 🔴 locked physics/laws (change needs sign-off)
-│   │   ├── laws/laws.py                     # the 9 directional laws + 3 gates
+│   │   ├── laws/laws.py                     # the 9 directional laws + 3 market-condition signals
 │   │   ├── risk_manager/risk.py             # raw_size→lots, no-overshoot (B5), margin ceiling
 │   │   ├── cost_layer/costs.py              # spread + slippage + $5 RT/lot (forex) costs
 │   │   └── platform_adapter/adapters.py     # MT5 / sim broker adapter interface
@@ -178,9 +181,9 @@ final rl model 6_13/
 ```
  1. DATA      data/raw/EURUSD_M1.csv  (real MT5 1m bars)
                   │  market_pipeline.data_loader.load_symbol
- 2. FEATURES  resampler → feature_builder → 203-feature observation (cached memmap)
+ 2. FEATURES  resampler → feature_builder → 207-feature observation (cached memmap)
                   │  market_pipeline.feature_builder
- 3. LAWS/MASK laws.py → law_mask_engine → legal action set (laws+gates+training wheels)
+ 3. LAWS/MASK laws.py → law_mask_engine → legal action set (laws + training wheels; market signals are observations)
                   │
  4. ENV       env/trading_env.py  (PnL, costs, margin, breach wall, daily reset)
                   │
@@ -319,15 +322,17 @@ breaks, make **one** educated edit (via `OVERRIDES`, §4.12), and repeat. It can
 **Live output (printed during training, after every pass — not at the end):**
 ```
 Pass 3/20
-  Day 1: PASS   | +2.3% | DD -1.1% | 5 trades | Gate blocks: 43%
-  Day 2: FAIL   | -1.8% | DD -4.0% BREACHED | 2 trades | Gate blocks: 97%
-  Day 3: PASS   | +2.6% | DD -0.8% | 7 trades | Gate blocks: 31%
+  Day 1: PASS   | +2.3% | DD -1.1% | 5 trades
+  Day 2: FAIL   | -1.8% | DD -4.0% BREACHED | 2 trades
+  Day 3: PASS   | +2.6% | DD -0.8% | 7 trades
   ...
-  Summary: 5/8 passed | Avg P&L: +0.9% | Avg DD: -1.9% | Avg gate block rate: 61%
+  Summary: 5/8 passed | Avg P&L: +0.9% | Avg DD: -1.9% | Avg trades/day: 4.8
 ```
-The **gate block rate per day is the #1 diagnostic signal** — it tells you whether the
-policy is being *prevented* from trading (the gate-lockout gap, §7). A healthy shaping run
-shows it falling as you relax gates and the policy learns to pass.
+The **#1 diagnostics** are the per-day PASS/FAIL, the DD path (and any **BREACHED**), and the
+**trade count**. In `PHASE_FREE` the bot is no longer blocked, so a low trade count now means
+the **policy itself** is choosing not to trade (an actor/reward signal to shape), not a gate
+lockout. (In `PHASE_CONSTRAINED`, a "stat-blocked %" column shows how often the stationarity
+signal blocked opens.)
 
 **Stop / resume.** Hit Colab's stop button any time: the loop **catches the interrupt and
 saves a clean checkpoint before dying** — you never lose weights on stop. Setting
@@ -342,10 +347,11 @@ all **5 screens + the Risk Doctor** in your browser. Telemetry is auto-emitted t
 `artifacts/telemetry/<run>.jsonl` after every checkpoint so the Barbershop always has fresh
 data (canonical real-bar producer: `scripts/emit_real_telemetry.py`).
 
-**ADF gate reminder.** When you loosen `adf_p_value_threshold` in `OVERRIDES`, you are using
-the stationarity gate as a **diagnostic** — letting more non-stationary bars through to see
-what the policy does — *not* deleting it. Its purpose is to teach the bot to trade **both
-stationary AND non-stationary** regimes; the gate stays, only its calibration changes (§4.12, §7).
+**Market-condition signals reminder.** The 3 former gates (volatility, spread, stationarity)
+are now **observation-only** in `PHASE_FREE` (default) — the bot SEES them and learns to trade
+both **stationary AND non-stationary** regimes itself, rather than being hard-blocked. Set
+`training_phase = "constrained"` only when you want the stationarity signal to re-enforce as a
+late hardening step (§4.12, §7). There is no `adf_p_value_threshold` to tune anymore.
 
 ### 4.11 The Policy Registry (`artifacts/policy_registry/<policy_name>/`)
 
@@ -369,9 +375,9 @@ and the Risk Doctor. **Three files per policy** (full reader's guide:
 **Auto-name generation (NEVER hardcoded).** The folder name is **derived from the
 `OVERRIDES` diff vs the baseline config** — never typed by hand or invented by an assistant.
 Each meaningful change becomes a short token; tokens join with `-` behind a `v<N>` that
-increments from `base_policy`. *Example:* loosen the ADF gate 2× **and** double the drawdown
-penalty, resumed from `v1-gate-test` → **`v2-adf2x-ddpenalty2x`**. (A gate token like
-`adf2x` means "shaped with the ADF gate relaxed 2×", **not** "the gate was removed" — §4.10.)
+increments from `base_policy`. *Example:* set `training_phase = "constrained"` **and** turn
+`training_wheels` off, resumed from `v1-baseline` → **`v2-constrained-wheelsoff`**. The tokens
+come straight from the `OVERRIDES` diff vs the baseline config — never typed by hand.
 Monty may rename a policy afterward, but the auto-name is always generated first and recorded.
 
 Registry contents are **git-ignored** (large + run-specific); only the `README.md` is
@@ -389,31 +395,30 @@ result. Tuneable knobs:
 
 | Knob | Default | What it does (relative to passing) |
 |---|---|---|
-| `adf_p_value_threshold` | `0.05` | Loosen the **stationarity** gate (let more non-stationary bars through). |
-| `atr_min_multiplier` | `1.0` | Loosen the **ATR-liquidity** gate. |
-| `spread_max_pips` | `2.0` | Tighten/loosen the **spread** gate. |
-| `reward_l1_pnl_weight` | `1.0` | Layer-0 net-PnL weight — **NEVER set to 0** (see below). |
-| `reward_l2_drawdown_penalty` | `1.0`→`2.0` | Drawdown-penalty multiplier (the L3 pain-zone ramp). |
-| `reward_l3_hold_penalty` | `0.0`→`0.5` | Penalty for holding too long (anti-stagnation). |
-| `reward_l4_gate_bonus` | `0.0`→`0.1` | Small bonus for **not** being blocked by the gate. |
-| `training_wheels` | `True` | Enforce (`True`) / remove (`False`) the counter-trend OPEN masks. |
+| `training_phase` | `"free"` | `"free"` = the 3 market-condition signals are **observation-only** (the bot trades freely and learns them); `"constrained"` = the stationarity signal re-enforces (blocks new opens when non-stationary). |
+| `training_wheels` | `True` | Enforce (`True`) / remove (`False`) the counter-trend OPEN masks (CCI/BB on 30m+4H). |
+| `daily_target_pct` | `2.5` | Your daily profit goal (passed to `make_challenge`). |
+| `daily_risk_pct` | `4.0` | The trailing-wall risk allowed to make it (passed to `make_challenge`). |
+| `permanent_dd_pct` | `10.0` | The −10% permanent max-overall-loss wall — an **observation** (the C12 `dist_to_perm_dd` scalar), NOT enforced in training. |
 
-**ADF note (again, by rule):** loosening `adf_p_value_threshold` is a **diagnostic tool** to
-unblock training and observe the policy with more freedom — then you interpret the result to
-decide whether the *calibration* needs a permanent change. The gate stays in the
-architecture; you are tuning **both stationary AND non-stationary** trading, not disabling
-stationarity filtering.
+**The 3 market-condition signals are no longer tunable thresholds.** They became phase-gated
+observations (the old `adf_p_value_threshold` / `atr_min_multiplier` / `spread_max_pips` knobs
+were **removed**, 2026-06-18): the bot now *learns* both stationary AND non-stationary trading
+from seeing the signals, rather than being hard-blocked. The only enforcement knob is
+`training_phase`.
 
-**What triggers a `CompatibilityError`.** If an override changes **`STATE_DIM`** or the
-**reward shape** in a way that breaks an existing checkpoint's assumptions, resuming raises a
-**`CompatibilityError`** with a plain-English reason for *why* the policy must start fresh —
-and it **saves the old checkpoint first**. Old policies are **never deleted automatically**.
-Safe to resume across: tuning gate thresholds, tuning reward *weights* (so long as Layer-0
-dominance holds — `reward_l1_pnl_weight` ≠ 0), toggling `training_wheels`.
+> **Reward weights are PLANNED, not yet wired.** `reward.py` currently uses internal constants
+> (Layer-0 dominant). Operator-tunable reward dials (plain-English weights) are the
+> reward-redesign task; until then, reward weights are **not** part of `OVERRIDES`.
 
-> 🔴 **Locked-parameter guard.** `reward_l1_pnl_weight = 0` would break **Layer-0 dominance**,
-> a locked invariant (§6). Likewise γ/λ, the 9 laws / 3 gates params, the action-mask logic,
-> and `STATE_DIM` are locked: changing them is a **proposed amendment requiring Monty's
+**What triggers a `CompatibilityError`.** If an override changes **`STATE_DIM`** or the reward
+shape in a way that breaks an existing checkpoint's assumptions, resuming raises a
+**`CompatibilityError`** with a plain-English reason for *why* the policy must start fresh — and
+it **saves the old checkpoint first**. Old policies are **never deleted automatically**. Safe to
+resume across: toggling `training_phase` / `training_wheels`, changing the challenge numbers.
+
+> 🔴 **Locked-parameter guard.** γ/λ, Layer-0 dominance, the 9 laws params, the action-mask
+> logic, and `STATE_DIM` are locked: changing them is a **proposed amendment requiring Monty's
 > sign-off**, not a routine override.
 
 ### 4.13 Repo Safety Protocol (primary vs fallback)
@@ -500,7 +505,8 @@ changes training, rewards, or the policy.
 - `SYMBOLS` = EURUSD, XAUUSD, GBPUSD, US30; per-symbol `POINT_SIZE`, `CONTRACT_SIZE`,
   `SLIPPAGE_POINTS`, `ASSET_CLASS`, Drive file IDs.
 - `ChallengeConfig` defaults + `make_challenge(...)`; `FTMO_ON_BOUNDS` / `FTMO_OFF_BOUNDS`.
-- `TRAINING_WHEELS` (default True), `INCLUDE_RAW_INPUTS` (default True; STATE_DIM 203/185).
+- `TRAINING_WHEELS` (default True), `TRAINING_PHASE` (default `PHASE_FREE`), `permanent_dd_pct`
+  (default 10%), `INCLUDE_RAW_INPUTS` (default True; STATE_DIM 207/189).
 - `RiskConfig` (stop_atr_mult, lot_step, min/max lot, per-trade risk frac),
   `CostConfig` ($5 RT/lot forex), `HardwareConfig` (≈80% util, CPU-first).
 - Paths: `DATA_DIR`, `ARTIFACT_DIR`, `CHECKPOINT_DIR`, `TELEMETRY_DIR`, `REPORT_DIR`.
@@ -508,10 +514,11 @@ changes training, rewards, or the policy.
 `barbershop/config.py`: dashboard paths, `DOCTOR_API_BASE/MODEL/KEY/MAX_TOKENS`,
 `DOCTOR_MANUAL_MAX_CHARS`, thresholds (target/wall/DD-buffer colours), timeframe windows.
 
-🔴 **Locked (need sign-off to change):** γ/λ in `gae.py`; the 9 laws/3 gates params in
+🔴 **Locked (need sign-off to change):** γ/λ in `gae.py`; the 9 laws params in
 `indicators.py`/`laws.py`; Layer-0 dominance + pain ramp + QUAD ceiling in `reward.py`;
 the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
-`tools/snapshot.py --update`).
+`tools/snapshot.py --update`). *(The 3 market-condition signals are now observation-only +
+phase-gated via `TRAINING_PHASE` — see §4.12.)*
 
 ---
 
@@ -526,22 +533,20 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
 - The Barbershop: 37 tests pass; real telemetry flows end-to-end; honesty guards in place.
 
 **Known gaps / honest caveats (state these in every overview):**
-1. **GATE LOCKOUT — the #1 active work item.** The gates (chiefly the *stationarity* gate,
-   open ~5.6%, + ATR-liquidity) block **~98.7%** of trade opportunities on real EURUSD. This
-   is the binding blocker to passing — a **calibration** issue, not an arithmetic bug. Note
-   the ADF (stationarity) gate's purpose is to teach the bot to trade **both stationary AND
-   non-stationary** regimes by controlling when it is enforced vs relaxed; the fix is to
-   recalibrate it (use `OVERRIDES` diagnostically, §4.12), **not** to delete it. Watch the
-   per-day **gate block rate** in the Barbershop Fast Loop (§4.10) as the primary signal.
-2. **No real trained model yet.** The policy has only been trained on **synthetic data**; it
-   does not transfer to real bars (≈9 trades / 5,565 bars). A real **Barbershop run** is the
-   first step (then Full Training walk-forward).
-3. **One wall, not two.** The sim models a single daily-re-anchored trailing wall; real FTMO
-   has **TWO** limits (max daily loss from day-start AND a permanent max-overall drawdown). A
-   sim pass does **not** yet guarantee a live-legal pass.
-4. **Screen 1 demo curve.** Barbershop **Screen 1** shows a labelled **demo curve** until the
+1. **No real trained model yet — the #1 active item.** The policy has only been trained on
+   **synthetic data**; it does not transfer to real bars (≈9 trades / 5,565 bars on the old
+   gated build). A real **Barbershop run on real EURUSD is the first step** (then Full Training
+   walk-forward). *(The former #1 — the ~98.7% gate lockout — is now architecturally **fixed**:
+   the 3 gates became phase-gated market-condition **observations** (2026-06-18), so in
+   `PHASE_FREE` the policy trades freely. But that fix is **unproven on real bars** until a real
+   run confirms the policy actually trades sensibly and passes — so it folds into this gap.)*
+2. **One wall, not two.** The sim models a single daily-re-anchored trailing wall; real FTMO
+   has **TWO** limits (max daily loss from day-start AND a permanent max-overall drawdown). The
+   −10% permanent wall is an **observation** (the C12 `dist_to_perm_dd` scalar), **not enforced**
+   in training. A sim pass does **not** yet guarantee a live-legal pass.
+3. **Screen 1 demo curve.** Barbershop **Screen 1** shows a labelled **demo curve** until the
    trainer logs a real pass-rate series.
-5. **input×gradient, not SHAP.** The trade-autopsy attribution (Screen 4) is
+4. **input×gradient, not SHAP.** The trade-autopsy attribution (Screen 4) is
    **input×gradient**, honestly labelled — not true Shapley values.
 
 ---
@@ -557,23 +562,26 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
 - **GAE:** Generalized Advantage Estimation (λ=0.97) — smooths the advantage.
 - **Probability ratio r = π_new/π_old; PPO clip (ε):** caps each update to a small,
   stable step.
-- **Laws (9) / Gates (3):** the legal-action spine — directional laws ban the wrong
-  direction; gates (ATR-liquidity, spread, stationarity) ban new opens in bad conditions.
-- **ADF / stationarity gate:** the gate that bans new opens when bars look non-stationary.
-  Its purpose is **not** to be removed — it teaches the bot to trade **both stationary AND
-  non-stationary** regimes by controlling *when* it is enforced vs relaxed. Loosening its
-  p-value threshold is a **diagnostic** (unblock + observe), after which you decide if the
-  **calibration** needs a permanent change. The gate stays; only calibration moves (§4.12, §7).
+- **Laws (9):** the directional legal-action spine — directional laws ban the wrong direction
+  (logit −1e9) before the policy acts. (The former "3 gates" are now market-condition
+  observation signals — see below.)
+- **Market-condition signals (3):** volatility (ATR 5m+4H), spread, stationarity (30-bar ADF) —
+  formerly "gates". Now **observation-only by default**: the bot sees them in the state and
+  learns both stationary AND non-stationary trading. Enforcement is **phase-gated**
+  (`config.TRAINING_PHASE`): `PHASE_FREE` = never block; `PHASE_CONSTRAINED` = only stationarity
+  re-enforces (§4.12, §7).
 - **Training wheels:** operator counter-trend OPEN blocks (CCI/BB on 30m+4H).
-- **`OVERRIDES`:** the runtime override dict (§4.12) injected at launch — tune gates/reward
-  weights/training-wheels without editing `config.py` or `laws.py`; saved per run to the
-  Policy Registry.
+- **`OVERRIDES`:** the runtime override dict (§4.12) injected at launch — tune `training_phase`,
+  `training_wheels`, and the challenge numbers without editing `config.py` or `laws.py`; saved
+  per run to the Policy Registry.
 - **Policy Registry:** `artifacts/policy_registry/<name>/` — a policy's saved identity
   (auto-named manifest + performance + compatibility signature, §4.11).
 - **Barbershop mode / Full Training mode:** the two operating modes (§1) — fast
   diagnose-and-shape vs long walk-forward generalization; entered freely, not sequential.
-- **Gate block rate:** the per-day fraction of bars where the gates blocked a new open —
-  the **#1 diagnostic** in the Barbershop Fast Loop (§4.10).
+- **`TRAINING_PHASE`:** the enforcement switch — `PHASE_FREE` (default, the 3 market-condition
+  signals are observation-only) vs `PHASE_CONSTRAINED` (the stationarity signal re-enforces).
+- **`distance_to_permanent_dd`:** the C12 account-block observation — runway (1.0 → 0.0) to the
+  −10% permanent max-overall-loss wall (observation only, not enforced in training).
 - **The wall / breach:** the trailing drawdown limit; touching it = breach = challenge failed.
 - **Target:** the daily profit goal (+2.5%).
 - **Barbershop:** the read-only diagnostics dashboard. **Risk Doctor:** the LLM that
@@ -612,3 +620,18 @@ For cross-file couplings before any refactor see `COUPLINGS.md`.*
     against the single mission — repeatedly passing the FTMO challenge — and always know
     which repo is safe to edit. New systems are clearly marked as a runnable skeleton, not
     claimed as finished, preserving the project's honesty contract.
+
+- **[2026-06-18]** Synced the guide to the gates→observations redesign + C12 (STATE_DIM 203→207).
+  - **I:** The guide described the 3 "gates" as hard blockers, the `OVERRIDES` as gate-threshold
+    knobs, STATE_DIM=203, and "gate lockout" as the #1 gap — all now contradicted by the code
+    (gates are phase-gated observations; STATE_DIM=207; the lockout is architecturally fixed).
+  - **R:** Operator/Perplexity redesign (2026-06-18) + the honesty rule (docs must match code).
+  - **A:** Rewrote §1 (safety spine → 9 laws + 3 phase-gated market-condition observation
+    signals; STATE_DIM 207), §4.10 (live output drops "gate blocks"; the #1 diagnostic is now
+    PASS/FAIL + DD + trade count), §4.12 (`OVERRIDES` now `training_phase`/`training_wheels`/
+    challenge numbers; reward weights flagged as planned), §6/§7 (gate-lockout reframed as
+    fixed-but-unproven; "no real model" is the new #1; −10% is a C12 observation, not enforced),
+    the glossary, and all STATE_DIM/gate references.
+  - **C:** The guide and Perplexity mentor now tell the true story — the bot LEARNS market
+    conditions in PHASE_FREE instead of being locked out — so operators reason about the real
+    system, and the honesty contract (docs == code) is restored.
