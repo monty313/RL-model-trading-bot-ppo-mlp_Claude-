@@ -79,6 +79,17 @@ def test_build_env_applies_overrides_and_phase():
         cfg.TRAINING_PHASE = orig_phase                        # don't leak global state to other tests
 
 
+def test_build_env_applies_per_trade_risk_override():
+    """A max_per_trade_risk_frac override caps position sizing in the built env (the structural lever
+    for stopping breaches); absent, the env keeps the default 1%/trade RiskConfig."""
+    default_env = build_env(_multiday_data(days=1, bpd=20), {"daily_target_pct": 2.5}, n_days=1)
+    assert default_env.risk_cfg.max_per_trade_risk_frac == 0.01          # default untouched
+
+    capped_env = build_env(_multiday_data(days=1, bpd=20),
+                           {"daily_target_pct": 2.5, "max_per_trade_risk_frac": 0.0025}, n_days=1)
+    assert capped_env.risk_cfg.max_per_trade_risk_frac == 0.0025          # override honored
+
+
 def test_run_pass_return_account_returns_canonical_challenge_state():
     """C14/Fix 5: return_account=True hands back the CANONICAL end-of-run ChallengeState (so the
     Barbershop card reads the LIVE consecutive_loss_days, not a value recomputed from the day flags),

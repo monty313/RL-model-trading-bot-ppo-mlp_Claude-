@@ -58,10 +58,16 @@ def build_env(data: Dict[str, "object"], overrides: Optional[dict], n_days: int)
         permanent_dd_pct=ov.get("permanent_dd_pct", 10.0),
         failed_day_penalty=ov.get("failed_day_penalty", 5.0))
     reward_cfg = cfg.RewardConfig(**{k: ov[k] for k in _REWARD_KEYS if k in ov})
+    # Per-trade risk cap (sizing) [2026-06-19]: optional override. None -> default RiskConfig (1%/trade).
+    # Lower this to shrink position size so a day physically can't lose more than ~N_SLOTS*frac before the
+    # wall — the structural lever for stopping breaches (reward shaping can't, by E8). COUPLING ->
+    # runtime/config.py RiskConfig.max_per_trade_risk_frac + env/trading_env.py (risk_cfg -> RiskManager).
+    risk_frac = ov.get("max_per_trade_risk_frac")
+    risk_cfg = cfg.RiskConfig(max_per_trade_risk_frac=float(risk_frac)) if risk_frac is not None else None
     phase = ov.get("training_phase")
     if phase is not None:   # COUPLING -> law_mask_engine reads cfg.TRAINING_PHASE (a module global)
         cfg.TRAINING_PHASE = cfg.PHASE_CONSTRAINED if str(phase) == "constrained" else cfg.PHASE_FREE
-    return TradingEnv(data, challenge=challenge, reward_cfg=reward_cfg,
+    return TradingEnv(data, challenge=challenge, reward_cfg=reward_cfg, risk_cfg=risk_cfg,
                       training_wheels=ov.get("training_wheels", cfg.TRAINING_WHEELS),
                       episode_days=n_days)
 
@@ -202,3 +208,17 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
 #      behaviour changed. COUPLING -> ftmo_passing/challenge_state.py + policy_registry/registry.py.
 #   C: The Policy Card now carries the policy's TRUE back-to-back loss streak from the run that produced
 #      it — an honest, at-a-glance consistency signal, with zero disruption to existing eval paths.
+# [2026-06-19] Risk-cap override — build_env honors max_per_trade_risk_frac from OVERRIDES.
+#   I: Iterations showed the policy breaches the -4% wall almost every day; reward shaping (E8-tiny) and
+#      20x more training did NOT help (worse: 19/20 breached). The breach is STRUCTURAL — 1%/trade x up
+#      to 5 slots can exceed the 4% wall — but per-trade risk was not an OVERRIDE, so train (notebook)
+#      and eval (run_pass->build_env) couldn't be capped consistently.
+#   R: Operator option A — make per-trade risk a first-class, consistent override; ADD only (no locked
+#      protocol touched). The invariant (total open risk <= remaining buffer) is unchanged; this just
+#      shrinks the per-trade cap so a day can't lose more than ~N_SLOTS*frac before the wall.
+#   A: build_env() now reads ov["max_per_trade_risk_frac"]; if present it builds RiskConfig with that cap
+#      and passes risk_cfg to TradingEnv (None -> default 1%). So the same OVERRIDES value caps BOTH the
+#      eval here and the notebook training env -> train/eval stay consistent. COUPLING -> runtime/config.py
+#      RiskConfig + env/trading_env.py (risk_cfg -> RiskManager).
+#   C: The operator can now cap position size from one knob, so a bad day physically can't blow past the
+#      wall — the structural fix that keeps the policy ALIVE long enough for training to search for an edge.
