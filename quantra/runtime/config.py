@@ -219,7 +219,7 @@ DRIVE_FOLDER_ID: str = "1azEnCfwQjxPkBemmv9mxY3GyVAMcjF-3"
 # schema + STATE_DIM follow automatically. Read by feature_builder.schema.
 # ---------------------------------------------------------------------------
 # COUPLING [C1] -> feature_builder/schema.py: schema reads INCLUDE_RAW_INPUTS to add/drop
-# the market_raw block, which sets STATE_DIM (167 on / 149 off). Flipping this changes the
+# the market_raw block, which sets STATE_DIM (207 on / 189 off). Flipping this changes the
 # observation width everywhere; nominal_state_dim below mirrors the same branch.
 INCLUDE_RAW_INPUTS: bool = True
 
@@ -428,11 +428,11 @@ class RuntimeConfig:
     seed: int = 0
 
     # Nominal state-vector width for the *startup* benchmark only. Mirrors
-    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (176 with raw inputs
-    # on; 146 off) without importing it (avoids an import cycle); the master suite
+    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (207 with raw inputs
+    # on; 189 off) without importing it (avoids an import cycle); the master suite
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
-    # suite). 203 with raw inputs on (raw CCI + raw price-SMA + training wheels), 185 off.
+    # suite). 207 with raw inputs on (raw CCI + raw price-SMA + training wheels), 189 off.
     # CHANGED: 2026-06-18 | nominal_state_dim 206->207 / 188->189 (C12 account scalar)
     # WHY: distance_to_permanent_dd added to the account block; config width must match schema
     # AFFECTS: schema.STATE_DIM (asserted == this by the master suite), tests/snapshots/state_vector.json

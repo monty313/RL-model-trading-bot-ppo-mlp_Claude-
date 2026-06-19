@@ -15,7 +15,7 @@ OPEN fires, the pointer head only when CLOSE fires (masked heads -> 0 logp/entro
 
 HOW IT SERVES REPEATED FTMO-STYLE PASSING
 -----------------------------------------
-This is the brain that turns the 179-dim FTMO observation into a legal, sized,
+This is the brain that turns the 207-dim FTMO observation into a legal, sized,
 slot-aware action. The −1e9 masks are applied to the logits HERE, so the policy can
 literally never sample a breach-bound or illegal action. The shared trunk lets the
 critic's patience (high-γ value) and the actor's restraint come from the same belief,
@@ -202,7 +202,7 @@ def _b(t: torch.Tensor) -> torch.Tensor:
 # why this helps the bot pass FTMO consistently. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] M5 — implemented the four-head PPO actor-critic.
-#   I: Nothing turned the 179-dim FTMO observation into a legal, sized, slot-aware
+#   I: Nothing turned the FTMO observation into a legal, sized, slot-aware
 #      action, nor produced the summed log-prob the PPO loss requires.
 #   R: PPO_ENGINE.md (3x256 trunk; 4 heads; Beta size G3; summed 3-head log-prob;
 #      size active on OPEN / pointer on CLOSE; -1e9 masks on logits; live = argmax/mean).

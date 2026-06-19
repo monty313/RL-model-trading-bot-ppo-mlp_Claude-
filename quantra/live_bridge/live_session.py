@@ -3,7 +3,7 @@
 WHAT THIS MODULE DOES
 ---------------------
 The missing live loop (the M14 CLI said "no feed wired"; this wires it). Each time a
-new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 179-dim
+new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 207-dim
 observation (M2 features + M3 law states + a LIVE portfolio/account mirror), computes
 the masks, runs the policy DETERMINISTICALLY, sizes via the RiskManager, and executes
 via the ExecutionAdapter — honoring the manual halt + 4% breach auto-flat. Two feeds:
@@ -330,7 +330,7 @@ class LiveSession:
 #   I: M14 left "no live feed wired"; a trained brain couldn't actually trade on MT5.
 #   R: SOW §2.10/§10 (live determinism + kill switches) + C4 (1m decisions) + no-lookahead.
 #   A: ReplayBarFeed/MT5BarFeed; LivePortfolio mirrors slots+account for obs; LiveSession
-#      rebuilds the 179-dim obs from the trailing CLOSED-bar window, masks, decides
+#      rebuilds the full-width obs from the trailing CLOSED-bar window, masks, decides
 #      deterministically, sizes vs the live buffer, executes, and breach-auto-flats.
 #   C: The learned pass-behaviour reproduces live bar-by-bar with the same obs/masks/slots,
 #      behind hard kill switches - the bridge from a trained brain to a banked live pass.

@@ -78,7 +78,7 @@ class StepPacket:
     timestamp: str
     bar_index: int
     # observation
-    observation: list                      # full normalized state vector (179)
+    observation: list                      # full normalized state vector (STATE_DIM == 207)
     # law context
     law_states: list                       # the 12 law/gate states
     enforcement_mode: str                  # "live" | "school"

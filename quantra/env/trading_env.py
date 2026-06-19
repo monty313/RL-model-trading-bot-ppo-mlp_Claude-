@@ -27,8 +27,8 @@ lies. The reward returned here is the Layer-0 net-PnL proxy; the full layered re
 LLM RISK DOCTOR — HOW TO THINK ABOUT THIS FILE
 ----------------------------------------------
 Rulebook: ``docs/MLP_INTERPRETABILITY_LAYER.md``. The observation handed to the
-policy is assembled here (precomputed market+raw 122 · law 12 · trade 35 · portfolio
-3 · account 7 = 179). For a breach, the env's force-flatten + ChallengeState.breached
+policy is assembled here (precomputed market+raw 149 · law 12 · trade 35 · portfolio
+3 · account 8 = 207). For a breach, the env's force-flatten + ChallengeState.breached
 mark the moment; correlate it with the action distribution to find the danger-
 blindness window. The env NEVER lets a masked action execute — a "bad action" in
 telemetry was legal here, so blame the actor's intent, not the env.
@@ -652,7 +652,7 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #      (5 slots, pointer CLOSE, next-free OPEN, masked at 5), §10.5 costs, §2.7 wall.
 #   A: TradingEnv: per-symbol-step decisions; opens sized against the live buffer
 #      MINUS all committed risk (so symbol k sees prior symbols' opens); costs on every
-#      fill; -1e9 mask enforced; Phase-A wall force-flattens all; 179-dim obs assembled.
+#      fill; -1e9 mask enforced; Phase-A wall force-flattens all; full-width obs assembled.
 #   C: The bot now trains on faithful challenge physics where collective overshoot is
 #      impossible by construction — so the behaviour it learns is the behaviour that
 #      passes real challenges, not a simulation artifact.

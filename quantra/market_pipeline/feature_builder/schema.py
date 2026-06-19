@@ -7,20 +7,20 @@ blocks, so the total width is fixed and asserted everywhere. This is the contrac
 the FeatureBuilder fills, the env assembles, the PPO trunk consumes, and the
 TelemetryLogger labels (the data contract requires "grouped feature block names").
 
-Block widths (default INCLUDE_RAW_INPUTS=True -> total 203):
-    market     128   market+time + gate ingredients + RAW CCI + RAW Bollinger + training wheels
+Block widths (default INCLUDE_RAW_INPUTS=True -> total 207):
+    market     131   market+time + gate ingredients + RAW CCI + RAW Bollinger + training wheels
     market_raw  18   RAW price-SMA inputs (operator-directed; precomputed)
-    law         12   9 laws + 3 gates (filled by LawMask, M3)
+    law         12   9 laws + 3 market-condition signals (filled by LawMask, M3)
     trade x5    35   7 features x 5 slots (env, M4)
     portfolio    3   aggregates across slots (env, M4)
-    account      7   equity/buffers + 2 challenge-progress (env, M4)
+    account      8   equity/buffers + challenge-progress + C12 perm-DD runway (env, M4)
     ------------------
-    TOTAL      203   (185 when INCLUDE_RAW_INPUTS=False)
+    TOTAL      207   (189 when INCLUDE_RAW_INPUTS=False)
 
 CCI is kept RAW (operator decision 2026-06-13): no /100, no normalized deviation —
 the raw CCI value + its raw shifted-forward SMA(2, shift4) are exposed so the policy
 compares CCI to its location 4 bars ago. Those CCI columns are in RAW_FEATURE_NAMES
-(unclipped). The first TWO blocks (market + market_raw = 128) are action-independent
+(unclipped). The first TWO blocks (market + market_raw = 149) are action-independent
 and are the FeatureBuilder's precomputed output (``PRECOMPUTED_NAMES`` / ``PRECOMPUTED_DIM``).
 
 OPERATOR OVERRIDE [2026-06-13]
@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 # COUPLING [C1] -> quantra/runtime/config.py: INCLUDE_RAW_INPUTS toggles whether the
-# market_raw block exists, which changes STATE_DIM (167 vs 149); config.nominal_state_dim
+# market_raw block exists, which changes STATE_DIM (207 vs 189); config.nominal_state_dim
 # and the committed state_vector.json snapshot must be regenerated when this flag flips.
 from quantra.runtime.config import INCLUDE_RAW_INPUTS
 
@@ -295,7 +295,7 @@ FEATURE_NAMES = SCHEMA.feature_names
 # COUPLING: this ORDER is the FeatureBuilder's output column order AND the index map
 # used by laws._IDX, env._COL, and the live session. Reorder here => reorder there.
 PRECOMPUTED_NAMES = SCHEMA.blocks["market"] + SCHEMA.blocks["market_raw"]
-PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 146 (raw on) / 128 (raw off)
+PRECOMPUTED_DIM = len(PRECOMPUTED_NAMES)                 # 149 (raw on) / 131 (raw off)
 
 # Backwards-compatible aliases (the normalized block only).
 MARKET_NAMES = SCHEMA.blocks["market"]
