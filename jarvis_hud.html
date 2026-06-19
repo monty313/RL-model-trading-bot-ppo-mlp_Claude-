@@ -210,6 +210,11 @@
   #nc-close{position:absolute;top:8px;right:11px;background:none;border:none;color:var(--muted);
     font-size:19px;cursor:pointer;line-height:1}
   #graph svg{cursor:grab}
+  #legend{position:absolute;bottom:10px;left:14px;z-index:5;display:flex;flex-wrap:wrap;gap:5px 12px;
+    background:rgba(6,14,24,.55);border:1px solid var(--line);border-radius:9px;padding:7px 11px;
+    font-size:10px;letter-spacing:.5px;backdrop-filter:blur(4px)}
+  #legend .lg{display:flex;align-items:center;gap:5px;color:#9fb6c8}
+  #legend .sw{width:9px;height:9px;border-radius:2px;box-shadow:0 0 7px currentColor}
 </style>
 </head>
 <body>
@@ -269,6 +274,7 @@
       <div id="nc-role">role</div>
       <a id="nc-link" href="#" target="_blank" rel="noopener">View code on GitHub →</a>
     </div>
+    <div id="legend"></div>
   </section>
 
   <aside id="stats" class="panel">
@@ -441,6 +447,14 @@ function traceTrade(){ if(tracing)return; tracing=true; clearSel();
 }
 $("btn-trace").onclick=traceTrade;
 
+// tier legend (built from TIERCOLOR so it can never drift from the nodes)
+const TIERLBL={data:"Data",env:"Env",locked:"Locked 🔴",ftmo:"FTMO",learn:"Learn",diag:"Diagnostics",live:"Live"};
+$("legend").innerHTML=Object.entries(TIERCOLOR).map(([k,c])=>
+ `<span class="lg"><span class="sw" style="background:${c};color:${c}"></span>${TIERLBL[k]||k}</span>`).join("");
+
+// auto-demo: trace a trade on a ~16s loop when idle (skips while the help panel is open)
+setInterval(()=>{ if(!tracing && !$("help").classList.contains("on")) traceTrade(); }, 16000);
+
 // animation loop: comets ride the bezier curves; cards glow with energy
 function frame(){ let ci=0;
  LINKS.forEach((l,i)=>{ const path=linkSel.nodes()[i]; if(!path){l.comets.forEach(()=>ci++);return;}
@@ -536,7 +550,8 @@ let bi=0;const bt=$("boot-text");
  else setTimeout(()=>{$("boot").classList.add("gone");$("hud").classList.add("on");$("sweepwave").classList.add("go");
    logLine("system","QUANTRA J.A.R.V.I.S. online · awaiting telemetry…","good");connect();
    setTimeout(()=>{if($("conn-text").textContent!=="LIVE")startSim();},1100);
-   setTimeout(maybeAutoHelp,1000);},700);})();
+   setTimeout(maybeAutoHelp,1000);
+   setTimeout(()=>{if(!tracing)traceTrade();},4500);},700);})();
 </script>
 </body>
 </html>
