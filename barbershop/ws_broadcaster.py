@@ -33,6 +33,14 @@ from typing import Dict, Iterable, Iterator, List, Optional
 
 HOST, PORT = "localhost", 8765
 _ACTIONS = {0: "HOLD", 1: "BUY", 2: "SELL", 3: "CLOSE"}
+# Which pipeline NODE a step most lights up, derived from the REAL action (so a real telemetry stream
+# genuinely "walks" the HUD graph): an OPEN is the agent deciding; a CLOSE happens in the env; HOLD is
+# the trainer turning the crank. A producer can override by emitting an explicit "active_module".
+_ACTION_MODULE = {0: "trainer", 1: "ppo_agent", 2: "ppo_agent", 3: "trading_env"}
+
+
+def _module_for(action) -> str:
+    return _ACTION_MODULE.get(action, "trainer")
 
 
 def _ftmo(dd_pct: float, pnl_pct: Optional[float]) -> str:
@@ -56,7 +64,7 @@ def packet_to_event(p: Dict, *, step: Optional[int] = None) -> Dict:
     pnl = p.get("daily_pnl_pct")
     sym = p.get("symbol", "?")
     action = _ACTIONS.get(p.get("chosen_action"), "HOLD")
-    module = p.get("active_module") or "trainer"   # trainer can add active_module to pulse a node
+    module = p.get("active_module") or _module_for(p.get("chosen_action"))   # real node from the action
     return {"t": "step", "step": int(step if step is not None else p.get("timestep", 0)),
             "module": module, "reward": round(float(reward), 3), "drawdown_pct": round(dd, 2),
             "daily_pnl_pct": (round(float(pnl), 3) if pnl is not None else None),
