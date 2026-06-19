@@ -225,6 +225,22 @@ PHASE_CONSTRAINED: int = 1
 TRAINING_PHASE: int = PHASE_FREE
 
 
+# ---------------------------------------------------------------------------
+# EPISODE LENGTH [operator decision 2026-06-19, C10]. An episode is N TRADING DAYS
+# on ONE continuous account (balance carries forward across days; a day's breach
+# locks out the rest of that day and resets at midnight — it does NOT end the
+# episode). The episode ends only when N days are exhausted OR the account is blown
+# (equity <= ACCOUNT_FLOOR_EQUITY). These are operator INPUTS, never hardcoded:
+#   TRAINING_DAYS — a full training run (~6 months of bars).
+#   EVAL_DAYS     — a short Barbershop/evaluation window.
+# COUPLING -> env/trading_env.py: TradingEnv(episode_days=...) enforces the N-day
+# episode; the notebooks pass TRAINING_DAYS / EVAL_DAYS as that argument.
+# ---------------------------------------------------------------------------
+TRAINING_DAYS: int = 180
+EVAL_DAYS: int = 8
+ACCOUNT_FLOOR_EQUITY: float = 0.0   # episode ends if equity reaches/below this ("account hits zero")
+
+
 # COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
 # env/trading_env.py + live_bridge/live_session.py: they read these exact field names
 # (daily_target_pct, daily_risk_pct, pain_zone_start_pct, hard_wall_pct, ...) to set the
@@ -254,6 +270,13 @@ class ChallengeConfig:
     # AFFECTS: challenge_state.account_block() (emits distance_to_permanent_dd), schema._account_names()
     #          (+acct_dist_to_perm_dd), EXPECTED_WIDTHS["account"] 7->8, STATE_DIM 206->207, snapshot re-pin
     permanent_dd_pct: float = 10.0   # permanent max-overall-loss wall, % of the STARTING balance (FTMO ~10%)
+    # CHANGED: 2026-06-19 | Added failed_day_penalty (C11 — the multi-day-episode consistency signal)
+    # WHY: in the C10 multi-day episode a bot can "survive" by trading tiny and never failing a day;
+    #      a LARGE end-of-day penalty for missing the daily target makes CONSISTENCY the goal, not just
+    #      survival. Applied at the midnight reset, PROPORTIONAL to how far below target the day finished
+    #      (worst for days that hit the wall and got locked out). Big by design so it isn't averaged away.
+    # AFFECTS: env/trading_env.py (_advance_bar day-boundary event reward), make_challenge() passthrough.
+    failed_day_penalty: float = 5.0  # C11 weight: reward = -failed_day_penalty * shortfall_fraction at EOD
 
 
 # Operator input bounds [decision 2026-06-15]. ftmo_mode ON keeps challenge-safe ranges;
@@ -271,7 +294,9 @@ def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *
                    stop_for_day: bool = False,
                    phase_b_trailing_pct: float = 1.0, account_size: float = 10_000.0,
                    pain_zone_start_pct: float | None = None,
-                   hard_wall_pct: float | None = None) -> "ChallengeConfig":
+                   hard_wall_pct: float | None = None,
+                   permanent_dd_pct: float = 10.0,
+                   failed_day_penalty: float = 5.0) -> "ChallengeConfig":
     """Build a VALIDATED ChallengeConfig — the operator entry point for per-day inputs.
 
     Clamps target/risk into the active mode's bounds, and pins the breach wall + pain
@@ -287,7 +312,9 @@ def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *
         daily_target_pct=t, daily_risk_pct=r, phase_b_trailing_pct=phase_b_trailing_pct,
         pain_zone_start_pct=pz, hard_wall_pct=hw, ftmo_mode=ftmo_mode,
         stop_for_day=stop_for_day, ftmo_account_size=account_size,
-        leverage=max(1.0, float(leverage)))
+        leverage=max(1.0, float(leverage)),
+        permanent_dd_pct=float(permanent_dd_pct),
+        failed_day_penalty=max(0.0, float(failed_day_penalty)))
 
 
 @dataclass(frozen=True)
@@ -434,3 +461,14 @@ def in_colab() -> bool:
 #   R: Operator correction 2026-06-15.
 #   A: ChallengeConfig.stop_for_day + make_challenge passthrough.
 #   C: OFF can either run past the target (default) or bank a side-account day on demand.
+# [2026-06-19] C10/C11 inputs — multi-day episode length + the failed-day penalty.
+#   I: The env modelled a single-day episode (breach ended it); there was no operator input for
+#      episode length in DAYS, and no consistency signal that punishes failing a day's target.
+#   R: Operator spec 2026-06-19 (C10 multi-day episode = N days on ONE continuous account; C11
+#      large proportional end-of-day penalty for missing the daily target; C13 dropped).
+#   A: Added TRAINING_DAYS (180) / EVAL_DAYS (8) / ACCOUNT_FLOOR_EQUITY (0.0) module constants
+#      (the episode-length inputs); ChallengeConfig.failed_day_penalty (5.0) + make_challenge
+#      passthrough (also threads permanent_dd_pct through make_challenge).
+#   C: The operator can dial how many days an episode spans and how hard a failed day stings, so
+#      the bot trains on a faithful many-day account and learns CONSISTENCY (hit the target most
+#      days), not just survival — which is exactly what repeatedly passing FTMO requires.
