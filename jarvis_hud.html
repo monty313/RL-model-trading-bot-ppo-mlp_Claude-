@@ -164,6 +164,31 @@
     clip-path:polygon(50% 1%,99% 26%,99% 74%,50% 99%,1% 74%,1% 26%)}
   .panel{animation:holo 7s ease-in-out infinite}
   @keyframes holo{0%,100%{opacity:1}50%{opacity:.975}}
+
+  /* ── HELP panel (C30) ── */
+  #help-btn{cursor:pointer;color:var(--gold);border-color:rgba(255,206,106,.45);animation:blip 2.2s ease-in-out infinite}
+  #help-btn:hover{box-shadow:0 0 14px rgba(255,206,106,.55)}
+  .help-wrap{position:fixed;inset:0;z-index:180;display:none;align-items:center;justify-content:center;
+    background:rgba(2,6,12,.74);backdrop-filter:blur(4px)}
+  .help-wrap.on{display:flex;animation:lnin .3s ease}
+  .help-card{position:relative;max-width:700px;width:92%;max-height:86vh;overflow:auto;
+    background:linear-gradient(160deg,rgba(10,20,34,.98),rgba(6,12,22,.98));border:1px solid var(--cyan);
+    border-radius:16px;padding:24px 26px;box-shadow:0 0 44px rgba(44,230,255,.35),inset 0 0 60px rgba(44,230,255,.05);
+    font-size:13px;line-height:1.5}
+  .help-card h2{font-family:'Orbitron',sans-serif;color:var(--cyan);letter-spacing:3px;margin:0 0 4px;
+    text-shadow:0 0 16px rgba(44,230,255,.4)}
+  .help-card .lead{color:var(--muted);margin:0 0 16px;font-size:12px}
+  .help-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+  .help-grid>div{background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .help-grid b{display:block;color:var(--gold);font-family:'Orbitron',sans-serif;font-size:10.5px;letter-spacing:1px;margin-bottom:5px}
+  .help-card code{background:rgba(44,230,255,.12);color:var(--cyan2);padding:1px 6px;border-radius:5px}
+  .hc{color:var(--amber)} .hg{color:var(--green)}
+  .help-x{position:absolute;top:10px;right:14px;background:none;border:none;color:var(--muted);font-size:26px;cursor:pointer;line-height:1}
+  .help-x:hover{color:var(--cyan)}
+  .help-got{margin-top:16px;width:100%;background:rgba(44,230,255,.12);color:var(--cyan);border:1px solid var(--cyan);
+    border-radius:9px;padding:10px;font:inherit;font-family:'Orbitron',sans-serif;letter-spacing:2px;cursor:pointer}
+  .help-got:hover{box-shadow:0 0 16px rgba(44,230,255,.5)}
+  @media(max-width:640px){.help-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -209,6 +234,7 @@
     <span class="pill"><span id="conn-dot" class="dot"></span><span id="conn-text">SIM</span></span>
     <span class="pill"><span id="ftmo-dot" class="dot" style="background:var(--cyan)"></span><span id="ftmo-hdr" style="color:var(--cyan)">FTMO</span></span>
     <span class="pill">◷ <span id="clock">--:--:--</span></span>
+    <span class="pill" id="help-btn" title="How to use this HUD">? HELP</span>
   </header>
 
   <section id="graph" class="panel">
@@ -238,6 +264,32 @@
   </section>
 </div>
 <div class="tip" id="tip"></div>
+
+<!-- HELP overlay (auto-opens first visit; reopen via the ? HELP pill) -->
+<div class="help-wrap" id="help">
+  <div class="help-card">
+    <button class="help-x" id="help-close" title="close">×</button>
+    <h2>◆ J.A.R.V.I.S. — QUICK START</h2>
+    <p class="lead">A live cockpit for the RL trading bot. It runs on its own — no setup needed.</p>
+    <div class="help-grid">
+      <div><b>WHAT THIS IS</b>Center = the data pipeline (each node is a module). Right = FTMO vitals
+        (reward, win-rate, daily P&amp;L vs +2.5%, drawdown vs the −4% wall). Bottom = the telemetry log.</div>
+      <div><b>SIM vs LIVE · top-right pill</b><span class="hc">SIM</span> = built-in demo data (default,
+        so it's never blank). <span class="hg">LIVE</span> = real training telemetry is streaming in.</div>
+      <div><b>HOW TO GO LIVE</b>In a terminal, in the project folder:<br>
+        <code>pip install websockets</code><br><code>python -m barbershop.ws_broadcaster --demo</code><br>
+        then <b>refresh this page</b> → the pill turns green and nodes pulse with the stream.</div>
+      <div><b>EXPLORE</b>Hover any node for its role · click <b>↻ PULSE ALL</b> to fire the whole flow ·
+        everything animates on its own.</div>
+      <div><b>THE OTHER TOOL — the dashboard</b>For the 6 diagnostic screens (Scoreboard, Trade Autopsy,
+        Repo Map, Risk Doctor) run <code>python run_dashboard.py</code>, or the Colab notebook
+        <code>colab/Quantra_Barbershop.ipynb</code> (Cell 1 → Cell 8). That's the X-ray tool; this is the cockpit.</div>
+      <div><b>MORE</b>Full guide: <code>JARVIS_HUD_GUIDE.md</code> · how to run everything:
+        <code>HOW_TO_RUN.md</code>. This HUD is READ-ONLY — it can't change or break anything.</div>
+    </div>
+    <button class="help-got" id="help-got">GOT IT ▸</button>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -377,6 +429,16 @@ function connect(){let ws;try{ws=new WebSocket("ws://localhost:8765");}catch(_){
 const ret=$("reticle");addEventListener("mousemove",e=>{ret.style.left=e.clientX+"px";ret.style.top=e.clientY+"px";});
 setInterval(()=>$("clock").textContent=new Date().toTimeString().slice(0,8),1000);$("clock").textContent=new Date().toTimeString().slice(0,8);
 
+// ── HELP overlay (C30): explains the HUD; auto-opens the first visit, reopen via the ? HELP pill ──
+const helpEl=$("help");
+function showHelp(v){ helpEl.classList.toggle("on", v); }
+$("help-btn").onclick=()=>showHelp(true);
+$("help-close").onclick=()=>showHelp(false);
+$("help-got").onclick=()=>showHelp(false);
+helpEl.addEventListener("click",e=>{ if(e.target===helpEl) showHelp(false); });   // click backdrop to close
+addEventListener("keydown",e=>{ if(e.key==="Escape") showHelp(false); });
+function maybeAutoHelp(){ try{ if(!localStorage.getItem("jarvis_help_seen")){ showHelp(true); localStorage.setItem("jarvis_help_seen","1"); } }catch(_){ showHelp(true); } }
+
 // ── BOOT sequence then reveal ───────────────────────────────────────────────────────────────
 const BOOT=["<span class='ttl'>J.A.R.V.I.S. INTERFACE</span>","INITIALIZING QUANTRA SYSTEMS...",
  "▸ LOADING NEURAL POLICY ........ <span class='ok'>OK</span>","▸ CONNECTING TO MT5 FEED ....... <span class='ok'>OK</span>",
@@ -386,7 +448,8 @@ let bi=0;const bt=$("boot-text");
 (function boot(){if(bi<BOOT.length){bt.innerHTML=BOOT.slice(0,bi+1).join("\n");bi++;setTimeout(boot,260);}
  else setTimeout(()=>{$("boot").classList.add("gone");$("hud").classList.add("on");$("sweepwave").classList.add("go");
    logLine("system","QUANTRA J.A.R.V.I.S. online · awaiting telemetry…","good");connect();
-   setTimeout(()=>{if($("conn-text").textContent!=="LIVE")startSim();},1100);},700);})();
+   setTimeout(()=>{if($("conn-text").textContent!=="LIVE")startSim();},1100);
+   setTimeout(maybeAutoHelp,1000);},700);})();
 </script>
 </body>
 </html>
