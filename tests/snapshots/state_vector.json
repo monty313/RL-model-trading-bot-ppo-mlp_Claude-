@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "include_raw_inputs": true,
-  "state_dim": 206,
+  "state_dim": 207,
   "precomputed_dim": 149,
   "block_widths": {
     "market": 131,
@@ -9,7 +9,7 @@
     "law": 12,
     "trade": 35,
     "portfolio": 3,
-    "account": 7
+    "account": 8
   },
   "blocks": {
     "market": [
@@ -34,7 +34,7 @@
     ],
     "account": [
       199,
-      206
+      207
     ]
   },
   "raw_feature_names": [
@@ -313,9 +313,10 @@
     "acct_trailing_buffer",
     "acct_daily_buffer",
     "acct_day_progress",
-    "acct_overall_progress"
+    "acct_overall_progress",
+    "acct_dist_to_perm_dd"
   ],
-  "sha256": "4f6bda46b2126d79e4c9bbe7a5ca37031ef382d216eb07ec030e24e4c118021b",
+  "sha256": "5c45d0bc8f2aeade505b4ed7778626d3ffc38f2129161ec2c430e5eb570ad1f4",
   "_llm_interpretation": {
     "purpose": "This snapshot pins the observation the PPO policy sees. Judged against repeated FTMO passing, not PnL. A drift means the policy's WORLD changed.",
     "blocks": {

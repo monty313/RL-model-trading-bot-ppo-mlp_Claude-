@@ -248,6 +248,12 @@ class ChallengeConfig:
     stop_for_day: bool = False        # OFF-mode toggle: bank + STOP when the target is hit (else run on).
     ftmo_account_size: float = 10_000.0  # reference scaling only; policy is blind
     leverage: float = 100.0          # account leverage (1:100). Margin = notional / leverage. INPUT.
+    # CHANGED: 2026-06-18 | Added permanent_dd_pct (the -10% permanent max-overall-loss wall)
+    # WHY: bot had no awareness of the hard floor that ends the FTMO challenge for good (real
+    #      FTMO has TWO walls; the sim modelled only the daily trailing wall) — a survival blind spot
+    # AFFECTS: challenge_state.account_block() (emits distance_to_permanent_dd), schema._account_names()
+    #          (+acct_dist_to_perm_dd), EXPECTED_WIDTHS["account"] 7->8, STATE_DIM 206->207, snapshot re-pin
+    permanent_dd_pct: float = 10.0   # permanent max-overall-loss wall, % of the STARTING balance (FTMO ~10%)
 
 
 # Operator input bounds [decision 2026-06-15]. ftmo_mode ON keeps challenge-safe ranges;
@@ -321,7 +327,10 @@ class RuntimeConfig:
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
     # suite). 203 with raw inputs on (raw CCI + raw price-SMA + training wheels), 185 off.
-    nominal_state_dim: int = field(default_factory=lambda: 206 if INCLUDE_RAW_INPUTS else 188)
+    # CHANGED: 2026-06-18 | nominal_state_dim 206->207 / 188->189 (C12 account scalar)
+    # WHY: distance_to_permanent_dd added to the account block; config width must match schema
+    # AFFECTS: schema.STATE_DIM (asserted == this by the master suite), tests/snapshots/state_vector.json
+    nominal_state_dim: int = field(default_factory=lambda: 207 if INCLUDE_RAW_INPUTS else 189)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss

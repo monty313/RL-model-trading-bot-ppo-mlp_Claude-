@@ -5,7 +5,7 @@ WHAT THIS MODULE DOES
 Tracks the ONE shared account every symbol's decision reads (SOW B5): balance,
 equity (realized + unrealized), the trailing high-water peak, the day's start equity,
 the remaining daily-risk buffer (distance to the wall), and day PnL vs target. It
-exposes the 7-scalar account observation block and flags the hard-wall breach.
+exposes the 8-scalar account observation block (incl. C12 dist_to_perm_dd) and flags the breach.
 
 This is Phase-A only for M4 (4% trailing wall + buffer + breach). The two-phase rule
 (at +2.5% auto-flat all -> fresh 1% trailing, Phase B) is M7; the hooks (`phase`,
@@ -142,11 +142,13 @@ class ChallengeState:
         self.phase = "A"
 
     def account_block(self) -> np.ndarray:
-        """The 7-scalar `account` observation block (schema order), normalized.
+        """The 8-scalar `account` observation block (schema order), normalized.
 
         Order matches schema _account_names(): equity_norm, equity_dev, equity_slope,
-        trailing_buffer, daily_buffer, day_progress, overall_progress. equity_slope is
-        a per-step hook (env fills it); here it's 0 (filled by the env's equity SMA).
+        trailing_buffer, daily_buffer, day_progress, overall_progress, dist_to_perm_dd.
+        equity_slope is a per-step hook (env fills it); here it's 0 (filled by the env's
+        equity SMA). dist_to_perm_dd is the C12 survival-runway scalar (added at the END so
+        every pre-existing index — incl. env's [5]=day_progress — is unchanged).
         """
         eq_norm = self.equity / self.account_size
         eq_dev = (self.equity - self.peak_equity) / self.account_size
@@ -156,12 +158,21 @@ class ChallengeState:
         #     loss wall lands with the scale-invariant-obs rework (task #23); kept now for obs width.
         day_progress = self.day_pnl / ((self.challenge.daily_target_pct / 100.0) * self.account_size)
         overall_progress = (self.equity - self.account_size) / self.account_size
-        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 7-scalar
+        # CHANGED: 2026-06-18 | Added distance_to_permanent_dd (C12 — 8th account scalar, appended)
+        # WHY: give the bot a "survival instinct" — how much runway remains before the PERMANENT
+        #      max-overall-loss wall (the hard floor that ends the FTMO challenge for good)
+        # AFFECTS: schema._account_names (+acct_dist_to_perm_dd), EXPECTED_WIDTHS["account"] 7->8,
+        #          STATE_DIM 206->207, config.permanent_dd_pct, tests/snapshots/state_vector.json
+        # 1.0 at the starting balance, 0.0 AT the permanent floor, <0 once breached (FTMO ~ -10%).
+        perm_band = max(1e-9, (self.challenge.permanent_dd_pct / 100.0) * self.account_size)
+        perm_floor = self.account_size - perm_band
+        dist_to_perm_dd = (self.equity - perm_floor) / perm_band
+        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 8-scalar
         # order MUST equal schema._account_names() (equity_norm, equity_dev, equity_slope,
-        # trailing_buffer, daily_buffer, day_progress, overall_progress); also consumed via
-        # env/trading_env.py _obs()/_reward() (reads index [5]=day_progress). Reorder -> breaks both.
+        # trailing_buffer, daily_buffer, day_progress, overall_progress, dist_to_perm_dd); also
+        # consumed via env/trading_env.py _obs()/_reward() (reads index [5]=day_progress). Reorder -> breaks both.
         return np.array([
-            eq_norm, eq_dev, 0.0, trailing_buf, daily_buf, day_progress, overall_progress
+            eq_norm, eq_dev, 0.0, trailing_buf, daily_buf, day_progress, overall_progress, dist_to_perm_dd
         ], dtype=np.float32)
 
 
@@ -209,3 +220,15 @@ class ChallengeState:
 #      wall deferred to the scale-invariant-obs rework).
 #   C: Each calendar day is a fresh Phase-A 2.5%/4% challenge instead of a stuck post-day-1 Phase
 #      B - faithful multi-day simulation, which is what an honest pass-rate metric requires.
+# [2026-06-18] C12 — distance_to_permanent_dd added to the account observation block.
+#   I: The bot saw the daily trailing wall but had NO awareness of the permanent max-overall-loss
+#      wall (the hard floor that ends the FTMO challenge for good) — a survival blind spot, and a
+#      step toward closing the "one wall vs FTMO's two" sim gap.
+#   R: Operator decision 2026-06-18 (C12). Add ONE normalized scalar; no two-wall ENFORCEMENT
+#      changes this session (that is the deferred C10 work).
+#   A: account_block() now emits an 8th scalar dist_to_perm_dd = (equity - perm_floor)/perm_band,
+#      where perm_floor = account_size*(1 - permanent_dd_pct/100); 1.0 at start, 0.0 at the floor,
+#      <0 once breached. Appended at index [7] so every pre-existing index (incl. env's [5]) is
+#      unchanged. config.permanent_dd_pct (default 10%) added; STATE_DIM 206->207; snapshot re-pinned.
+#   C: The policy can now SEE how much permanent runway it has left and learn a survival instinct,
+#      which is what keeps a streak of passes from ending in a single account-killing drawdown.

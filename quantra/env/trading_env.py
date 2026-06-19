@@ -440,8 +440,9 @@ class TradingEnv:
             net_pnl_delta=l0, in_position=in_pos, momentum_aligned=momentum,
             stagnation=False, drawdown_pct=dd_pct,
             # COUPLING [C1] -> quantra/ftmo_passing/challenge_state.py: index [5] is day_progress
-            # in account_block()'s fixed 7-scalar order; reorder the account block and this picks
-            # the wrong scalar. RewardContext field names couple to reward_engine/reward.py.
+            # in account_block()'s fixed 8-scalar order (C12 appended dist_to_perm_dd at [7], so
+            # [5] is unchanged); reorder the account block and this picks the wrong scalar.
+            # RewardContext field names couple to reward_engine/reward.py.
             day_progress=float(self.account.account_block()[5]),
             breach_risk=dd_pct >= self.challenge_cfg.pain_zone_start_pct,
         )

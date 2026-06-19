@@ -207,13 +207,16 @@ def _portfolio_names() -> List[str]:
 
 
 # COUPLING [C1] -> quantra/ftmo_passing/challenge_state.py (account_block()) + env/trading_env.py:
-# the order of these 7 account names IS the order ChallengeState.account_block() must emit
+# the order of these 8 account names IS the order ChallengeState.account_block() must emit
 # and the env appends to the obs. Add/reorder => fix account_block() + EXPECTED_WIDTHS["account"].
+# CHANGED: 2026-06-18 | Added acct_dist_to_perm_dd (C12 — 8th account scalar, appended at END)
+# WHY: bot's observation now includes runway to the permanent max-overall-loss wall (survival)
+# AFFECTS: challenge_state.account_block() (emits it), EXPECTED_WIDTHS["account"] 7->8, STATE_DIM 206->207
 def _account_names() -> List[str]:
     return [
         "acct_equity_norm", "acct_equity_dev", "acct_equity_slope",
         "acct_trailing_buffer", "acct_daily_buffer",
-        "acct_day_progress", "acct_overall_progress",
+        "acct_day_progress", "acct_overall_progress", "acct_dist_to_perm_dd",
     ]
 
 
@@ -276,7 +279,7 @@ SCHEMA = build_schema()
 # quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
 # (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
 # logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
-STATE_DIM = SCHEMA.dim                                   # 206 (raw on) / 188 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 207 (raw on) / 189 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
@@ -312,7 +315,7 @@ RAW_FEATURE_NAMES = (set(SCHEMA.blocks["market_raw"]) | set(_RAW_CCI_NAMES)
 EXPECTED_WIDTHS = {
     "market": 131,  # 128 + 3 new 5m-ATR feats (atr_level/ref/dev_5m for market_volatility_obs)
     "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
-    "law": 12, "trade": 35, "portfolio": 3, "account": 7,
+    "law": 12, "trade": 35, "portfolio": 3, "account": 8,  # account 7->8: +acct_dist_to_perm_dd (C12, 2026-06-18)
 }
 
 

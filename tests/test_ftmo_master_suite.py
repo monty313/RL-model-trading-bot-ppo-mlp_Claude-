@@ -258,10 +258,10 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_206_with_raw_bollinger_and_training_wheels():
+def test_schema_total_is_207_with_raw_bollinger_and_training_wheels():
     # market 131 (prev 128 + 3 new 5m-ATR feats for market_volatility_obs) + 18 raw
-    # price-SMA + 12 law + 35 trade + 3 portfolio + 7 account = 206
-    assert STATE_DIM == 206
+    # price-SMA + 12 law + 35 trade + 3 portfolio + 8 account (C12 +acct_dist_to_perm_dd) = 207
+    assert STATE_DIM == 207
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
