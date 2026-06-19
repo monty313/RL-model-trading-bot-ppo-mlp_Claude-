@@ -138,7 +138,10 @@ def auto_name(overrides: Dict[str, object], *, baseline: Optional[Dict[str, obje
 #   2. reward layer keys    <- learning_system/reward_engine/reward.py decompose()   (default_reward_layer_keys)
 #   3. law fingerprint      <- locked_core/laws/laws.py LAW_NAMES                     (default_law_fingerprint)
 # Change any one -> EVERY saved policy's signature changes -> RESUME raises CompatibilityError and the
-# policy must be RETRAINED. Weights (C16)/term-math (C17) do NOT change it (same dim + L-keys + laws).
+# policy must be RETRAINED.
+# ✅ SAFE TO CHANGE without a fresh start (NOT in the signature): training_phase, training_wheels, the
+#    challenge numbers, and ALL reward weights (C16) + term math (C17) — same dim + L-keys + laws, so an
+#    old policy still resumes. Shape the policy with those; only touch the three inputs above on purpose.
 class CompatibilityError(RuntimeError):
     """Raised on RESUME_FROM when the saved signature != the current config+OVERRIDES (README §4)."""
 

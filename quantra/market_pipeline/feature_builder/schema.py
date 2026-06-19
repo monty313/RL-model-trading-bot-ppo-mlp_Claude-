@@ -285,6 +285,9 @@ SCHEMA = build_schema()
 # policy's signature, so the registry refuses to RESUME old checkpoints (CompatibilityError — the old
 # net's input layer no longer fits) and they must be RETRAINED fresh. This is the #1 "can't go back to
 # an old policy" hazard the operator flagged: if you change the dim here, expect a forced fresh start.
+# ✅ SAFE TO CHANGE without a fresh start (these never touch STATE_DIM): training_phase, training_wheels,
+#    the challenge numbers (daily_target/daily_risk/permanent_dd/failed_day_penalty), and ALL reward
+#    weights + term math (RewardConfig C16/C17). Shape the policy with THOSE and old policies still resume.
 STATE_DIM = SCHEMA.dim                                   # 207 (raw on) / 189 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 

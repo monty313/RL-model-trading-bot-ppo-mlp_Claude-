@@ -117,6 +117,8 @@ class RewardEngine:
         # SECOND input to a policy's compatibility hash. Tuning a WEIGHT (C16) or re-pointing a term's
         # MATH (C17) keeps these keys, so old policies stay RESUME-safe. But ADDING / REMOVING / RENAMING
         # a layer changes the hash -> the registry forces a fresh start (old policies can't be resumed).
+        # ✅ SAFE TO CHANGE without a fresh start: any RewardConfig weight value AND the math INSIDE an
+        #    existing layer (what l1..l4 compute) — shape behaviour freely as long as the L-keys are intact.
         return {"L0": l0, "L1": l1, "L2": l2, "L3": l3, "L4": l4,
                 "L5_mult": l5_mult, "shaped": shaped, "total": l0 + shaped + l3}
 

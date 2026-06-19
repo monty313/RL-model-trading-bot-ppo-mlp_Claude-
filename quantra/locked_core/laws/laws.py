@@ -62,6 +62,8 @@ from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES, SC
 # compatibility hash. Adding/removing/renaming a law changes EVERY saved policy's signature, so the
 # registry will force a fresh start on RESUME (old law-fingerprint no longer matches). Reordering only
 # (same names) does NOT change the hash here, but DOES break the positional slices above — fix those too.
+# ✅ SAFE TO CHANGE without a fresh start: everything OUTSIDE the law set — training_phase,
+#    training_wheels, the challenge numbers, and the reward weights/math — none of those touch LAW_NAMES.
 LAW_NAMES = list(SCHEMA.blocks["law"])
 DIRECTIONAL_LAWS = LAW_NAMES[:9]   # -1/0/+1
 MARKET_SIGNALS = LAW_NAMES[9:]     # 0/1 (volatility, spread, stationarity) — observation-only by default
