@@ -50,9 +50,11 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
   Recognition → Full Market) that *generalize* the shaped policy across regimes (§4.6,
   `colab/Quantra_Train.ipynb`). Uses the Barbershop-shaped policy as starting weights.
 
-**Two repos — know which one you're in (full protocol in §4.13):**
-- **ACTIVE WORK** (all edits + commits happen here): `https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`
-- **FALLBACK / SAFE RESTORE** (NEVER edited — clean emergency revert only): `https://github.com/monty313/final-rl-model-6_13`
+**One active repo (full protocol in §4.13):**
+- **ACTIVE REPO** (the only working source of truth; all edits + commits happen here):
+  `https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`
+- **FROZEN ARCHIVE** (a historical snapshot only — never edited, never read from, NOT a fallback
+  or restore target): `https://github.com/monty313/final-rl-model-6_13`
 
 **Known gaps (honest — stated in every overview; full detail in §7):** (1) **no real trained
 model yet** — the policy is synthetic-trained and hasn't run on real bars; this is the **#1
@@ -65,12 +67,29 @@ enforced — so a sim pass is not yet a guaranteed live-legal pass; (3) Barbersh
 labelled demo curve until a real pass-rate series is logged; (4) trade-autopsy attribution is
 input×gradient, not true SHAP.
 
+> **Standing rule — when logic changes, the docs change with it (everywhere it applies).** The
+> honesty contract is *docs == code*. Any change to a subsystem's LOGIC must be mirrored in EVERY
+> doc that describes it, in the SAME change — not just the code comment. Use this map:
+>
+> | If you change… (file) | Also update… |
+> |---|---|
+> | `STATE_DIM` / schema (`market_pipeline/feature_builder/schema.py`) | this guide §1/§4.11/§6, `tests/snapshots/state_vector.json` (re-pin), the JARVIS/Barbershop guides if they cite the width, the Perplexity Space instructions |
+> | reward weights/layers (`runtime/config.py` `RewardConfig`, `reward_engine/reward.py`) | the REWARD REFERENCE BLOCK at the bottom of `reward.py`, this guide §4.12, `barbershop/BARBERSHOP_GUIDE.md`, the Perplexity Space instructions |
+> | gate↔observation / `TRAINING_PHASE` (`law_mask_engine/engine.py`, `runtime/config.py`) | this guide §1/§4.12/§6/§7, `barbershop/BARBERSHOP_GUIDE.md`, the Perplexity Space instructions |
+> | Policy Registry / card / leaderboard (`policy_registry/registry.py`, `ftmo_passing/challenge_state.py`) | this guide §4.11, `artifacts/policy_registry/README.md` + `LEADERBOARD.md`, the Perplexity Space instructions |
+> | Barbershop loop / notebooks (`learning_system/barbershop_runner.py`, `colab/*.ipynb`) | this guide §4.10/§5, `barbershop/BARBERSHOP_GUIDE.md`, `HOW_TO_RUN.md` |
+> | JARVIS HUD / telemetry bridge (`jarvis_hud.html`, `barbershop/ws_broadcaster.py`) | `JARVIS_HUD_GUIDE.md`, `HOW_TO_RUN.md`, this guide §5 |
+>
+> Reverse applies too: if a doc statement no longer matches code, fix the doc — **preserve dated
+> IRAC history; correct only present-tense claims**. This rule is permanent and covers all current
+> AND future files.
+
 ---
 
 ## 2. Directory tree (the real layout)
 
 ```
-final rl model 6_13/
+RL-model-trading-bot-ppo-mlp_Claude-/      # the ACTIVE repo root
 ├── README.md                      # repo intro
 ├── REPO_MAP.md                    # high-level module map
 ├── INSTRUCTIONS.md                # live work queue (pending/agreed work)
@@ -148,7 +167,7 @@ final rl model 6_13/
 │   └── acceptance.py               # acceptance gate
 │
 ├── barbershop/                    # 💈 the read-only diagnostics dashboard + Risk Doctor
-│   ├── dashboard.py               # the Dash app (5 screens) — `python barbershop/dashboard.py`
+│   ├── dashboard.py               # the Dash app (6 screens 0–6) — `python run_dashboard.py`
 │   ├── data.py                    # pure data layer (mock gen, loaders, transforms)
 │   ├── figures.py                 # Plotly figure builders
 │   ├── adapter.py                 # REAL telemetry (artifacts/telemetry/*.jsonl) → dashboard contract
@@ -203,7 +222,7 @@ final rl model 6_13/
                   │
  7. TELEMETRY diagnostics.telemetry_logger  → artifacts/telemetry/<run>.jsonl
                   │  (scripts/emit_real_telemetry.py is the producer)
- 8. BARBERSHOP barbershop/dashboard.py  → diagnose WHY (5 screens + Risk Doctor)
+ 8. BARBERSHOP barbershop/dashboard.py  → diagnose WHY (6 screens + Risk Doctor)
                   │  → logs/suggested_rules.json  (rules YOU approve to feed back into training)
  9. LIVE/DEMO live_bridge.live_runner  (DEMO first; same masks as training)
 ```
@@ -353,7 +372,7 @@ tracks what was already done.
 wall + Screen 3 day replay rendered via `barbershop/figures.py`
 (`training_wall_figure`, `candlestick_figure`). (2) **ngrok tunnel** (Cell 8) auto-starts
 the full Dash app (`barbershop.dashboard.make_app`) in a background thread so you can open
-all **5 screens + the Risk Doctor** in your browser. Telemetry is auto-emitted to
+all **6 screens + the Risk Doctor** in your browser. Telemetry is auto-emitted to
 `artifacts/telemetry/<run>.jsonl` after every checkpoint so the Barbershop always has fresh
 data (canonical real-bar producer: `scripts/emit_real_telemetry.py`).
 
@@ -375,7 +394,8 @@ and the Risk Doctor. **Three files per policy** (full reader's guide:
    (auto, see below), `auto_name_basis` (the diff in plain tokens), `created`, `base_policy`
    (what it resumed from, or `null`), `data_window` (`start` + `n_days`),
    `n_passes_completed`, `state_dim`, `training_wheels`, `overrides_applied` (the full
-   `OVERRIDES` dict), `compatibility_signature`.
+   `OVERRIDES` dict), `consecutive_loss_days` (the current end-of-run back-to-back failed-day
+   streak from `ChallengeState`, C14), `compatibility_signature`.
 2. **`performance.json`** — updated after every pass: `pass_history` (per pass:
    `days_passed`/`days_failed`/`avg_pnl`/`avg_dd`/`breach_count`/`avg_gate_block_rate`),
    `best_pass`, `overall_pass_rate`.
@@ -390,9 +410,12 @@ increments from `base_policy`. *Example:* set `training_phase = "constrained"` *
 come straight from the `OVERRIDES` diff vs the baseline config — never typed by hand.
 Monty may rename a policy afterward, but the auto-name is always generated first and recorded.
 
-Registry contents are **git-ignored** (large + run-specific); only the `README.md` is
-committed. Persist real checkpoints/manifests to **Google Drive** (auto-saved every
-`CHECKPOINT_INTERVAL`). See §4.13 for why the repo is not your backup.
+Registry contents are **git-ignored** (large + run-specific); the committed files are
+`README.md` and **`LEADERBOARD.md`** (a static, manually-maintained leaderboard). **Checkpoint
+I/O is wired notebook-side** (Barbershop Cell 4 loads a saved brain after a compatibility check;
+Cell 5 saves weights every `CHECKPOINT_INTERVAL` and on a clean interrupt — payload
+`{state_dict, state_dim, compatibility_signature}`). Persist real checkpoints/manifests to
+**Google Drive** (the repo is not your backup — see §4.13).
 
 ### 4.12 Runtime Override System (the `OVERRIDES` dict)
 
@@ -410,6 +433,7 @@ result. Tuneable knobs:
 | `daily_target_pct` | `2.5` | Your daily profit goal (passed to `make_challenge`). |
 | `daily_risk_pct` | `4.0` | The trailing-wall risk allowed to make it (passed to `make_challenge`). |
 | `permanent_dd_pct` | `10.0` | The −10% permanent max-overall-loss wall — an **observation** (the C12 `dist_to_perm_dd` scalar), NOT enforced in training. |
+| reward weights (6) | see `RewardConfig` | `net_pnl_weight` (1.0, keep) · `step_pnl_weight` (1e-4) · `daily_progress_weight` (1e-3) · `drawdown_pain_weight` (5e-4) · `drawdown_pain_steepness` (4.0) · `trade_quality_weight` (5e-5). Shape *how* the bot passes; resume-safe (signature unchanged). `failed_day_penalty` (5.0) is a challenge value, mirrored in `RewardConfig`. |
 
 **The 3 market-condition signals are no longer tunable thresholds.** They became phase-gated
 observations (the old `adf_p_value_threshold` / `atr_min_multiplier` / `spread_max_pips` knobs
@@ -417,9 +441,16 @@ were **removed**, 2026-06-18): the bot now *learns* both stationary AND non-stat
 from seeing the signals, rather than being hard-blocked. The only enforcement knob is
 `training_phase`.
 
-> **Reward weights are PLANNED, not yet wired.** `reward.py` currently uses internal constants
-> (Layer-0 dominant). Operator-tunable reward dials (plain-English weights) are the
-> reward-redesign task; until then, reward weights are **not** part of `OVERRIDES`.
+> **Reward weights are LIVE and operator-tunable (C16/C17).** Six plain-English weights in
+> `quantra/runtime/config.py` `RewardConfig` — `net_pnl_weight` (Layer-0, dominant; keep 1.0),
+> `step_pnl_weight`, `daily_progress_weight`, `drawdown_pain_weight`, `drawdown_pain_steepness`,
+> `trade_quality_weight` — are consumed by `quantra/learning_system/reward_engine/reward.py`
+> (`decompose()`/`_pain()`); `failed_day_penalty` is a challenge-level value mirrored in
+> `RewardConfig` for visibility. They **are** part of `OVERRIDES` (diffed vs baseline → the
+> auto-name). Tuning a weight value, or the math INSIDE an existing layer, is **resume-safe** — the
+> compatibility signature tracks the reward LAYER arrangement (the `decompose()` L-keys), not the
+> weights. The canonical table is the **REWARD REFERENCE BLOCK** at the bottom of `reward.py`.
+> *(The older "9-weight redesign" was superseded — it is not the live design.)*
 
 **What triggers a `CompatibilityError`.** If an override changes **`STATE_DIM`** or the reward
 shape in a way that breaks an existing checkpoint's assumptions, resuming raises a
@@ -431,23 +462,22 @@ resume across: toggling `training_phase` / `training_wheels`, changing the chall
 > logic, and `STATE_DIM` are locked: changing them is a **proposed amendment requiring Monty's
 > sign-off**, not a routine override.
 
-### 4.13 Repo Safety Protocol (primary vs fallback)
+### 4.13 Repo Safety Protocol (one active repo)
 
-The project lives in **two GitHub repos**, and you must always know which one you're in:
+There is **one active repo**. The old repo is a frozen historical archive, not a live target:
 
 | Role | Repo | Rule |
 |---|---|---|
-| **ACTIVE WORK** | `github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-` | All code changes, new files, and commits happen here. Every session works here. |
-| **FALLBACK / SAFE RESTORE** | `github.com/monty313/final-rl-model-6_13` | **Never edited.** It is the last-known-clean snapshot you revert to if the working repo breaks beyond repair. |
+| **ACTIVE REPO** | `github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-` | The only working source of truth. All code changes, new files, and commits happen here. |
+| **FROZEN ARCHIVE** | `github.com/monty313/final-rl-model-6_13` | A historical snapshot only. **Never edited, never read from, never pushed to, and NOT a fallback / restore / sync target.** Do not treat it as current. |
 
 **Protocol.**
-1. Do all work in the **active** repo (this one).
-2. **Before any major code change, push the current working state** so the fallback can be
-   re-synced from a known-good commit — the fallback must stay a clean restore point.
-3. If the active repo breaks beyond repair: clone **`final-rl-model-6_13`** to restore, then
-   re-apply only the verified-good work on top.
-4. **Never delete or overwrite the fallback repo**, and never confuse the two — this protocol
-   exists so no session (human or LLM) ever edits the wrong one.
+1. Do all work in the **active** repo (this one); never reference the archive as current state.
+2. **Push your work regularly** (and before any major change) — your real safety net is the git
+   history of the active repo plus checkpoints on Google Drive, NOT the archive.
+3. Recover from a bad change via the active repo's own git history (revert/reset to a known-good
+   commit) — never by cloning the archive.
+4. **Never read from, edit, or sync the archive repo.** It exists only as a frozen record.
 
 ### 4.14 Colab GPU Setup (80% target · cache-once · cell order)
 
@@ -479,11 +509,13 @@ resumes from the last Drive checkpoint (not from zero).
 
 ---
 
-## 5. The Barbershop — 5 screens + Risk Doctor
+## 5. The Barbershop — 6 screens (0–6) + Risk Doctor
 
 A read-only post-training diagnostic tool. It **never** writes outside `logs/` and never
-changes training, rewards, or the policy.
+changes training, rewards, or the policy. The systematic flow is the **Haircut Procedure**
+(`barbershop/BARBERSHOP_GUIDE.md`): **Mirror → Diagnose → Approve → Retrain → Recheck**.
 
+0. **Screen 0 — How to Use.** Renders `barbershop/BARBERSHOP_GUIDE.md` inside the dashboard.
 1. **Screen 1 — Training Wall.** Pass-rate over training iterations; green rising / yellow
    flat / red falling; an 80% "Consistent Pass Zone" line; a plateau banner. *(On a real
    run with no logged pass-rate series, it shows an honest "Demo curve" label.)*
@@ -497,9 +529,14 @@ changes training, rewards, or the policy.
    MIDDLE = action probabilities (chosen = gold border) + masked/legal label, RIGHT =
    **input×gradient attribution** (real, labelled *not Shapley*). Panels grey out honestly
    if a run lacks the data.
-5. **Screen 5 — Pattern Finder.** Auto-scans losing trades, surfaces the top patterns in
-   plain English, with **APPLY** (export to `logs/suggested_rules.json`) / IGNORE / MODIFY.
-6. **Risk Doctor (chat box, all screens).** A local LLM grounded in
+5. **Screen 5 — Pattern Finder.** Auto-scans losing trades, surfaces the top patterns in plain
+   English, with **APPLY** / MODIFY / IGNORE. APPLY only **exports a suggested rule** (into the
+   next run's `OVERRIDES` / `logs/suggested_rules.json`) — it does **not** edit code or place a
+   trade; you still launch the run.
+6. **Screen 6 — Repo Map.** A live import-dependency graph of the whole repo
+   (`barbershop/repo_graph.py`, built from `ast`); click a node to read that file's docstring +
+   its first `COUPLING` note. *(Needs `dash-cytoscape`; shows a friendly note if missing.)*
+7. **Risk Doctor (chat box, all screens).** A local LLM grounded in
    `docs/MLP_INTERPRETABILITY_LAYER.md` (loaded every call, condensed to fit context). It
    answers in 6 sections (📍 looking at / 🔍 see / 🎯 means for passing / ✅ do next /
    ❌ don't / 📊 confidence), refuses live-trade questions, never fabricates (says
@@ -667,3 +704,25 @@ For cross-file couplings before any refactor see `COUPLINGS.md`.*
   - **C:** The guide now describes the real training contract — a faithful many-day account where a
     bad day costs carried-forward equity AND a big reward hit — so operators and the Perplexity
     mentor reason about consistency-passing, which is the actual mission.
+
+- **[2026-06-19]** Docs-sync rewrite (audit Fix 6 + Perplexity-Space alignment) + a standing
+  docs-track-code rule.
+  - **I:** The guide still said reward weights were "PLANNED, not yet wired" (false since C16/C17),
+    framed `final-rl-model-6_13` as a live FALLBACK/restore target (the operator froze it as an
+    archive), listed "5 screens" (now 6 + Repo Map), and omitted that `LEADERBOARD.md` is committed,
+    that policy cards carry `consecutive_loss_days`, and that Barbershop checkpoint I/O is wired.
+  - **R:** Operator brief (rewrite Perplexity Space + RAG docs to current truth; reflect locked
+    decisions) + the honesty rule (docs == code) + the operator's meta-instruction: *when logic
+    changes in related files, update there too where it applies.*
+  - **A:** §1 reworded to ONE active repo + a FROZEN ARCHIVE; added a standing **docs-track-code**
+    rule with a subsystem→docs map; §4.11 (LEADERBOARD committed, `consecutive_loss_days` on the
+    manifest, checkpoint I/O wired); §4.12 reward block rewritten to the live 6-weight C16/C17 design
+    + a reward-weights `OVERRIDES` row; §4.13 reframed (active repo only; archive never read/edited);
+    §5 → 6 screens (0–6) incl. Repo Map, Pattern Finder APPLY clarified as export-only; §2 tree root
+    relabeled. Dated IRAC history left intact (present-tense claims only). Companion: appended **The
+    Haircut Procedure** to `barbershop/BARBERSHOP_GUIDE.md`; the Perplexity Space instruction text is
+    delivered separately for the operator to paste.
+  - **C:** The guide, the Barbershop guide, and the Perplexity mentor now tell the same true story —
+    one active repo, a live tunable reward, a complete 6-screen Barbershop, and a wired registry — and
+    the new standing rule keeps every doc in lock-step with the code on future changes, protecting the
+    docs == code honesty contract the whole project relies on.

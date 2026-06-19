@@ -18,6 +18,44 @@ question. PnL is *not* the scoreboard; **pass-rate → breaches → consistency 
 
 ---
 
+## The Haircut Procedure
+
+**What the Barbershop is.** The *mirror*. It shows you — in real, replayable detail — what the
+policy did and *why* it did it (six screens 0–6 + the Risk Doctor chat).
+
+**What the Barbershop is NOT.** It is **read-only**. It never trains, never changes rewards, config,
+or the policy, and never places a trade. The Risk Doctor diagnoses from telemetry evidence only (and
+`/read`s files read-only); Pattern Finder's **APPLY** only copies a suggested rule into your next
+run's `OVERRIDES` — *you* still launch the run.
+
+**The analogy.** The Barbershop is the **mirror**. Your reward/config/code edits are the
+**scissors**. Retraining (in `colab/Quantra_Train.ipynb`) is the **haircut**. The mirror shows the
+problem; it does not cut your hair.
+
+**The systematic operator flow.**
+1. **Produce telemetry** — run a Train or Barbershop pass so `artifacts/telemetry/<run>.jsonl` exists.
+2. **Open the Barbershop** — `python run_dashboard.py` → http://localhost:8050 (or Colab
+   `Quantra_Barbershop.ipynb` Cell 8).
+3. **Screen 2 · Scoreboard** — find the worst days (the ones that failed or breached the −4% wall).
+4. **Screen 3 · Day Replay** — replay a bad day bar by bar; click a trade marker to dig in.
+5. **Screen 4 · Trade Autopsy** — see which inputs pushed the decision (input×gradient, not SHAP).
+6. **Screen 5 · Pattern Finder** — read the suggested plain-English rules; APPLY / MODIFY / IGNORE.
+7. **Risk Doctor** — ask the `?`-panel for an evidence-based diagnosis (it cites the reward decomposition).
+8. **Review the IRAC logs** — confirm the change won't break a locked invariant (see §5).
+9. **Approve** — *you* decide the one reward/config edit to make.
+10. **Retrain** — apply it in `Quantra_Train.ipynb` (the only place the policy actually learns).
+11. **Validate** — re-run and check pass-rate / drawdown.
+12. **Recheck** — reopen fresh telemetry in the Barbershop and repeat.
+
+**Mnemonic:** `Mirror → Diagnose → Approve → Retrain → Recheck`.
+
+> Watching it think (optional): the **JARVIS HUD** (§4) animates the whole pipeline. Double-click
+> `jarvis_hud.html` (pill shows `SIM` = demo data); to stream a real run, `pip install websockets`
+> then `python -m barbershop.ws_broadcaster --demo` and refresh (pill flips to `LIVE`). It is
+> **read-only** too.
+
+---
+
 ## 1. Data-source modes — demo vs real
 
 The dashboard auto-detects its source (shown top-left as `Barbershop data source:`):
@@ -136,3 +174,11 @@ single in-app reference (screens, navigation, Risk Doctor limits, data modes, th
 HUD, the compatibility guardrail). **R:** operator brief (Feature 2 help screen) + the show-the-work
 rule. **A:** wrote this guide; `dashboard.py` renders it on Screen 0 / the `[?]` button. **C:** the
 operator always has the full workflow at hand, so the diagnose-and-shape loop stays fast and correct.*
+
+*Update log (IRAC) — [2026-06-19] Docs-sync: added **## The Haircut Procedure**. **I:** the operator's
+mental model (mirror → scissors → haircut) and the explicit 12-step Mirror→Diagnose→Approve→Retrain→
+Recheck flow + JARVIS usage weren't stated in one prominent place; the Perplexity Space + `PROJECT_GUIDE`
+now reference it. **R:** operator docs-rewrite brief + the standing docs-track-code rule (`PROJECT_GUIDE`
+§1). **A:** inserted the Haircut Procedure section (what it is / is NOT / the analogy / the systematic
+flow / the mnemonic / how to watch it on JARVIS). **C:** the read-only nature and the approve→retrain
+boundary are now unmistakable, so no one mistakes the mirror for the scissors.*
