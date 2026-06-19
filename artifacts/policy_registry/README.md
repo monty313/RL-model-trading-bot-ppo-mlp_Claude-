@@ -9,8 +9,8 @@
 > configuration (`training_phase`, `training_wheels`, the challenge numbers) produced it, what
 > data it saw, and how well it actually passed (+2.5%/day without breaching the −4% trailing wall).
 
-This README is the only file in `artifacts/` that is committed to git. The actual
-registry contents (`manifest.json`, `performance.json`, `compatibility.sig`, and policy
+This README and `LEADERBOARD.md` are the only files in `artifacts/` committed to git. The
+actual registry contents (`manifest.json`, `performance.json`, `compatibility.sig`, and policy
 weights) are run-specific and stay **git-ignored** — they live on disk / Google Drive,
 not in the repo.
 
