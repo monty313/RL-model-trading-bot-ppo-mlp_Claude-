@@ -58,6 +58,12 @@ class ChallengeState:
     breached: bool = field(init=False, default=False)
     locked_out: bool = field(init=False, default=False)
     target_hit: bool = field(init=False, default=False)
+    # C14 [2026-06-19]: back-to-back failed-day streak. Finalized once per calendar-day boundary in
+    # reset_day() (the day-END event the env calls) — never intraday. Surfaced onto the Policy Card
+    # manifest (learning_system/policy_registry/registry.py) so the operator can see consistency at a
+    # glance. COUPLING -> registry.PolicyCard.manifest()/build_card() read this value (live-run
+    # population wired in a later step).
+    consecutive_loss_days: int = field(init=False, default=0)
 
     def __post_init__(self):
         self.balance = self.account_size
@@ -164,6 +170,15 @@ class ChallengeState:
         locks out the rest of THAT day instead of ending the episode (multi-day episode = one
         continuous account); midnight must lift the lockout so the bot trades the fresh day. The
         account balance/equity is NOT reset — losses/gains carry forward across days."""
+        # C14 [2026-06-19]: finalize the back-to-back failed-day streak for the day that just ENDED,
+        # BEFORE re-anchoring day_start_equity (so day_passed still reads the finished day's target).
+        # day_passed (equity >= daily_target_equity) is the SAME end-of-day pass/fail the failed-day
+        # penalty grades, so the two never disagree. This runs only here (the midnight boundary) — never
+        # intraday, so drawdown noise can't bump it.
+        if self.day_passed:
+            self.consecutive_loss_days = 0
+        else:
+            self.consecutive_loss_days += 1
         self.day_start_equity = self.equity
         self.peak_equity = self.equity
         self.target_hit = False
@@ -274,3 +289,15 @@ class ChallengeState:
 #   C: Each day of a many-day account is graded against what it actually started with, a breached
 #      day reopens fresh at midnight, and the env has the exact shortfall it needs to punish missed
 #      days — so the bot learns to pass MOST days, which is what repeatedly passing FTMO demands.
+# [2026-06-19] C14 — consecutive_loss_days streak counter (audit Fix 4).
+#   I: The Policy Card had no "back-to-back loss count" — nothing tracked how many days IN A ROW a
+#      policy missed its target, the clearest consistency-failure signal for a repeated-FTMO bot.
+#   R: Operator audit Fix 4 (keep scope minimal): add a counter HERE, increment only when a day fully
+#      ENDS failed, reset to 0 when a day ends passing, never on intraday drawdown, never mid-day.
+#   A: Added the consecutive_loss_days field (default 0) and finalize it at the TOP of reset_day()
+#      (the once-per-day midnight boundary the env calls) BEFORE re-anchoring day_start_equity, keyed
+#      off day_passed (the same end-of-day pass/fail threshold the failed-day penalty grades). No other
+#      logic touched. COUPLING -> learning_system/policy_registry/registry.py surfaces it on the manifest;
+#      live-run population (Barbershop loop) is wired in a later step.
+#   C: The operator can now see a policy's worst back-to-back miss streak on its card — the at-a-glance
+#      consistency check that separates a policy that passes MOST days from one that strings losses.

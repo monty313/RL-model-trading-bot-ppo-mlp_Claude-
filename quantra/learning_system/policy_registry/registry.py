@@ -230,6 +230,10 @@ class PolicyCard:
     overrides_applied: Dict[str, object]
     compatibility_signature: str
     n_passes_completed: int = 0
+    # C14 [2026-06-19]: back-to-back failed-day streak (audit Fix 4). The runtime SOURCE is
+    # ftmo_passing/challenge_state.py ChallengeState.consecutive_loss_days; this is the value surfaced
+    # onto the manifest (set by the caller — live-run population wired in a later step). 0 = none yet.
+    consecutive_loss_days: int = 0
     pass_history: List[PassRecord] = field(default_factory=list)
 
     # ---- mutation -----------------------------------------------------------------
@@ -258,6 +262,7 @@ class PolicyCard:
                 "data_window": self.data_window, "n_passes_completed": self.n_passes_completed,
                 "state_dim": self.state_dim, "training_wheels": self.training_wheels,
                 "training_phase": self.training_phase, "overrides_applied": self.overrides_applied,
+                "consecutive_loss_days": self.consecutive_loss_days,   # C14 back-to-back loss streak
                 "compatibility_signature": self.compatibility_signature}
 
     def performance(self) -> Dict[str, object]:
@@ -289,7 +294,8 @@ class PolicyCard:
                    training_wheels=bool(man["training_wheels"]), training_phase=man["training_phase"],
                    overrides_applied=man.get("overrides_applied", {}),
                    compatibility_signature=man["compatibility_signature"],
-                   n_passes_completed=int(man.get("n_passes_completed", 0)))
+                   n_passes_completed=int(man.get("n_passes_completed", 0)),
+                   consecutive_loss_days=int(man.get("consecutive_loss_days", 0)))   # C14
         card.pass_history = [PassRecord.from_dict(r) for r in perf.get("pass_history", [])]
         return card
 
@@ -297,7 +303,8 @@ class PolicyCard:
 def build_card(*, overrides: Dict[str, object], state_dim: int, data_window: Dict[str, object],
                base_policy: Optional[str] = None, baseline: Optional[Dict[str, object]] = None,
                reward_layer_keys: Optional[Sequence[str]] = None,
-               law_fingerprint: Optional[str] = None, created: Optional[str] = None) -> PolicyCard:
+               law_fingerprint: Optional[str] = None, created: Optional[str] = None,
+               consecutive_loss_days: int = 0) -> PolicyCard:
     """One call the Barbershop notebook (Cell 6) / trainer makes to mint a policy's identity: auto-name
     from the OVERRIDES diff, compute the compatibility signature, and fill the manifest. Reward-layer
     keys + law fingerprint default to the live project values (resume-safe across C16/C17)."""
@@ -314,6 +321,7 @@ def build_card(*, overrides: Dict[str, object], state_dim: int, data_window: Dic
         created=created or datetime.now().replace(microsecond=0).isoformat(),
         base_policy=base_policy, data_window=data_window, state_dim=int(state_dim),
         training_wheels=wheels, training_phase=phase, overrides_applied=dict(overrides),
+        consecutive_loss_days=int(consecutive_loss_days),   # C14 (audit Fix 4); caller sets the live value
         compatibility_signature=sig)
 
 
@@ -421,3 +429,16 @@ def _neg_iso(created: str) -> str:
 #   C: Policy names stay readable across every knob, and any future editor who touches the dim/shaping
 #      sees exactly which other files move with it and that old policies will need a fresh start — so we
 #      never silently lose the ability to resume a past policy or to keep training.
+# [2026-06-19] C14 — consecutive_loss_days surfaced onto the Policy Card manifest (audit Fix 4).
+#   I: The card had no "back-to-back loss count" — the clearest consistency-failure signal — so the
+#      audit's Section-3 risk trio (daily DD limit, dist to -10% wall, back-to-back losses) was incomplete.
+#   R: Operator audit Fix 4: surface the streak on the MANIFEST (not performance.json for now), minimal
+#      scope; live-run population deferred to Fix 5.
+#   A: Added PolicyCard.consecutive_loss_days (default 0), emitted in manifest(), restored in load(), and
+#      an explicit build_card(consecutive_loss_days=0) param so the caller sets it (no silent stub). The
+#      runtime SOURCE is ChallengeState.consecutive_loss_days (ftmo_passing/challenge_state.py, finalized
+#      in reset_day()); wiring the live value from a Barbershop run lands in Fix 5. daily_risk_pct + the
+#      -10% permanent_dd_pct already live on the manifest via overrides_applied, so this completes the trio.
+#   C: A policy's worst back-to-back miss streak is now part of its saved identity, so the operator can
+#      compare consistency across policies at a glance — the metric that separates a repeatable FTMO
+#      passer from a streaky one.

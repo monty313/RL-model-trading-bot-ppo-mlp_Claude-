@@ -1892,6 +1892,41 @@ def test_reset_day_clears_breach_and_lockout_account_carries():
     assert abs(cs.day_start_equity - 9_550.0) < 1e-9           # the -450 carried forward
 
 
+def test_consecutive_loss_days_counts_failed_days():
+    """C14 (audit Fix 4): the back-to-back failed-day streak increments only when a day ENDS below
+    target, resets to 0 when a day ends at/above target, and never moves on intraday drawdown."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    assert cs.consecutive_loss_days == 0
+    # Day 1 ends flat (equity 10_000 < the +2.5% target 10_250) -> a failed day.
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 1
+    # Intraday drawdown must NOT move the counter (only reset_day, the day-END event, can).
+    cs.mark_to_market(-300.0)                                  # equity 9_700, still mid-day
+    assert cs.consecutive_loss_days == 1
+    # Day 2 also ends below its target -> the streak grows to 2.
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 2
+    # Day 3 ends ABOVE its target -> the streak resets to 0.
+    cs.mark_to_market(+600.0)                                  # equity 10_600 >= day-3 target (~9_942)
+    assert cs.day_passed
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 0
+
+
+def test_policy_card_manifest_carries_consecutive_loss_days(tmp_path):
+    """C14 (audit Fix 4): the back-to-back loss streak is written to + read back from the Policy Card
+    manifest (build_card param -> manifest() -> save()/load() round-trip)."""
+    from quantra.learning_system.policy_registry import PolicyCard, build_card  # noqa: E402
+
+    card = build_card(overrides={}, state_dim=STATE_DIM,
+                      data_window={"start": "2023-01-01", "n_days": 5}, consecutive_loss_days=3)
+    assert card.consecutive_loss_days == 3
+    assert card.manifest()["consecutive_loss_days"] == 3
+    card.save(root=tmp_path)
+    reloaded = PolicyCard.load(card.policy_name, root=tmp_path)
+    assert reloaded.consecutive_loss_days == 3
+
+
 def test_no_new_opens_while_day_locked_out():
     """C10: while locked out, direction_mask forbids new opens and the env coerces a forbidden
     OPEN to HOLD (CLOSE/HOLD stay legal)."""
