@@ -116,14 +116,22 @@ class _DayAccum:
 
 
 def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days: int,
-             *, deterministic: bool = True, max_steps: Optional[int] = None) -> List[dict]:
+             *, deterministic: bool = True, max_steps: Optional[int] = None,
+             return_account: bool = False):
     """Run ONE Barbershop pass = N_DAYS on one continuous account; return a per-day scoreboard list
     whose dict schema matches the loop's print_pass_table/summarize_pass + registry PassRecord:
     {"day","passed","pnl_pct","dd_pct","breached","trades","gate_block_rate"}.
 
     `agent` is a PPOAgent (untrained until M8 wires training; the metrics are REAL either way — they
     are what THIS policy actually did on the env, no placeholders). `deterministic` uses the live
-    argmax policy (the Barbershop diagnoses a fixed policy)."""
+    argmax policy (the Barbershop diagnoses a fixed policy).
+
+    return_account [C14, 2026-06-19]: default False keeps the historical contract (returns `rows`
+    only — every existing caller/test is unaffected). When True, returns `(rows, account)` where
+    `account` is the CANONICAL end-of-run ChallengeState (the env is otherwise discarded here). The
+    Barbershop notebook (Cell 6) reads `account.consecutive_loss_days` from it for the Policy Card —
+    the live current streak, NOT a value recomputed from the day flags. COUPLING -> ftmo_passing/
+    challenge_state.py (ChallengeState.consecutive_loss_days) + policy_registry build_card()."""
     env = build_env(data, overrides, n_days)
     obs = env.reset()
     ov = overrides or {}
@@ -157,6 +165,8 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
     # finalize a trailing in-progress day (episode ended mid-day: blown account / end-of-data)
     if day.steps > 0 and len(rows) < n_days:
         rows.append(day.finalize(len(rows) + 1, env.account.equity, target_pct))
+    if return_account:                      # C14: hand back the canonical end-of-run ChallengeState
+        return rows, env.account            # (env is otherwise discarded) for the Policy Card streak
     return rows
 
 
@@ -181,3 +191,14 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
 #      (P&L %, worst drawdown, breach, trades, gate-block rate). Rows match PassRecord's schema.
 #   C: The Leaderboard now ranks policies on what they ACTUALLY did on the env — so the operator can
 #      trust which configuration passes best and resume/promote it toward a consistent FTMO pass.
+# [2026-06-19] C14/Fix 5 — run_pass can return the canonical end-of-run account (opt-in).
+#   I: run_pass() built the env internally and discarded it, so the notebook could not reach the
+#      canonical ChallengeState.consecutive_loss_days (Fix 4's runtime counter) to put on the Policy Card.
+#   R: Operator audit Fix 5 (approved plan): expose the account WITHOUT breaking the existing return
+#      contract; the card's consecutive_loss_days MUST be the live end-of-run value, not a recompute.
+#   A: Added return_account=False (default unchanged -> rows only; all existing callers/tests intact).
+#      When True, run_pass returns (rows, env.account) so the Barbershop loop reads
+#      account.consecutive_loss_days and passes it to build_card(consecutive_loss_days=...). No other
+#      behaviour changed. COUPLING -> ftmo_passing/challenge_state.py + policy_registry/registry.py.
+#   C: The Policy Card now carries the policy's TRUE back-to-back loss streak from the run that produced
+#      it — an honest, at-a-glance consistency signal, with zero disruption to existing eval paths.

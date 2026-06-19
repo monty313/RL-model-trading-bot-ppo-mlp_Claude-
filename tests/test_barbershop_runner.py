@@ -77,3 +77,38 @@ def test_build_env_applies_overrides_and_phase():
         assert cfg.TRAINING_PHASE == cfg.PHASE_CONSTRAINED     # global phase override applied
     finally:
         cfg.TRAINING_PHASE = orig_phase                        # don't leak global state to other tests
+
+
+def test_run_pass_return_account_returns_canonical_challenge_state():
+    """C14/Fix 5: return_account=True hands back the CANONICAL end-of-run ChallengeState (so the
+    Barbershop card reads the LIVE consecutive_loss_days, not a value recomputed from the day flags),
+    while the DEFAULT call is unchanged (a plain list of rows for every existing caller/test)."""
+    from quantra.ftmo_passing import ChallengeState
+    data = _multiday_data(days=3, bpd=30)                      # tiny moves -> the policy can't hit +2.5%
+
+    rows_only = run_pass(PPOAgent(), data, overrides=None, n_days=3)   # default contract
+    assert isinstance(rows_only, list) and len(rows_only) == 3
+
+    rows, account = run_pass(PPOAgent(), data, overrides=None, n_days=3, return_account=True)
+    assert isinstance(rows, list) and len(rows) == 3
+    assert isinstance(account, ChallengeState)                 # the real runtime object, not a copy
+    assert isinstance(account.consecutive_loss_days, int)
+    # every finalized day fails (can't reach +2.5% on this data), so the live streak is real (>=1) and
+    # never exceeds the days that hit a midnight boundary.
+    assert 1 <= account.consecutive_loss_days <= 3
+
+
+def test_checkpoint_payload_roundtrip_restores_weights():
+    """C14/Fix 5 (A2 notebook-side save/load): the {state_dict, state_dim} payload the Barbershop loop
+    writes via torch.save reloads into a fresh PPOAgent EXACTLY, and the state_dim guard is real.
+    (No PPOAgent.save/load is added — agent.py stays untouched; this proves the notebook pattern.)"""
+    import torch
+    from quantra.market_pipeline.feature_builder import STATE_DIM
+
+    a = PPOAgent()
+    payload = {"state_dict": a.net.state_dict(), "state_dim": STATE_DIM}   # exactly what the notebook saves
+    b = PPOAgent()                                                          # different random init
+    assert any(not torch.equal(pa, pb) for pa, pb in zip(a.net.parameters(), b.net.parameters()))
+    assert int(payload["state_dim"]) == STATE_DIM                          # the guard Cell 4 checks before load
+    b.net.load_state_dict(payload["state_dict"])                           # the load Cell 4 performs
+    assert all(torch.equal(pa, pb) for pa, pb in zip(a.net.parameters(), b.net.parameters()))
