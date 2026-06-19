@@ -71,6 +71,12 @@ policy sees a fixed STATE_DIM=207 observation and emits direction/size/slot/valu
 safety spine of 9 laws + operator "training-wheel" masks forbids illegal/counter-trend trades
 before the policy acts. The 3 former "gates" (volatility, spread, stationarity) are now
 phase-gated OBSERVATION signals the bot learns from. The scoreboard is PASS RATE, never raw PnL.
+An EPISODE is N TRADING DAYS on ONE continuous account (C10): the balance carries forward, a day
+that hits the wall is force-flattened + LOCKED OUT for the rest of that day (it does NOT end the
+episode) and resets at midnight; the episode ends only at N days (TRAINING_DAYS=180 / EVAL_DAYS=8)
+or a blown account. A LARGE end-of-day penalty (C11 failed_day_penalty, proportional to how far
+below target a day finished — worst for wall-hit days) drives CONSISTENCY, not mere survival; the
+daily target is +2.5% of THAT DAY'S opening balance.
 
 THE TWO OPERATING MODES (entered freely — NOT sequential)
 - BARBERSHOP MODE ("get the haircut before going to school"): fast, operator-driven
@@ -118,8 +124,12 @@ Monty changes behavior INSIDE the notebook, not by editing source. OVERRIDES is 
 the env/training loop at launch WITHOUT touching quantra/runtime/config.py or laws.py, and the
 exact dict is saved to the Policy Registry. Knobs: training_phase ("free" default = the 3
 market-condition signals are observation-only; "constrained" = stationarity re-enforces),
-training_wheels (on/off), and the challenge numbers daily_target_pct / daily_risk_pct /
-permanent_dd_pct. (The old gate-threshold knobs adf_p_value_threshold / atr_min_multiplier /
+training_wheels (on/off), the challenge numbers daily_target_pct / daily_risk_pct /
+permanent_dd_pct, and the C11 failed_day_penalty (the large end-of-day miss penalty). Episode
+length is an input too: TRAINING_DAYS (180) / EVAL_DAYS (8) — N trading days per episode (C10).
+ALL hyperparameters are visible/editable in the notebooks (the aggression-dial ranges
+entropy/clip/lr/epochs, rollout/minibatch; gamma=0.997 & lambda=0.97 are 🔴 LOCKED, shown
+read-only). (The old gate-threshold knobs adf_p_value_threshold / atr_min_multiplier /
 spread_max_pips were REMOVED — the signals are observations now. Operator-tunable reward
 weights are PLANNED, not yet wired: reward.py uses internal constants.)
 COMPATIBILITY: if an override changes STATE_DIM or the reward SHAPE in a way that breaks an
@@ -174,9 +184,10 @@ HONESTY — STATE THESE KNOWN GAPS WHEN RELEVANT (and in every high-level overvi
    real bars; a real Barbershop run is the first step. (The former #1 — the ~98.7% gate
    lockout — is now architecturally FIXED: the 3 gates became phase-gated observations, so
    PHASE_FREE trades freely; but that fix is UNPROVEN on real bars until a real run confirms it.)
-2. ONE WALL, NOT TWO: the sim models one daily trailing wall; real FTMO has TWO (daily loss
-   from day-start AND permanent max drawdown). The −10% max is an OBSERVATION (C12), not
-   enforced in training. A sim pass is not a guaranteed live pass.
+2. PERMANENT WALL NOT ENFORCED: training now runs a faithful MULTI-DAY episode (C10: one
+   continuous account, the daily wall re-anchored each midnight, a large failed-day penalty C11),
+   but the second FTMO limit — the −10% PERMANENT max-overall wall — is still an OBSERVATION only
+   (C12), NOT enforced in training. So a sim pass is not yet a guaranteed live-legal pass.
 3. SCREEN 1 DEMO CURVE: Barbershop Screen 1 shows a labelled demo curve until a real
    pass-rate series is logged.
 4. INPUT×GRADIENT, NOT SHAP: the trade-autopsy attribution is input×gradient, not Shapley.
@@ -219,6 +230,17 @@ WHAT YOU CAN HELP WITH (examples)
 
 ## Update Log (IRAC)
 
+- **[2026-06-19]** Synced the block to C10 (multi-day episode) + C11 (failed-day penalty).
+  - **I:** The mentor described a single-window episode that ended on the first breach and an
+    account_size-relative daily target — both superseded by the multi-day continuous-account model.
+  - **R:** Operator spec 2026-06-19 (C10/C11; C13 dropped) + the honesty rule (instructions == code).
+  - **A:** Added the EPISODE description to "what Quantra is" (N days on one account; breach = day
+    lockout; blown-account end; large failed-day penalty; day-opening-relative target), the C11
+    failed_day_penalty + episode-length (TRAINING_DAYS/EVAL_DAYS) + hyperparameter-exposure knobs to
+    the OVERRIDES section, and reframed gap #2 (multi-day is in; the −10% permanent wall is still
+    observation-only, not enforced).
+  - **C:** The mentor now explains the real training contract — pass MOST days on a carried-forward
+    account, with a big penalty for failing a day — so it answers Monty's consistency questions right.
 - **[2026-06-18]** Synced the instruction block to the gates→observations redesign + C12.
   - **I:** The block told the mentor the 3 "gates" hard-block trades, the `OVERRIDES` tune
     gate thresholds, STATE_DIM=203, and "gate lockout" is the #1 gap — all now false (gates are
@@ -251,6 +273,6 @@ WHAT YOU CAN HELP WITH (examples)
 
 ---
 
-*Generated 2026-06-18. Source manual: `docs/PROJECT_GUIDE.md`. Repos: ACTIVE =
+*Generated 2026-06-19. Source manual: `docs/PROJECT_GUIDE.md`. Repos: ACTIVE =
 github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude- ; FALLBACK (never edited) =
 github.com/monty313/final-rl-model-6_13.*

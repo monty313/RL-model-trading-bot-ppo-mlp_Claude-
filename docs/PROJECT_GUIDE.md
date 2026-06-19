@@ -4,7 +4,7 @@
 > project, written so an assistant (e.g. a Perplexity Space) can answer *"how do I use
 > this project?"* — covering the Barbershop diagnostics dashboard, training, backtesting,
 > live trading, and every feature, with exact file names, locations, and commands.
-> Last updated 2026-06-18.
+> Last updated 2026-06-19.
 
 ---
 
@@ -29,6 +29,14 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
     `PHASE_CONSTRAINED` only the stationarity signal re-enforces. This turns the old
     "stationary AND non-stationary" goal from a hard gate into a *learned* skill, and fixes the
     ~98.7% open-lockout that stopped the policy ever training (2026-06-18 redesign).
+- **Episode (C10/C11):** training runs as **N trading days on ONE continuous account** (default
+  `TRAINING_DAYS=180`; `EVAL_DAYS=8` for a Barbershop window). The balance **carries forward** day
+  to day; a day that hits the trailing wall is force-flattened and **locked out for the rest of that
+  day** (it does NOT end the episode) and resets at midnight; the episode ends only at N days or a
+  **blown account** (equity ≤ 0). A **large end-of-day penalty** (`failed_day_penalty`, proportional
+  to how far a day finished below its target — worst for wall-hit days) makes **consistency** the
+  objective, not mere survival. The daily target is **day-opening-relative** (+2.5% of that day's
+  opening balance).
 - **Barbershop:** a separate, **read-only** Dash dashboard (+ an LLM "Risk Doctor") used
   **after** training to understand *why* the bot did what it did and to write better
   reward/penalty rules.
@@ -50,10 +58,12 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 model yet** — the policy is synthetic-trained and hasn't run on real bars; this is the **#1
 active item** now that the gate-lockout blocker is fixed (the 3 gates became phase-gated
 observations, so `PHASE_FREE` trades freely — but that fix is **unproven on real EURUSD** until
-a real Barbershop run confirms it); (2) the sim models ONE daily trailing wall, real FTMO has
-TWO (the −10% max is an *observation* via C12, not enforced in training); (3) Barbershop
-Screen 1 is a labelled demo curve until a real pass-rate series is logged; (4) trade-autopsy
-attribution is input×gradient, not true SHAP.
+a real Barbershop run confirms it); (2) training now runs a **multi-day** episode (one continuous
+account; the daily wall re-anchors at midnight; a large failed-day penalty for missing target —
+C10/C11), but the −10% **permanent** max-overall wall is still an *observation* only (C12), not
+enforced — so a sim pass is not yet a guaranteed live-legal pass; (3) Barbershop Screen 1 is a
+labelled demo curve until a real pass-rate series is logged; (4) trade-autopsy attribution is
+input×gradient, not true SHAP.
 
 ---
 
@@ -111,7 +121,7 @@ final rl model 6_13/
 │   │   └── validation/
 │   │       ├── walk_forward.py              # 7-seed walk-forward harness
 │   │       └── scoreboard.py                # pass-rate scoreboard
-│   ├── env/trading_env.py          # the RL env (sequential multi-symbol, PnL, breach, masks)
+│   ├── env/trading_env.py          # the RL env (multi-day episode, one account, breach=day-lockout, masks)
 │   ├── learning_system/            # the PPO trainer + reward
 │   │   ├── ppo_agent/
 │   │   │   ├── agent.py                     # ActorCritic (3×256) + PPOAgent (act / evaluate)
@@ -540,10 +550,12 @@ phase-gated via `TRAINING_PHASE` — see §4.12.)*
    the 3 gates became phase-gated market-condition **observations** (2026-06-18), so in
    `PHASE_FREE` the policy trades freely. But that fix is **unproven on real bars** until a real
    run confirms the policy actually trades sensibly and passes — so it folds into this gap.)*
-2. **One wall, not two.** The sim models a single daily-re-anchored trailing wall; real FTMO
-   has **TWO** limits (max daily loss from day-start AND a permanent max-overall drawdown). The
-   −10% permanent wall is an **observation** (the C12 `dist_to_perm_dd` scalar), **not enforced**
-   in training. A sim pass does **not** yet guarantee a live-legal pass.
+2. **Permanent wall not enforced (one enforced wall, not two).** Training now runs a faithful
+   **multi-day** episode (C10): one continuous account, the daily trailing wall **re-anchored each
+   midnight**, a day's breach locks out that day (not the episode), and a large **failed-day
+   penalty** (C11) punishes missing a day's target. But the second FTMO limit — the **−10% permanent
+   max-overall** wall — is still an **observation only** (the C12 `dist_to_perm_dd` scalar), **not
+   enforced** in training. So a sim pass does **not** yet guarantee a live-legal pass.
 3. **Screen 1 demo curve.** Barbershop **Screen 1** shows a labelled **demo curve** until the
    trainer logs a real pass-rate series.
 4. **input×gradient, not SHAP.** The trade-autopsy attribution (Screen 4) is
@@ -582,8 +594,16 @@ phase-gated via `TRAINING_PHASE` — see §4.12.)*
   signals are observation-only) vs `PHASE_CONSTRAINED` (the stationarity signal re-enforces).
 - **`distance_to_permanent_dd`:** the C12 account-block observation — runway (1.0 → 0.0) to the
   −10% permanent max-overall-loss wall (observation only, not enforced in training).
-- **The wall / breach:** the trailing drawdown limit; touching it = breach = challenge failed.
-- **Target:** the daily profit goal (+2.5%).
+- **Episode / `episode_days` (C10):** an episode is N trading days on ONE continuous account
+  (`TRAINING_DAYS=180` / `EVAL_DAYS=8`); the balance carries forward, a breach locks out the day
+  (not the episode), and it ends at N days or a blown account (equity ≤ `ACCOUNT_FLOOR_EQUITY`).
+- **`failed_day_penalty` (C11):** the large end-of-day reward penalty for missing a day's target,
+  `-failed_day_penalty × day_shortfall_fraction` (0 at target, 1.0 if flat, >1 for wall-hit days) —
+  applied at the midnight boundary to drive consistency.
+- **Day lockout:** after a daily breach (or an OFF-mode stop-for-day), new opens are masked for the
+  rest of that day; `reset_day()` lifts it at midnight.
+- **The wall / breach:** the trailing drawdown limit; touching it = breach = day locked out (C10).
+- **Target:** the daily profit goal (+2.5% of that day's opening balance).
 - **Barbershop:** the read-only diagnostics dashboard. **Risk Doctor:** the LLM that
   explains the telemetry, grounded in `docs/MLP_INTERPRETABILITY_LAYER.md`.
 - **Telemetry:** the per-decision JSONL log (`artifacts/telemetry/<run>.jsonl`) the
@@ -635,3 +655,15 @@ For cross-file couplings before any refactor see `COUPLINGS.md`.*
   - **C:** The guide and Perplexity mentor now tell the true story — the bot LEARNS market
     conditions in PHASE_FREE instead of being locked out — so operators reason about the real
     system, and the honesty contract (docs == code) is restored.
+
+- **[2026-06-19]** Synced the guide to C10 (multi-day episode) + C11 (failed-day penalty).
+  - **I:** The guide described a single-window episode that ended on the first breach, and a daily
+    target fixed to account_size — both now superseded by the multi-day continuous-account model.
+  - **R:** Operator spec 2026-06-19 (C10/C11; C13 dropped) + the honesty rule (docs == code).
+  - **A:** Added the §1 Episode bullet (N days on one account; breach = day lockout; blown-account
+    end; large failed-day penalty; day-opening-relative target), reframed §7 gap #2 (multi-day is
+    in; the −10% permanent wall is still observation-only, not enforced), updated the env one-liner,
+    and added glossary entries (episode/episode_days, failed_day_penalty, day lockout).
+  - **C:** The guide now describes the real training contract — a faithful many-day account where a
+    bad day costs carried-forward equity AND a big reward hit — so operators and the Perplexity
+    mentor reason about consistency-passing, which is the actual mission.
