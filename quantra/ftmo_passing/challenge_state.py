@@ -103,11 +103,25 @@ class ChallengeState:
 
     @property
     def daily_target_equity(self) -> float:
-        return self.day_start_equity + (self.challenge.daily_target_pct / 100.0) * self.account_size
+        # CHANGED: 2026-06-19 (C11) | base is THAT DAY'S OPENING balance (day_start_equity), not the
+        # fixed account_size. WHY: in the C10 multi-day compounding account each day must aim for the
+        # SAME daily_target_pct of what it actually started the day with (operator spec: "daily_target_pct
+        # of that day's opening balance"). On day 1 (day_start == account_size) this equals the old value.
+        # AFFECTS: target_hit (mark_to_market), should_autoflat, day_progress, day_shortfall_fraction.
+        return self.day_start_equity * (1.0 + self.challenge.daily_target_pct / 100.0)
 
     @property
     def day_pnl(self) -> float:
         return self.equity - self.day_start_equity
+
+    @property
+    def day_shortfall_fraction(self) -> float:
+        """C11 [2026-06-19]: how far BELOW the day's target the account is, as a fraction of the
+        day's target GAIN. 0.0 if the target is reached; 1.0 if the day ended flat; >1 if it LOST
+        money on the day. The env multiplies this by challenge.failed_day_penalty at the midnight
+        boundary, so a day that hit the wall (largest shortfall) is punished the hardest."""
+        gain_target = max(1e-9, (self.challenge.daily_target_pct / 100.0) * self.day_start_equity)
+        return max(0.0, (self.daily_target_equity - self.equity) / gain_target)
 
     # --- updates ---
     def mark_to_market(self, total_unrealized: float) -> None:
@@ -135,11 +149,18 @@ class ChallengeState:
         the trailing peak to current equity, clears target_hit, and returns to Phase A, so each
         new calendar day begins with its own 2.5% target and the wide Phase-A wall instead of
         being stuck in a post-day-1 Phase B [2026-06-15 fix: reset_day was dead code + left phase
-        in B]. COUPLING -> env/trading_env.py _advance_bar() calls this on a calendar-day change."""
+        in B]. COUPLING -> env/trading_env.py _advance_bar() calls this on a calendar-day change.
+
+        CHANGED: 2026-06-19 (C10) | also CLEARS breached + locked_out. WHY: a daily-wall breach now
+        locks out the rest of THAT day instead of ending the episode (multi-day episode = one
+        continuous account); midnight must lift the lockout so the bot trades the fresh day. The
+        account balance/equity is NOT reset — losses/gains carry forward across days."""
         self.day_start_equity = self.equity
         self.peak_equity = self.equity
         self.target_hit = False
         self.phase = "A"
+        self.breached = False     # C10: a daily breach is a DAY event, not an episode end
+        self.locked_out = False   # C10: lift the day-lockout so the fresh day can trade
 
     def account_block(self) -> np.ndarray:
         """The 8-scalar `account` observation block (schema order), normalized.
@@ -156,7 +177,7 @@ class ChallengeState:
         daily_buf = (self.equity - self.wall_equity) / self.account_size  # NOTE: same single wall
         #     in EVERY phase, so pre-breach this == trailing_buf (audit). A genuine separate daily-
         #     loss wall lands with the scale-invariant-obs rework (task #23); kept now for obs width.
-        day_progress = self.day_pnl / ((self.challenge.daily_target_pct / 100.0) * self.account_size)
+        day_progress = self.day_pnl / max(1e-9, (self.challenge.daily_target_pct / 100.0) * self.day_start_equity)
         overall_progress = (self.equity - self.account_size) / self.account_size
         # CHANGED: 2026-06-18 | Added distance_to_permanent_dd (C12 — 8th account scalar, appended)
         # WHY: give the bot a "survival instinct" — how much runway remains before the PERMANENT
@@ -232,3 +253,15 @@ class ChallengeState:
 #      unchanged. config.permanent_dd_pct (default 10%) added; STATE_DIM 206->207; snapshot re-pinned.
 #   C: The policy can now SEE how much permanent runway it has left and learn a survival instinct,
 #      which is what keeps a streak of passes from ending in a single account-killing drawdown.
+# [2026-06-19] C10/C11 — multi-day account: day-relative target, reset clears breach, shortfall metric.
+#   I: A breach left the account flagged breached/locked_out forever (the env ended the episode);
+#      the daily target was a fixed % of account_size (not the day's opening balance); and there was
+#      no metric for "how badly did this day miss its target" to drive a consistency penalty.
+#   R: Operator spec 2026-06-19 (C10 multi-day episode on ONE continuous account; C11 proportional
+#      failed-day penalty anchored to "daily_target_pct of that day's opening balance").
+#   A: daily_target_equity is now day_start_equity*(1+target/100) (day-relative; day_progress too);
+#      added day_shortfall_fraction (0 at target, 1 if flat, >1 if the day lost money); reset_day now
+#      also clears breached + locked_out (a daily wall is a DAY event, balance carries forward).
+#   C: Each day of a many-day account is graded against what it actually started with, a breached
+#      day reopens fresh at midnight, and the env has the exact shortfall it needs to punish missed
+#      days — so the bot learns to pass MOST days, which is what repeatedly passing FTMO demands.

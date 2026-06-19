@@ -121,6 +121,7 @@ class TradingEnv:
         risk_cfg: Optional[cfg.RiskConfig] = None,
         cost_cfg: Optional[cfg.CostConfig] = None,
         training_wheels: Optional[bool] = None,
+        episode_days: Optional[int] = None,
     ):
         self.symbols: List[str] = list(data.keys())            # fixed processing order
         self.data = data
@@ -128,6 +129,12 @@ class TradingEnv:
         self.mask_mode = mask_mode
         self.required_laws = list(required_laws) if required_laws else None
         self.stationarity_mode = stationarity_mode
+        # C10 [operator 2026-06-19]: an episode spans this many TRADING DAYS on ONE continuous
+        # account (balance carries forward; a daily breach locks out the rest of that day and
+        # resets at midnight — it does NOT end the episode). None = run to end-of-data (the
+        # single-window behaviour synthetic tests rely on). The notebooks pass TRAINING_DAYS /
+        # EVAL_DAYS. The episode also ends if equity falls to cfg.ACCOUNT_FLOOR_EQUITY (blown).
+        self.episode_days = episode_days
         # Training wheels [operator 2026-06-15]: semi-permanent counter-trend OPEN blocks.
         # Default follows config.TRAINING_WHEELS so a global flip removes them everywhere.
         self.training_wheels = cfg.TRAINING_WHEELS if training_wheels is None else bool(training_wheels)
@@ -158,6 +165,8 @@ class TradingEnv:
         self.t = self.start
         self.cursor = 0  # which symbol acts next within the bar
         self.done = False
+        self._days_elapsed = 0            # C10: completed calendar-day boundaries this episode
+        self._pending_day_penalty = 0.0   # C11: failed-day penalty for the day that just ended
         self.account = ChallengeState(self.challenge_cfg.ftmo_account_size, self.challenge_cfg)
         self.slots = {s: [Slot() for _ in range(N_SLOTS)] for s in self.symbols}
         # PER-SYMBOL reward attribution [2026-06-15 fix]: each symbol's L0 reflects ONLY its
@@ -265,12 +274,21 @@ class TradingEnv:
         return np.array([row[_COL["tw_cci_block"]], row[_COL["tw_bb_block"]]], dtype=np.float32)
 
     def direction_mask(self, sym: str) -> np.ndarray:
-        return build_direction_mask(
+        m = build_direction_mask(
             self._law_states(sym), self._position(sym), self._n_open(sym),
             self.mask_mode, self.required_laws, self.stationarity_mode,
             training_wheels=self.training_wheels,
             wheel_states=self._wheel_states(sym) if self.training_wheels else None,
         )
+        # C10 [2026-06-19]: while the day is locked out (a daily-wall breach OR an OFF-mode
+        # stop-for-day at target), forbid NEW opens for the rest of that day — the account is flat
+        # and stays flat until midnight reset_day() lifts the lockout. CLOSE/HOLD stay legal. The
+        # agent SEES the block in its mask (no wasted probability); _apply_action coerces as a backstop.
+        if self.account is not None and self.account.locked_out:
+            m = m.copy()
+            m[OPEN_LONG] = -1e9
+            m[OPEN_SHORT] = -1e9
+        return m
 
     def _obs(self) -> np.ndarray:
         sym = self.symbols[self.cursor]
@@ -350,7 +368,9 @@ class TradingEnv:
         return info
 
     def _advance_bar(self) -> None:
-        """Move to t+1: age slots, update MFE/MAE, daily reset on a calendar-day change."""
+        """Move to t+1: age slots, update MFE/MAE, and on a calendar-day change grade the day that
+        just ended (C11 failed-day penalty), reset the day (C10), and end the episode once the
+        configured number of trading days is exhausted."""
         new_t = self.t + 1
         self.t = new_t
         # Daily reset (SOW §10.3) on a calendar-day change: re-anchor the day + fresh Phase-A
@@ -358,7 +378,15 @@ class TradingEnv:
         # fires]. Needs SymbolData.dates; synthetic data without dates keeps single-episode semantics.
         d = self.data[self.symbols[0]].dates
         if d is not None and d[self.t] != d[self.t - 1]:
+            # C11 [2026-06-19]: grade the FINISHED day BEFORE reset_day re-anchors. The penalty is
+            # stashed and added to this step's reward in step(). The account (balance/equity) carries
+            # forward across the boundary — only the day anchors + breach/lockout flags reset (C10).
+            self._pending_day_penalty += self._failed_day_penalty()
             self.account.reset_day()
+            self._days_elapsed += 1
+            # C10: an episode is episode_days TRADING DAYS; end it once they are exhausted.
+            if self.episode_days is not None and self._days_elapsed >= self.episode_days:
+                self.done = True
         for sym in self.symbols:
             c = self.data[sym].close[self.t]
             con = self._contract(sym)
@@ -385,15 +413,18 @@ class TradingEnv:
         return total
 
     def _on_target_autoflat(self) -> None:
-        """Day target hit -> flatten all. ftmo_mode ON: enter the tighter Phase-B wall and
-        keep trading (banks the pass, SOW §2.6). ftmo OFF + stop_for_day: bank the day and
-        STOP (done). OFF without stop_for_day never reaches here (should_autoflat stays False
-        so it runs PAST the target) [operator decision 2026-06-15: OFF keeps target as aim]."""
+        """Day target hit -> flatten all. ftmo_mode ON: enter the tighter Phase-B wall and keep
+        trading (banks the pass, SOW §2.6). ftmo OFF + stop_for_day: bank the day and LOCK OUT the
+        rest of that day (C10: the DAY stops, not the episode — it resumes next midnight). OFF
+        without stop_for_day never reaches here (should_autoflat stays False so it runs PAST the
+        target) [operator decision 2026-06-15: OFF keeps target as aim]."""
         self._force_flatten()
         if self.challenge_cfg.ftmo_mode:
             self.account.enter_phase_b()
         else:
-            self.done = True
+            # CHANGED: 2026-06-19 (C10) | was self.done = True. A stop-for-day now LOCKS OUT the day
+            # so the multi-day episode continues; reset_day() lifts the lockout at midnight.
+            self.account.locked_out = True
         self._mark_to_market()
 
     def _force_flatten(self) -> None:
@@ -409,6 +440,24 @@ class TradingEnv:
                     self.account.charge(cost)
                     self._sym_realized[sym] += pnl - cost     # per-symbol attribution
                     self.slots[sym][i] = Slot()
+
+    def _failed_day_penalty(self) -> float:
+        """C11 [2026-06-19]: the end-of-day penalty for the day that just finished. A LARGE,
+        PROPORTIONAL hit — reward = -failed_day_penalty * day_shortfall_fraction — applied at the
+        midnight boundary. 0 when the day's target was reached; grows the further below target the
+        day ended; worst for days that hit the wall (largest shortfall). Big by design so it is not
+        averaged away over a day's bars: it makes CONSISTENCY (pass most days), not mere survival,
+        the objective. COUPLING -> challenge_state.day_shortfall_fraction + config.failed_day_penalty."""
+        w = float(getattr(self.challenge_cfg, "failed_day_penalty", 0.0))
+        if w <= 0.0:
+            return 0.0
+        return -w * self.account.day_shortfall_fraction
+
+    def _account_blown(self) -> bool:
+        """C10: the episode ends if the continuous account is blown — equity at/below the floor
+        (cfg.ACCOUNT_FLOOR_EQUITY, default 0.0). A daily breach only LOCKS OUT the day; only a blown
+        account (or exhausting episode_days / end-of-data) ends the multi-day episode."""
+        return self.account.equity <= cfg.ACCOUNT_FLOOR_EQUITY
 
     def _reward(self, sym: str) -> float:
         """Build the RewardContext for the acting symbol and return the layered reward.
@@ -467,15 +516,18 @@ class TradingEnv:
         info = self._apply_action(sym, direction, raw_size, pointer)
         self._mark_to_market()  # equity reflects this symbol's cost/realize at bar t
 
-        # Hard wall: breach -> force-flatten all + lockout + end episode. Else the
-        # two-phase rule: at +2.5% day net, auto-flat ALL and switch to the Phase-B
-        # 1% trailing wall (the episode continues — this is a WIN checkpoint, SOW §2.6).
+        # C10 [2026-06-19]: a daily-wall breach FORCE-FLATTENS all + LOCKS OUT the rest of the day
+        # (account.locked_out was set in mark_to_market) but does NOT end the episode — the day
+        # resets at midnight and the account carries forward. Else the +target rule: ON enters
+        # Phase B (banks the pass, episode continues); OFF+stop_for_day locks out the day (both via
+        # _on_target_autoflat). Only a BLOWN account ends the episode here.
         if self.account.breached:
             self._force_flatten()
             self._mark_to_market()
-            self.done = True
         elif self.account.should_autoflat:
             self._on_target_autoflat()
+        if self._account_blown():
+            self.done = True
 
         # Advance the within-bar cursor; after the last symbol, advance the bar.
         if not self.done:
@@ -486,20 +538,26 @@ class TradingEnv:
                 if self.t + 1 >= self.T:
                     self.done = True
                 else:
-                    self._advance_bar()
+                    self._advance_bar()   # may end the episode at episode_days + stash a C11 penalty
                     self._mark_to_market()
                     if self.account.breached:
                         self._force_flatten()
                         self._mark_to_market()
-                        self.done = True
                     elif self.account.should_autoflat:
                         self._on_target_autoflat()
+                    if self._account_blown():
+                        self.done = True
 
-        reward = self._reward(sym)                                # M6 layered reward
+        # C11 [2026-06-19]: add the failed-day penalty for any day that ended on this step (stashed
+        # by _advance_bar at the midnight boundary) on top of the per-step layered reward.
+        day_penalty = self._pending_day_penalty
+        self._pending_day_penalty = 0.0
+        reward = self._reward(sym) + day_penalty
         self._prev_equity = self.account.equity
         info.update(symbol=sym, equity=self.account.equity,
                     remaining_buffer=self.account.remaining_buffer,
-                    breached=self.account.breached)
+                    breached=self.account.breached, locked_out=self.account.locked_out,
+                    day_penalty=day_penalty, days_elapsed=self._days_elapsed)
         obs = None if self.done else self._obs()
         return obs, reward, self.done, info
 
@@ -588,3 +646,19 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #      build_direction_mask. live_session does the same for parity.
 #   C: The policy can no longer open into the wheels' trend, so fewer breaches per window =>
 #      more banked days per seed => faster, cheaper convergence to a consistently-passing brain.
+# [2026-06-19] C10/C11 — multi-day episode (one continuous account) + the failed-day penalty.
+#   I: An episode was a single window that ENDED on the first breach; there was no notion of "N
+#      trading days on one account", a breached day couldn't reopen, and nothing punished failing
+#      a day's target — so the bot could learn to merely survive, not to pass consistently.
+#   R: Operator spec 2026-06-19 (C10: episode = N days on ONE continuous account; breach = lockout
+#      + reset_day, NOT done; ends at N days or a blown account. C11: large proportional EOD penalty
+#      for missing the daily target. C13 dropped.).
+#   A: TradingEnv(episode_days=) + _days_elapsed; breach now force-flattens + locks out the day
+#      (no done) — only _account_blown()/episode_days/end-of-data end the episode; direction_mask
+#      forbids opens while locked_out; _on_target_autoflat OFF+stop_for_day locks out the day (was
+#      done); _advance_bar grades the finished day via _failed_day_penalty() (∝ day_shortfall_fraction)
+#      BEFORE reset_day, counts days, and ends at episode_days; the penalty is added to that step's
+#      reward and surfaced in info (day_penalty/locked_out/days_elapsed).
+#   C: The bot now trains on a faithful many-day account where a bad day costs real carried-forward
+#      equity AND a big reward hit, and a breached day reopens fresh next morning — so it learns the
+#      CONSISTENCY (pass most days, survive the account) that repeatedly passing FTMO actually requires.

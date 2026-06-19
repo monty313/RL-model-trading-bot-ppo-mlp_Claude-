@@ -38,6 +38,27 @@ direction. They also serve the "train faster relative to passing" goal: blocking
 counter-trend opens removes the biggest source of avoidable breaches, so episodes aren't
 wasted and the policy converges toward passing in fewer updates. See `COUPLINGS.md` [C9].
 
+## 2c. DONE — gates→observations + C12 survival scalar (operator 2026-06-18) ✅
+The 3 "gates" (volatility / spread / stationarity) became **phase-gated OBSERVATION signals**:
+observation-only in `config.PHASE_FREE` (default — the bot LEARNS the conditions instead of being
+hard-blocked, fixing the ~98.7% open-lockout), with `PHASE_CONSTRAINED` re-enforcing only the
+stationarity signal as a late hardening step. Added 5m+4H volatility features and C12
+`distance_to_permanent_dd` (8th account scalar — the −10% max wall as an OBSERVATION, not enforced).
+STATE_DIM 203→207; snapshot re-pinned. Docs/Perplexity/registry/notebooks synced. Full suite green.
+
+## 2d. DONE — C10 multi-day episode + C11 failed-day penalty (operator 2026-06-19) ✅
+**C10:** an episode is now **N trading days on ONE continuous account** (`TradingEnv(episode_days=)`;
+`config.TRAINING_DAYS=180` / `EVAL_DAYS=8`). A daily-wall breach **force-flattens + locks out the
+rest of that day** (no `done=True`); `reset_day()` clears the breach/lockout at midnight and the
+account **carries forward**. The episode ends only at `episode_days`, a **blown account**
+(`equity ≤ ACCOUNT_FLOOR_EQUITY`), or end-of-data. OFF+`stop_for_day` now locks out the day too.
+**C11:** a **large proportional** end-of-day penalty (`ChallengeConfig.failed_day_penalty=5.0`,
+operator-tunable) = `-failed_day_penalty × day_shortfall_fraction` at the midnight boundary — 0 at
+target, 1.0 if the day ended flat, >1 (worst) for wall-hit days. The daily target is now
+**day-opening-relative** (`day_start_equity×(1+target%)`). **C13 dropped** (it depended on the
+ruled-out two-wall enforcement). All hyperparameters exposed as visible runtime inputs in the
+notebooks (gamma/lambda flagged 🔴 read-only). Section W added (8 tests); full suite green (126).
+
 ## 3. APPROVED — NEXT: MT5 demo launcher (now unblocked)
 Operator approved ("yes"). Add a **one-command** `live_bridge` launcher tying
 checkpoint + MT5 login + `LiveSession` + `MT5BarFeed` into a push-button **DEMO** run:

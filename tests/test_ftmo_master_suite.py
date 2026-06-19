@@ -756,21 +756,29 @@ def test_round_trip_costs_reduce_equity():
 
 
 # ---- hard wall ----
-def test_hard_wall_force_flattens_and_ends_episode():
-    # price crashes after entry -> equity hits the 4% wall -> breach + flatten + done
+def test_hard_wall_force_flattens_and_locks_out_day():
+    # C10: price crashes after entry -> equity hits the 4% wall -> breach FORCE-FLATTENS all +
+    # LOCKS OUT the rest of the day. The breach no longer ENDS the episode (without a calendar-day
+    # boundary the account just stays flat + locked until end-of-data).
     T = 12
     close = np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.10, T - 3)]).astype(float)
     data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
                                  np.full(T, 2e-5), valid_from=0)}
     env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
     env.step((OPEN_LONG, 1.0, 0))
+    breached_at = None
     done = False
-    for _ in range(T):
+    for i in range(T):
         if done:
             break
-        _, _, done, info = env.step((HOLD, 0.0, 0))
-    assert env.account.breached and done
-    assert env._n_open("EURUSD") == 0            # force-flattened
+        _, _, done, _info = env.step((HOLD, 0.0, 0))
+        if env.account.breached and breached_at is None:
+            breached_at = i
+            assert env.account.locked_out            # the DAY is locked out...
+            assert not done                          # ...but the breach did NOT end the episode (C10)
+            assert env._n_open("EURUSD") == 0        # force-flattened on breach
+    assert breached_at is not None                   # the wall was hit
+    assert env.account.breached                      # no day boundary here -> stays breached
 
 
 # ---- observation shape + law/mask visibility ----
@@ -1674,7 +1682,9 @@ def test_ftmo_off_has_target_and_stop_for_day_toggle():
     assert stop.target_hit is True and stop.should_autoflat is True  # bank + stop
 
 
-def test_env_off_stop_for_day_ends_at_target():
+def test_env_off_stop_for_day_locks_out_day_at_target():
+    # C10: OFF + stop_for_day banks the day at target and LOCKS OUT the rest of that day — it no
+    # longer ENDS the episode (the multi-day account continues; midnight reopens it).
     T = 40
     close = np.linspace(1.20, 1.26, T).astype(float)         # climbs -> a long hits the target
     data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
@@ -1684,10 +1694,12 @@ def test_env_off_stop_for_day_ends_at_target():
                      risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
     env.step((OPEN_LONG, 1.0, 0))
     for _ in range(T - 2):
-        if env.done:
+        if env.account.locked_out:
             break
         env.step((HOLD, 0.0, 0))
-    assert env.account.target_hit and env.done               # banked + stopped for the day
+    assert env.account.target_hit and env.account.locked_out  # banked + DAY locked out (not done)
+    assert env._n_open("EURUSD") == 0                          # auto-flatted at target
+    assert not env.done                                       # C10: the EPISODE is not ended
 
 
 import math  # noqa: E402  (used by Section T margin math)
@@ -1744,6 +1756,149 @@ def test_daily_reset_fires_on_calendar_day_change():
             break
         env.step((HOLD, 0.0, 0))
     assert env.account.phase == "A" and env.account.target_hit is False
+
+
+# =============================================================================
+# SECTION W — C10/C11 MULTI-DAY EPISODE + FAILED-DAY PENALTY (2026-06-19)
+# FTMO link: an episode is N TRADING DAYS on ONE continuous account. A daily-wall breach LOCKS OUT
+# the rest of that day (it does NOT end the episode); midnight resets the day and the account carries
+# forward. A LARGE proportional penalty for missing a day's target makes CONSISTENCY the objective,
+# not mere survival — which is what repeatedly passing FTMO requires.
+# =============================================================================
+def test_daily_target_is_relative_to_day_opening_balance():
+    """C11: the day's target is daily_target_pct of THAT DAY'S opening balance (compounding), not a
+    fixed % of account_size — so after a winning day the next day aims higher."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    assert abs(cs.daily_target_equity - 10_250.0) < 1e-9        # day 1: +2.5% of 10_000
+    cs.mark_to_market(600.0)                                    # +6% day
+    cs.reset_day()                                             # day 2 opens at 10_600 (carried forward)
+    assert abs(cs.day_start_equity - 10_600.0) < 1e-9
+    assert abs(cs.daily_target_equity - 10_600.0 * 1.025) < 1e-6   # +2.5% of the DAY'S opening
+
+
+def test_day_shortfall_fraction_zero_at_target_one_when_flat():
+    """C11 shortfall: 0 at/above target, 1.0 if the day ended flat, >1 if it lost money (the wall-hit
+    day is punished hardest because its shortfall is largest)."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    cs.mark_to_market(0.0)                                      # flat day (0% of +2.5%)
+    assert abs(cs.day_shortfall_fraction - 1.0) < 1e-9
+    cs.mark_to_market(250.0)                                    # exactly at target
+    assert cs.day_shortfall_fraction == 0.0
+    cs.mark_to_market(-400.0)                                   # -4% day (hit the wall)
+    assert cs.day_shortfall_fraction > 1.0
+
+
+def test_reset_day_clears_breach_and_lockout_account_carries():
+    """C10: reset_day lifts breached + locked_out and re-anchors the day to current equity (the
+    LOSS carries forward), so a breached day reopens fresh next morning."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    cs.mark_to_market(-450.0)                                   # -4.5% -> breach the 4% wall
+    assert cs.breached and cs.locked_out
+    cs.reset_day()
+    assert not cs.breached and not cs.locked_out               # fresh day
+    assert abs(cs.day_start_equity - 9_550.0) < 1e-9           # the -450 carried forward
+
+
+def test_no_new_opens_while_day_locked_out():
+    """C10: while locked out, direction_mask forbids new opens and the env coerces a forbidden
+    OPEN to HOLD (CLOSE/HOLD stay legal)."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    env.reset()
+    env.account.locked_out = True
+    m = env.direction_mask("EURUSD")
+    assert m[OPEN_LONG] <= -1e8 and m[OPEN_SHORT] <= -1e8
+    _, _, _, info = env.step((OPEN_LONG, 1.0, 0))
+    assert info["coerced"] is True and info["executed"] == "HOLD"
+
+
+def test_breach_locks_out_day_then_resets_next_day():
+    """C10 end-to-end: a day-1 crash breaches the wall -> locked out (NOT done); at the calendar-day
+    boundary the lockout lifts, the breach clears, and the day-1 loss carries into day 2."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    close = np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.08, 9),
+                            np.full(12, 1.08)]).astype(float)
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))
+    saw_lockout = saw_reset = False
+    day1_equity = None
+    for _ in range(T):
+        if env.done:
+            break
+        env.step((HOLD, 0.0, 0))
+        if env.account.locked_out and not saw_lockout:
+            saw_lockout = True
+            day1_equity = env.account.equity
+            assert not env.done                               # breach did NOT end the episode
+        if saw_lockout and not env.account.locked_out:        # crossed midnight
+            saw_reset = True
+            assert not env.account.breached                   # fresh day
+            break
+    assert saw_lockout and saw_reset
+    assert day1_equity < 10_000.0                             # the breach loss is real
+    assert env.account.day_start_equity < 10_000.0           # ...and carried into day 2
+
+
+def test_episode_ends_after_configured_days():
+    """C10: with episode_days=2 over 3 calendar days, the episode ends at the 2nd midnight boundary
+    (not at a breach, not at end-of-data)."""
+    T = 36
+    dates = np.array([0] * 12 + [1] * 12 + [2] * 12, dtype=np.int64)
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), np.full(T, 1.20), np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, episode_days=2)
+    steps = 0
+    while not env.done and steps < T + 5:
+        env.step((HOLD, 0.0, 0)); steps += 1
+    assert env.done and env._days_elapsed == 2                # exactly 2 trading days
+
+
+def test_failed_day_penalty_fires_proportionally_on_a_missed_day():
+    """C11: a day that HOLDs flat (0% < +2.5% target) takes a LARGE failed-day penalty at the
+    midnight boundary == -failed_day_penalty * shortfall (shortfall==1.0 for a flat day)."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    fdp = 5.0
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), np.full(T, 1.20), np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, challenge=cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0,
+                                                        failed_day_penalty=fdp))
+    boundary_penalty = boundary_reward = None
+    for _ in range(T):
+        if env.done:
+            break
+        _, reward, _, info = env.step((HOLD, 0.0, 0))
+        if info["day_penalty"] != 0.0:
+            boundary_penalty, boundary_reward = info["day_penalty"], reward
+            break
+    assert boundary_penalty is not None
+    assert abs(boundary_penalty - (-fdp)) < 1e-6              # flat day -> shortfall 1.0 -> -fdp
+    assert boundary_reward < -1.0                             # the penalty dominates the step reward
+
+
+def test_failed_day_penalty_zero_when_target_reached():
+    """C11: a day that REACHES its target incurs NO failed-day penalty at the boundary."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    close = np.concatenate([np.linspace(1.20, 1.30, 12), np.full(12, 1.30)]).astype(float)  # day 0 climbs
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, challenge=cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=8.0,
+                                                        failed_day_penalty=5.0),
+                     risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))                            # ride the day-0 climb past +2.5%
+    crossed = False
+    for _ in range(T):
+        if env.done:
+            break
+        _, _, _, info = env.step((HOLD, 0.0, 0))
+        if info["days_elapsed"] >= 1:                        # the day-0 boundary has been crossed
+            crossed = True
+            assert info["day_penalty"] == 0.0                # target was reached -> no penalty
+            break
+    assert crossed
 
 
 # =============================================================================
