@@ -22,6 +22,8 @@
 #   [2026-06-16] [Claude] — WI-6: format_sections falls back to section TITLES when a
 #                            local model drops the emoji icons, and to a single
 #                            'What I see' block when neither is present (reply not lost).
+#   [2026-06-19] [C24]    — Surfaced the read-only `/read <path>` slash command in the input
+#                            placeholder (risk_doctor.ask intercepts it; no write path).
 # ==========================================================================
 
 from __future__ import annotations
@@ -156,7 +158,7 @@ def chat_panel(initial_screen_state: Dict[str, Any]) -> html.Div:
             # INPUT AREA.
             html.Div([
                 dcc.Input(id="doctor-input", type="text",
-                          placeholder="Ask the Risk Doctor...",
+                          placeholder="Ask the Risk Doctor…  ·  /read <path> to load a file (read-only)",
                           debounce=True, style={"width": "72%"}),
                 html.Button("Send", id="doctor-send", n_clicks=0,
                             style={"width": "26%", "marginLeft": "2%"}),

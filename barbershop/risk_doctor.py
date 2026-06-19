@@ -39,6 +39,12 @@
 #                            budget (DOCTOR_MANUAL_MAX_CHARS) for small local models,
 #                            always keeping the safety rules + diagnostic template +
 #                            north star; assemble_context_packet uses it for Part 1.
+#   [2026-06-19] [C24]    — Multi-provider Risk Doctor + read-only /read. make_client() now
+#                            dispatches on config.DOCTOR_PROVIDER (ollama|anthropic|perplexity) and
+#                            _completion_text() branches the round-trip (anthropic messages API vs
+#                            OpenAI-compat chat.completions); perplexity `sonar` adds live web search.
+#                            Added repo_file_loader() + a /read <path> intercept in ask() — READ-ONLY,
+#                            repo-root-jailed, no write path. Default stays ollama, so existing tests pass.
 # ==========================================================================
 
 from __future__ import annotations
@@ -286,13 +292,56 @@ def has_context(screen_state: Dict[str, Any]) -> bool:
 # THE LLM CALL.
 # ==========================================================================
 def make_client():
-    """Build an OpenAI-compatible client pointed at the local LLM (config endpoint).
-
-    Reads: config.DOCTOR_API_BASE / DOCTOR_API_KEY. Returns an openai.OpenAI client.
-    Imported lazily so the dashboard + tests import this module with no server up.
-    """
-    from openai import OpenAI                              # lazy: only when actually calling
+    """Build the LLM client for the configured provider (C24). SDKs imported lazily so the dashboard +
+    tests import this module with no server/keys present.
+    COUPLING -> config.DOCTOR_PROVIDER + per-provider keys/bases/models:
+      ollama (default) / perplexity -> openai.OpenAI (OpenAI-compatible; perplexity adds web search),
+      anthropic                     -> anthropic.Anthropic (the messages API)."""
+    provider = getattr(config, "DOCTOR_PROVIDER", "ollama")
+    if provider == "anthropic":
+        from anthropic import Anthropic                    # lazy
+        return Anthropic(api_key=config.DOCTOR_ANTHROPIC_KEY or None)
+    from openai import OpenAI                              # lazy: ollama + perplexity are OpenAI-compatible
+    if provider == "perplexity":
+        return OpenAI(base_url=config.DOCTOR_PERPLEXITY_BASE, api_key=config.DOCTOR_PERPLEXITY_KEY)
     return OpenAI(base_url=config.DOCTOR_API_BASE, api_key=config.DOCTOR_API_KEY)
+
+
+def _completion_text(cli: Any, packet: Dict[str, str]) -> str:
+    """One LLM round-trip -> text, dispatched by provider (C24). Anthropic uses messages.create with a
+    top-level `system`; OpenAI-compatible providers (ollama/perplexity) use chat.completions.create.
+    COUPLING -> assemble_context_packet() packet keys 'system'/'user'."""
+    if getattr(config, "DOCTOR_PROVIDER", "ollama") == "anthropic":
+        msg = cli.messages.create(
+            model=config.DOCTOR_ANTHROPIC_MODEL, max_tokens=config.DOCTOR_MAX_TOKENS,
+            system=packet["system"], messages=[{"role": "user", "content": packet["user"]}])
+        return msg.content[0].text
+    model = (config.DOCTOR_PERPLEXITY_MODEL if getattr(config, "DOCTOR_PROVIDER", "ollama") == "perplexity"
+             else config.DOCTOR_MODEL)
+    completion = cli.chat.completions.create(
+        model=model,
+        messages=[{"role": "system", "content": packet["system"]},
+                  {"role": "user", "content": packet["user"]}],
+        max_tokens=config.DOCTOR_MAX_TOKENS, temperature=config.DOCTOR_TEMPERATURE)
+    return completion.choices[0].message.content
+
+
+def repo_file_loader(rel_path: str, max_chars: Optional[int] = None) -> str:
+    """READ-ONLY: return a repo file's text for the Doctor's context (the `/read` command). Accepts a
+    REPO-RELATIVE path only and refuses anything that resolves outside the repo root — there is NO write
+    path here, ever (RULE: the Doctor has no execution/write authority). COUPLING -> config.REPO_ROOT."""
+    max_chars = max_chars or getattr(config, "DOCTOR_REPO_READ_MAX_CHARS", 16000)
+    root = Path(config.REPO_ROOT).resolve()
+    try:
+        target = (root / rel_path).resolve()
+        target.relative_to(root)                          # raises ValueError if it escapes the repo
+    except (ValueError, OSError):
+        return f"[/read denied] '{rel_path}' is outside the repo or invalid (read-only, repo paths only)."
+    if not target.is_file():
+        return f"[/read] file not found: {rel_path}"
+    text = target.read_text(encoding="utf-8", errors="replace")
+    extra = "" if len(text) <= max_chars else f"\n… [truncated {len(text) - max_chars} chars]"
+    return text[:max_chars] + extra
 
 
 def ask(question: str, screen_state: Dict[str, Any],
@@ -311,6 +360,17 @@ def ask(question: str, screen_state: Dict[str, Any],
     Every real exchange is appended to logs/doctor_diagnoses.jsonl.
     """
     history = history or []
+
+    # `/read <path>` (C24) — load a repo file into the chat, READ-ONLY. Bypasses the LLM + the context
+    # rules (it is a plain file view, not a diagnosis) but never writes. COUPLING -> repo_file_loader.
+    if question.strip().startswith("/read "):
+        rel = question.strip()[len("/read "):].strip()
+        resp = {"text": f"📄 {rel}\n\n{repo_file_loader(rel)}", "confidence": "N/A",
+                "fields_cited": [], "offline": False, "refused": False,
+                "manual_missing": False, "read_only": True}
+        if log:
+            _log_exchange(question, {**resp, "text": f"[/read] {rel}"}, screen_state)
+        return resp
 
     # RULE 6 — manual must load, or the Doctor is offline (no LLM call).
     try:
@@ -355,12 +415,7 @@ def ask(question: str, screen_state: Dict[str, Any],
                                      full_diagnosis=full_diagnosis)
     try:
         cli = client or make_client()
-        completion = cli.chat.completions.create(
-            model=config.DOCTOR_MODEL,
-            messages=[{"role": "system", "content": packet["system"]},
-                      {"role": "user", "content": packet["user"]}],
-            max_tokens=config.DOCTOR_MAX_TOKENS, temperature=config.DOCTOR_TEMPERATURE)
-        text = completion.choices[0].message.content
+        text = _completion_text(cli, packet)              # C24: provider-dispatched (ollama/anthropic/perplexity)
     except Exception:                                     # any connection / server error
         # Graceful offline (spec TEST 20): save the question, tell Monty why.
         offline_resp = {"text": config.DOCTOR_OFFLINE_MESSAGE.format(api_base=config.DOCTOR_API_BASE),
