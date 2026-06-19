@@ -115,6 +115,15 @@ class ChallengeState:
         return self.equity - self.day_start_equity
 
     @property
+    def day_passed(self) -> bool:
+        """C11 [2026-06-19]: did the day END at/above its target? IDENTICAL math to the target_hit
+        latch in mark_to_market — both threshold on `self.equity >= self.daily_target_equity` (the
+        SAME property, no rounding, no separate base). day_passed is the END-OF-DAY snapshot the
+        failed-day penalty grades (day_shortfall_fraction == 0.0 exactly when this is True);
+        target_hit additionally LATCHES the moment the target is first touched (for the ftmo auto-flat)."""
+        return self.equity >= self.daily_target_equity
+
+    @property
     def day_shortfall_fraction(self) -> float:
         """C11 [2026-06-19]: how far BELOW the day's target the account is, as a fraction of the
         day's target GAIN. 0.0 if the target is reached; 1.0 if the day ended flat; >1 if it LOST
@@ -130,7 +139,7 @@ class ChallengeState:
         self.equity = self.balance + total_unrealized
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
-        if self.equity >= self.daily_target_equity:
+        if self.equity >= self.daily_target_equity:   # SAME threshold as day_passed (C11) — no skew
             self.target_hit = True
         if self.equity <= self.wall_equity and not self.breached:
             self.breached = True

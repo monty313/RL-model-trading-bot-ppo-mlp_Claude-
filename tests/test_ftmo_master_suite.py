@@ -1776,6 +1776,17 @@ def test_daily_target_is_relative_to_day_opening_balance():
     assert abs(cs.daily_target_equity - 10_600.0 * 1.025) < 1e-6   # +2.5% of the DAY'S opening
 
 
+def test_target_hit_and_day_passed_share_identical_threshold():
+    """C11 verification: 'target hit' (the latch) and 'day passed' (EOD pass / zero shortfall) must
+    threshold on the SAME value — equity >= daily_target_equity — with no rounding or base skew."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    tgt = cs.daily_target_equity                       # day_start_equity * (1 + 2.5%)
+    cs.mark_to_market(tgt - cs.account_size - 0.01)    # equity one cent BELOW target
+    assert not cs.target_hit and not cs.day_passed and cs.day_shortfall_fraction > 0.0
+    cs.mark_to_market(tgt - cs.account_size)           # equity EXACTLY at target
+    assert cs.target_hit and cs.day_passed and cs.day_shortfall_fraction == 0.0
+
+
 def test_day_shortfall_fraction_zero_at_target_one_when_flat():
     """C11 shortfall: 0 at/above target, 1.0 if the day ended flat, >1 if it lost money (the wall-hit
     day is punished hardest because its shortfall is largest)."""
