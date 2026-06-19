@@ -9,10 +9,52 @@ import json
 
 import pytest
 
+from quantra.runtime import config as cfg
+from quantra.learning_system.trainer.trainer import TrainConfig
 from quantra.learning_system.policy_registry.registry import (
     CompatibilityError, Leaderboard, PassRecord, PolicyCard, auto_name, build_card,
     check_compatibility, compatibility_signature, default_law_fingerprint, default_reward_layer_keys,
 )
+
+
+# ───────────────────────── C19: the OVERRIDES dict (config.build_overrides_dict) ──────────────────
+def test_overrides_empty_when_everything_is_default():
+    """(1) No knob differs from baseline -> empty OVERRIDES -> the baseline name."""
+    ov = cfg.build_overrides_dict(challenge=cfg.ChallengeConfig(), reward=cfg.RewardConfig(),
+                                  train=TrainConfig(), training_phase=cfg.TRAINING_PHASE,
+                                  training_wheels=cfg.TRAINING_WHEELS)
+    assert ov == {}
+    assert auto_name(ov)[0] == "v1-baseline"
+
+
+def test_overrides_single_knob_reflected_in_name():
+    """(2) One changed knob -> exactly that key in OVERRIDES -> it shows in the name."""
+    ov = cfg.build_overrides_dict(challenge=cfg.ChallengeConfig(daily_target_pct=3.0))
+    assert ov == {"daily_target_pct": 3.0}
+    assert auto_name(ov)[0] == "v1-tgt3"
+
+
+def test_overrides_multiple_knobs_all_appear_in_name():
+    """(3) Several changes across challenge/reward/train/phase/wheels -> all appear in the name."""
+    ov = cfg.build_overrides_dict(
+        challenge=cfg.ChallengeConfig(daily_target_pct=3.0),
+        reward=cfg.RewardConfig(daily_progress_weight=2e-3),
+        train=TrainConfig(seed=7),
+        training_phase=cfg.PHASE_CONSTRAINED, training_wheels=False)
+    assert ov == {"daily_target_pct": 3.0, "daily_progress_weight": 2e-3, "seed": 7,
+                  "training_phase": "constrained", "training_wheels": False}
+    name, basis = auto_name(ov)
+    for tok in ("tgt3", "dailyprog0.002", "seed7", "constrained", "wheelsoff"):
+        assert tok in name
+    assert basis["wheel_state"] == "OFF"
+
+
+def test_overrides_failed_day_penalty_not_double_counted():
+    """failed_day_penalty lives in BOTH ChallengeConfig (authoritative) + RewardConfig (mirror);
+    a change recorded once, from the challenge."""
+    ov = cfg.build_overrides_dict(challenge=cfg.ChallengeConfig(failed_day_penalty=8.0),
+                                  reward=cfg.RewardConfig(failed_day_penalty=8.0))
+    assert ov == {"failed_day_penalty": 8.0}
 
 
 def test_auto_name_baseline_is_v1_baseline():

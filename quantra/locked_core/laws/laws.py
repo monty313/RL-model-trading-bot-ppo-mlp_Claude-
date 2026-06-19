@@ -57,6 +57,11 @@ from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES, SC
 # COUPLING [C4 in COUPLINGS.md]: this ORDER (9 directional then 3 market-condition signals)
 # is sliced by position in law_mask_engine (_OBS_IDX, law_states[:9]/[9:]) and mirrored in
 # schema._law_names. Reorder here => update schema._law_names + the mask engine.
+# ⚠️ COMPATIBILITY [C18+] -> quantra/learning_system/policy_registry/registry.py
+# (default_law_fingerprint -> compatibility_signature): LAW_NAMES is the THIRD input to a policy's
+# compatibility hash. Adding/removing/renaming a law changes EVERY saved policy's signature, so the
+# registry will force a fresh start on RESUME (old law-fingerprint no longer matches). Reordering only
+# (same names) does NOT change the hash here, but DOES break the positional slices above — fix those too.
 LAW_NAMES = list(SCHEMA.blocks["law"])
 DIRECTIONAL_LAWS = LAW_NAMES[:9]   # -1/0/+1
 MARKET_SIGNALS = LAW_NAMES[9:]     # 0/1 (volatility, spread, stationarity) — observation-only by default

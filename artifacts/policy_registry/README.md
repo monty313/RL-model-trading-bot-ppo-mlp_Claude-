@@ -149,6 +149,23 @@ What does **not** change the signature (safe to resume across):
   `quantra/learning_system/policy_registry/registry.py`: `state_dim` + the reward decompose `L*`
   keys + a hash of `laws.LAW_NAMES`.)*
 
+### 📍 Compatibility map — change one of these, go fix the others (so you never lose a policy)
+
+The single worst failure mode is editing one file and silently breaking *resume* (can't load an old
+policy) **or** *training* (mismatched shapes). The signature has **three inputs**, each OWNED by one
+file. Before changing any of them, read its in-code `⚠️ COMPATIBILITY` comment and the row below:
+
+| Signature input | SOURCE of truth (owner file) | Mirrors / consumers that MUST move with it | Effect of a change |
+|---|---|---|---|
+| **`state_dim`** (observation width) | `market_pipeline/feature_builder/schema.py` → `STATE_DIM` (from `SCHEMA.dim`; toggled by `runtime/config.py:INCLUDE_RAW_INPUTS`) | `runtime/config.py:nominal_state_dim` (asserted `==` by the master suite), `ppo_agent/agent.py` (trunk input), `tests/snapshots/state_vector.json` (re-pin via `tools/snapshot.py --update`), telemetry feature order | **Forces a fresh start** — old checkpoints' input layer no longer fits; retrain. |
+| **reward layer arrangement** (the `L*` keys) | `learning_system/reward_engine/reward.py` → `decompose()` return keys | `diagnostics/mlp_interpreter` + `llm_risk_doctor` (read keys by name); the E8 test | Adding/removing/renaming a layer **forces a fresh start**. Tuning a **weight** (C16) or re-pointing a term's **math** (C17) does **not** (keys unchanged → resume-safe). |
+| **law fingerprint** | `locked_core/laws/laws.py` → `LAW_NAMES` | `law_mask_engine` (positional slices `[:9]/[9:]`), `feature_builder/schema._law_names` | Add/remove/rename a law **forces a fresh start**; reorder breaks the slices (fix those) but not the hash. |
+
+The hash itself lives in `registry.py:compatibility_signature()`; `default_reward_layer_keys()` and
+`default_law_fingerprint()` read the live values from the owner files, so the signature **tracks code
+automatically** — you cannot forget to bump it. `RESUME_FROM` calls `check_compatibility()`, which
+raises `CompatibilityError` (old checkpoint kept, never overwritten) on any mismatch.
+
 ---
 
 ## 5. Loading an old policy (resume, inspect, or promote)

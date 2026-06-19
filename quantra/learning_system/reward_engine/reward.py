@@ -112,6 +112,11 @@ class RewardEngine:
         # COUPLING [C8] -> diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/
         # doctor.py: both read the "L0".."L5_mult"/"shaped" keys by name (L0-dominance /
         # Reward-Hijack checks). "total" is consumed by reward()/env. Keep these key names.
+        # ⚠️ COMPATIBILITY [C18+] -> policy_registry/registry.py (default_reward_layer_keys ->
+        # compatibility_signature): the set of "L*" keys here IS the reward LAYER ARRANGEMENT, the
+        # SECOND input to a policy's compatibility hash. Tuning a WEIGHT (C16) or re-pointing a term's
+        # MATH (C17) keeps these keys, so old policies stay RESUME-safe. But ADDING / REMOVING / RENAMING
+        # a layer changes the hash -> the registry forces a fresh start (old policies can't be resumed).
         return {"L0": l0, "L1": l1, "L2": l2, "L3": l3, "L4": l4,
                 "L5_mult": l5_mult, "shaped": shaped, "total": l0 + shaped + l3}
 

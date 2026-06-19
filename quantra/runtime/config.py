@@ -33,7 +33,7 @@ provides the *defaults* (SOW-A3) and the immutable infrastructure constants.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Dict, List
 
@@ -351,6 +351,51 @@ def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *
         failed_day_penalty=max(0.0, float(failed_day_penalty)))
 
 
+def _dataclass_diff(live, default=None) -> dict:
+    """Return {field: value} for every field of `live` that differs from `default` (a fresh
+    instance of the same type when not given). Generic so it never needs to import the concrete
+    config type — avoids a runtime->learning_system import cycle for TrainConfig."""
+    default = default if default is not None else type(live)()
+    return {f.name: getattr(live, f.name) for f in fields(live)
+            if getattr(live, f.name) != getattr(default, f.name)}
+
+
+def build_overrides_dict(*, challenge: "ChallengeConfig | None" = None,
+                         reward: "RewardConfig | None" = None,
+                         train=None, training_phase: "int | None" = None,
+                         training_wheels: "bool | None" = None) -> dict:
+    """C19 [2026-06-19]: the OVERRIDES dict = ONLY the knobs that DIFFER from the baseline dataclass
+    defaults (ChallengeConfig()/RewardConfig()/TrainConfig() + the TRAINING_* module defaults). This
+    is the ground truth a policy is auto-NAMED from and the exact dict recorded in its manifest, so a
+    run is reproducible and never hand-named. The BASELINE *is* the dataclass defaults — no separate
+    baseline file.
+
+    COUPLING -> quantra/learning_system/policy_registry/registry.py: the KEYS returned here are what
+    auto_name()/build_card() tokenize, so they must match registry._NAME_ORDER / _SHORT (the challenge
+    + reward + train FIELD names, plus 'training_phase' as the 'free'/'constrained' STRING and
+    'training_wheels' as a bool). Add a knob to those dataclasses AND give it a token in registry._SHORT
+    or it will name-collide (slugged) but still be recorded.
+    COUPLING -> colab/Quantra_Train.ipynb + Quantra_Barbershop.ipynb (HYPERPARAMETERS cell): builds the
+    live config objects, calls this, stores OVERRIDES, and passes it to auto_name()/build_card().
+    Note: failed_day_penalty lives in BOTH ChallengeConfig (authoritative — the env reads it) and
+    RewardConfig (a visibility mirror); it is taken from `challenge` only, never double-counted."""
+    out: dict = {}
+    if challenge is not None:
+        out.update(_dataclass_diff(challenge, ChallengeConfig()))
+    if reward is not None:
+        for k, v in _dataclass_diff(reward, RewardConfig()).items():
+            if k == "failed_day_penalty":      # mirror of ChallengeConfig — challenge is authoritative
+                continue
+            out[k] = v
+    if train is not None:
+        out.update(_dataclass_diff(train))     # baseline = type(train)() (generic; no import)
+    if training_phase is not None and training_phase != TRAINING_PHASE:
+        out["training_phase"] = "free" if training_phase == PHASE_FREE else "constrained"
+    if training_wheels is not None and bool(training_wheels) != bool(TRAINING_WHEELS):
+        out["training_wheels"] = bool(training_wheels)
+    return out
+
+
 @dataclass(frozen=True)
 class HardwareConfig:
     """Targets for the auto-optimizer (``quantra.runtime.optimizer``).
@@ -523,3 +568,16 @@ def in_colab() -> bool:
 #      proxy terms — re-pointing the math to literally compute each name is a separate (sign-off) change.
 #   C: The training objective is legible, tunable, and captured per run, with Layer-0 dominance intact —
 #      so the operator shapes HOW the bot passes without editing locked code, and runs stay reproducible.
+# [2026-06-19] C19 — build_overrides_dict(): the OVERRIDES dict that names + reproduces a policy.
+#   I: The Policy Registry (C18) auto-names a policy from its OVERRIDES diff, but nothing PRODUCED that
+#      diff — so every card would get the baseline name and the Leaderboard would be meaningless.
+#   R: Operator spec 2026-06-19 (OVERRIDES = only the knobs differing from the baseline dataclass
+#      defaults: ChallengeConfig + RewardConfig + TrainConfig + TRAINING_* defaults; lives in config.py;
+#      baseline == the dataclass defaults; no separate file).
+#   A: Added _dataclass_diff() (generic: baseline = type(live)(), so no runtime->trainer import cycle for
+#      TrainConfig) + build_overrides_dict() that merges the per-object diffs, emits training_phase as the
+#      'free'/'constrained' STRING, and de-dups failed_day_penalty (challenge is authoritative over the
+#      RewardConfig mirror). COUPLING -> policy_registry/registry.py (keys must match _NAME_ORDER/_SHORT)
+#      + the notebooks' HYPERPARAMETERS cell (builds objects -> this -> auto_name/build_card).
+#   C: A run's exact deviation from baseline is captured once, drives a unique auto-name, and is saved in
+#      the manifest — so policies are distinguishable on the Leaderboard and every run is reproducible.

@@ -279,6 +279,12 @@ SCHEMA = build_schema()
 # quantra/ppo_agent/agent.py (reads STATE_DIM for trunk input), tests/snapshots/state_vector.json
 # (re-pin via tools/snapshot.py --update). FEATURE_NAMES order is logged by the telemetry
 # logger + indexed by env._COL/laws._IDX. Change STATE_DIM/order => update all of these.
+# ⚠️ COMPATIBILITY [C18+] -> quantra/learning_system/policy_registry/registry.py
+# (compatibility_signature): STATE_DIM is the FIRST input to a policy's compatibility hash. Changing
+# it (e.g. toggling INCLUDE_RAW_INPUTS, or adding/removing any feature block) changes EVERY saved
+# policy's signature, so the registry refuses to RESUME old checkpoints (CompatibilityError — the old
+# net's input layer no longer fits) and they must be RETRAINED fresh. This is the #1 "can't go back to
+# an old policy" hazard the operator flagged: if you change the dim here, expect a forced fresh start.
 STATE_DIM = SCHEMA.dim                                   # 207 (raw on) / 189 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 

@@ -48,6 +48,9 @@ _NAME_ORDER: Tuple[str, ...] = (
     "training_phase", "training_wheels", "daily_target_pct", "daily_risk_pct", "permanent_dd_pct",
     "ftmo_mode", "stop_for_day", "net_pnl_weight", "step_pnl_weight", "daily_progress_weight",
     "drawdown_pain_weight", "drawdown_pain_steepness", "trade_quality_weight", "failed_day_penalty",
+    # TrainConfig knobs (config.build_overrides_dict diffs these too) — kept LAST so the "perspective"
+    # knobs (phase/wheels/challenge/reward) lead the name and optimization details trail it.
+    "rollout_size", "minibatch", "value_coef", "g8_lookahead", "seed",
 )
 _SHORT: Dict[str, str] = {
     "training_wheels": "wheels", "daily_target_pct": "tgt", "daily_risk_pct": "risk",
@@ -55,6 +58,8 @@ _SHORT: Dict[str, str] = {
     "net_pnl_weight": "netpnl", "step_pnl_weight": "steppnl", "daily_progress_weight": "dailyprog",
     "drawdown_pain_weight": "pain", "drawdown_pain_steepness": "paink", "trade_quality_weight": "tradeq",
     "failed_day_penalty": "failday",
+    "rollout_size": "roll", "minibatch": "mb", "value_coef": "vcoef", "g8_lookahead": "g8look",
+    "seed": "seed",
 }
 
 
@@ -126,6 +131,14 @@ def auto_name(overrides: Dict[str, object], *, baseline: Optional[Dict[str, obje
 
 
 # ─────────────────────── compatibility signature (README §4) ─────────────────────────
+# 📍 COMPATIBILITY MAP (the "change-one-file, fix-the-others" web — full table in
+# artifacts/policy_registry/README.md §4). The signature has THREE inputs, each owned by one file;
+# the two default_* helpers below read the LIVE values so the signature tracks code automatically:
+#   1. state_dim            <- market_pipeline/feature_builder/schema.py STATE_DIM   (caller passes it)
+#   2. reward layer keys    <- learning_system/reward_engine/reward.py decompose()   (default_reward_layer_keys)
+#   3. law fingerprint      <- locked_core/laws/laws.py LAW_NAMES                     (default_law_fingerprint)
+# Change any one -> EVERY saved policy's signature changes -> RESUME raises CompatibilityError and the
+# policy must be RETRAINED. Weights (C16)/term-math (C17) do NOT change it (same dim + L-keys + laws).
 class CompatibilityError(RuntimeError):
     """Raised on RESUME_FROM when the saved signature != the current config+OVERRIDES (README §4)."""
 
@@ -392,3 +405,16 @@ def _neg_iso(created: str) -> str:
 #   C: Every trained policy now gets a saved, honest IDENTITY and the operator can SEE which config
 #      passes best and safely resume/promote it — turning scattered runs into a comparable scoreboard
 #      that drives toward a consistently-passing champion.
+# [2026-06-19] C19 — name tokens for the TrainConfig knobs + the compatibility map.
+#   I: config.build_overrides_dict() now also diffs TrainConfig, but _NAME_ORDER/_SHORT had no tokens
+#      for those keys (they would slug into ugly names); and the dim/shaping compatibility web — the
+#      "change one file, lose your old policies" hazard — wasn't mapped in one place.
+#   R: Operator spec 2026-06-19 (OVERRIDES includes TrainConfig defaults) + operator directive to
+#      document the dim + shaping coupling across files so future edits don't silently break resume.
+#   A: Added clean tokens (roll/mb/vcoef/g8look/seed) kept LAST in _NAME_ORDER (perspective knobs lead);
+#      added the 📍 COMPATIBILITY MAP comment by compatibility_signature() and ⚠️ COMPATIBILITY notes at
+#      the THREE owner files (schema.STATE_DIM, reward.decompose L-keys, laws.LAW_NAMES) + the README §4
+#      map table. default_* helpers still read live values so the signature can't drift from code.
+#   C: Policy names stay readable across every knob, and any future editor who touches the dim/shaping
+#      sees exactly which other files move with it and that old policies will need a fresh start — so we
+#      never silently lose the ability to resume a past policy or to keep training.
