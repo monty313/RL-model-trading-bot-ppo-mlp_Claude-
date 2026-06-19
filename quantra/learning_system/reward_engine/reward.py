@@ -194,6 +194,26 @@ class QuadBonus:
         return bonus_frac * max(0.0, m.day_pnl)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# REWARD REFERENCE BLOCK — C16 weights + C17 re-pointed math (APPROVED; do not change without IRAC)
+# The WEIGHTS are defined (with these defaults) in quantra/runtime/config.py RewardConfig; the MATH that
+# consumes them is decompose()/_pain() ABOVE. Tuning a weight VALUE, or the math INSIDE an existing layer,
+# is RESUME-safe (keeps the compatibility signature); ADDING/REMOVING/RENAMING a layer is NOT.
+#
+# name                    | value | what it does (plain English)                                      | files that read it
+# net_pnl_weight          | 1.0   | Layer-0: scales raw step net-PnL (realized+unrealized / account); the dominant, E8-protected outcome base (keep 1.0) | reward.py (decompose L0), config.py (def)
+# step_pnl_weight         | 1e-4  | Layer-1: tiny per-bar bonus while in-position AND momentum-aligned | reward.py (decompose L1), config.py (def)
+# daily_progress_weight   | 1e-3  | Layer-2 (C17): every step, +weight*max(0,day_pnl)/day_target_equity — rewards equity progress toward the +2.5% day target; OFF when flat/negative | reward.py (decompose L2), config.py (def)
+# drawdown_pain_weight    | 5e-4  | Layer-3: penalty as daily drawdown enters the pain zone (3.5% -> 4.0% wall) | reward.py (decompose L3), config.py (def)
+# drawdown_pain_steepness | 4.0   | Layer-3 shape: exponential steepness of the pain ramp (was PAIN_K) | reward.py (_pain), config.py (def)
+# trade_quality_weight    | 5e-5  | Layer-4 (C17): fires ON CLOSE only — +winner, -gave-back-a-once-profitable-trade, 0 never-profitable | reward.py (decompose L4), config.py (def); env/trading_env.py PRODUCES the input signal (trade_close_quality), NOT the weight
+# failed_day_penalty      | 5.0   | C11 end-of-day hit = -weight * day_shortfall_fraction. AUTHORITATIVE in ChallengeConfig; the RewardConfig copy is a VISIBILITY mirror only | env/trading_env.py (_failed_day_penalty, via ChallengeConfig), config.py (def + mirror); challenge_state.py supplies the shortfall it multiplies
+#
+# Also: every weight above is forwarded into RewardConfig by learning_system/barbershop_runner.py and
+# captured per-run (reproducible policy names + manifests) by learning_system/policy_registry/registry.py.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13. I/R/A/C; Conclusion is always
 # why this helps the bot pass FTMO consistently. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
@@ -251,3 +271,14 @@ class QuadBonus:
 #   C: The knobs now mean exactly what they say — daily_progress literally rewards getting closer to the
 #      day's target and trade_quality literally rewards banking winners / discourages round-tripping them
 #      — so the operator can shape consistent, winner-keeping behaviour while Layer-0 still dominates.
+# [2026-06-19] Fix 2 (audit S4) — added the REWARD REFERENCE BLOCK (comment-only).
+#   I: The audit found no single, labelled table of the live reward weights — their values, plain-English
+#      meaning, and which files actually read them were scattered across config.py + decompose().
+#   R: Operator audit decision (keep the 6-weight C16/C17 scheme; add a reference block; comment only,
+#      zero logic; use REAL reader evidence, not assumptions).
+#   A: Inserted a "REWARD REFERENCE BLOCK" above this log: the 6 C16 weights + the failed_day_penalty
+#      mirror, each with its current default, what it does, and its TRUE readers (verified by grep — e.g.
+#      trade_quality_weight is applied in reward.py while env only PRODUCES its input; failed_day_penalty
+#      is read by env via ChallengeConfig, not challenge_state). No math/keys/defaults changed.
+#   C: A future reader/editor (or the LLM Risk Doctor) can see every weight, its value, and exactly which
+#      file to open before touching it — protecting the locked reward shape that lets the bot pass FTMO.
