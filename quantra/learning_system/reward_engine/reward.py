@@ -33,15 +33,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from quantra.runtime.config import ChallengeConfig
+from quantra.runtime.config import ChallengeConfig, RewardConfig
 
-# Shaping coefficients — deliberately TINY vs typical per-step net PnL so Layer 0
-# dominates (REWARD_DESIGN: "whisper, not a shout"). Units: account fraction.
-ALPHA = 1e-4   # L1 momentum bonus
-BETA = 1e-4    # L2 stagnation penalty
-DELTA = 5e-4   # L3 pain-zone (slightly larger — it must be felt near the wall)
-EPS = 5e-5     # L4 target progress (tiniest)
-PAIN_K = 4.0   # exponential steepness of the pain ramp
+# C16 (2026-06-19): the per-layer shaping WEIGHTS now live in RewardConfig (config.py) as
+# plain-English, operator-tunable fields — net_pnl_weight / step_pnl_weight /
+# daily_progress_weight / drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight.
+# The MATH/STRUCTURE + decompose() layer KEYS (L0..L5) are UNCHANGED; only names + default values
+# changed, so the E8 Layer-0 dominance proof still holds. (Former globals: ALPHA/BETA/DELTA/EPS/PAIN_K;
+# defaults preserved except daily_progress_weight raised 1e-4 -> 1e-3 per the C16 spec.)
 
 
 @dataclass
@@ -65,6 +64,7 @@ class RewardEngine:
     """Pure layered-reward computation. One instance per training run."""
 
     challenge: ChallengeConfig = field(default_factory=ChallengeConfig)
+    reward_cfg: RewardConfig = field(default_factory=RewardConfig)   # C16 operator-tunable weights
     quad_enabled: bool = True       # ON in training, OFF in early law school
 
     def _pain(self, dd_pct: float) -> float:
@@ -75,17 +75,20 @@ class RewardEngine:
         if dd_pct <= lo:
             return 0.0
         frac = min(1.0, (dd_pct - lo) / max(1e-9, hi - lo))
-        return math.expm1(PAIN_K * frac) / math.expm1(PAIN_K)   # 0..1, convex
+        k = self.reward_cfg.drawdown_pain_steepness            # C16: was the PAIN_K global
+        return math.expm1(k * frac) / math.expm1(k)            # 0..1, convex
 
     def decompose(self, ctx: RewardContext) -> Dict[str, float]:
-        """Per-layer contributions (for telemetry + the E8 dominance proof)."""
-        l0 = ctx.net_pnl_delta
-        l1 = ALPHA if (ctx.in_position and ctx.momentum_aligned) else 0.0
-        l2 = -BETA if ctx.stagnation else 0.0
-        l3 = -DELTA * self._pain(ctx.drawdown_pct)
+        """Per-layer contributions (for telemetry + the E8 dominance proof). Weights come from
+        RewardConfig (C16); the layer KEYS + math are unchanged so E8 holds."""
+        rc = self.reward_cfg
+        l0 = rc.net_pnl_weight * ctx.net_pnl_delta             # dominant outcome base (weight 1.0)
+        l1 = rc.step_pnl_weight if (ctx.in_position and ctx.momentum_aligned) else 0.0
+        l2 = -rc.daily_progress_weight if ctx.stagnation else 0.0
+        l3 = -rc.drawdown_pain_weight * self._pain(ctx.drawdown_pct)
         # Clamp at target (1.0): a whisper in ALL modes, incl. ftmo-OFF where day_progress is
         # unbounded (~40 at 1% target / 40% envelope) and could otherwise rival L0 [2026-06-15 fix].
-        l4 = EPS * min(1.0, max(0.0, ctx.day_progress))
+        l4 = rc.trade_quality_weight * min(1.0, max(0.0, ctx.day_progress))
         # L5 category multiplier on the dense shaping (breach-risk = protect capital:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
@@ -189,3 +192,17 @@ class QuadBonus:
 #   A: l4 = EPS*min(1.0, max(0.0, day_progress)) — caps the shaping at target in every mode.
 #   C: L0 stays the dominant objective even in the new OFF configuration, so the bot keeps
 #      optimizing REAL net money (no reward hijack) - the basis of consistent passing.
+# [2026-06-19] C16 — reward weights renamed to a plain-English, operator-tunable RewardConfig.
+#   I: The shaping weights were cryptic module globals (ALPHA/BETA/DELTA/EPS/PAIN_K) — not
+#      operator-visible, not captured per run, and not matching the multi-day consistency philosophy.
+#   R: Operator spec 2026-06-19 (C16: rename to plain English + retune defaults; do NOT change the
+#      reward math/structure; keep the E8 Layer-0 dominance proof valid — E8 guards the per-step
+#      shaping, C11's failed-day penalty stays an exempt env-level event).
+#   A: Weights moved to config.RewardConfig (net_pnl_weight / step_pnl_weight / daily_progress_weight /
+#      drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight + a failed_day_penalty
+#      mirror); RewardEngine reads reward_cfg; decompose() math + the L0..L5 keys are UNCHANGED; only
+#      daily_progress_weight was raised 1e-4->1e-3 ("matters most"), verified E8-safe (worst shaping/L0
+#      ratio ~0.26 over 1000x256 rollouts).
+#   C: The training objective is now legible, tunable, and captured per run, the consistency driver is
+#      weighted up, and Layer-0 still provably dominates the per-step shaping — so the bot optimizes
+#      real net progress toward passing while the operator can shape HOW it gets there.

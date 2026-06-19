@@ -155,6 +155,36 @@ class RiskConfig:
     max_lot: float = 50.0
     max_per_trade_risk_frac: float = 0.01  # per-trade cap = 1% of account size
 
+
+# COUPLING -> learning_system/reward_engine/reward.py: RewardEngine reads these exact field NAMES
+# to weight the layered reward; env/trading_env.py passes a RewardConfig through to it. The
+# decompose() layer KEYS (L0..L5) are UNCHANGED — this C16 rename touches only the weight
+# NAMES/defaults, never the math/structure. Renaming a field here breaks reward.py's lookups.
+@dataclass(frozen=True)
+class RewardConfig:
+    """Operator-tunable reward weights (C16, 2026-06-19). Plain-English names for the layered
+    reward; the MATH/STRUCTURE is UNCHANGED (E8 Layer-0 dominance preserved — see reward.py + the
+    E8 test). Captured to telemetry/registry so a run's objective is reproducible.
+
+    NAMES vs CURRENT MATH (honest mapping): net_pnl (Layer 0) is the dominant OUTCOME base that E8
+    protects (weight 1.0). The four shaping weights are deliberately tiny 'whispers'. The
+    plain-English C16 names are mapped onto the EXISTING proxy terms in decompose() — today:
+      step_pnl_weight       -> per-bar in-position (momentum-continuation) bonus   [was ALPHA]
+      daily_progress_weight -> anti-stagnation push toward daily progress          [was BETA, raised]
+      drawdown_pain_weight  -> pain-zone penalty approaching the wall              [was DELTA]
+      trade_quality_weight  -> target-progress whisper                            [was EPS]
+    Re-pointing the math so each term literally computes its name is a SEPARATE change (new math ->
+    needs sign-off); this C16 step is names + default values only."""
+
+    net_pnl_weight: float = 1.0            # Layer 0 — dominant per-bar net-PnL outcome (E8-protected; keep 1.0)
+    step_pnl_weight: float = 1e-4          # small per-bar in-position bonus (keep small)
+    daily_progress_weight: float = 1e-3    # the consistency driver — RAISED from 1e-4 (matters most)
+    drawdown_pain_weight: float = 5e-4     # pain-zone penalty near the trailing wall
+    drawdown_pain_steepness: float = 4.0   # exponential steepness of the pain ramp (was PAIN_K)
+    trade_quality_weight: float = 5e-5     # close-quality / target-progress whisper (tiniest)
+    failed_day_penalty: float = 5.0        # C11 — lives at the ENV level (per operator); mirrored here for VISIBILITY
+
+
 # COUPLING [C5] -> data_loader/loader.py: loader.py resolves each SYMBOL's bars via
 # DRIVE_FILE_IDS[symbol] (gdown) and DRIVE_FILENAMES[symbol] (Drive-mount lookup); a
 # SYMBOL missing from either dict cannot be loaded.
@@ -472,3 +502,15 @@ def in_colab() -> bool:
 #   C: The operator can dial how many days an episode spans and how hard a failed day stings, so
 #      the bot trains on a faithful many-day account and learns CONSISTENCY (hit the target most
 #      days), not just survival — which is exactly what repeatedly passing FTMO requires.
+# [2026-06-19] C16 — RewardConfig: plain-English, operator-tunable reward weights.
+#   I: The reward shaping weights were cryptic globals in reward.py (ALPHA/BETA/DELTA/EPS/PAIN_K) —
+#      not operator-visible, not captured per run, not matching the multi-day consistency philosophy.
+#   R: Operator spec 2026-06-19 (C16: rename to plain English + retune defaults; do NOT change the
+#      reward math/structure; keep the E8 Layer-0 dominance proof valid).
+#   A: Added frozen RewardConfig (net_pnl_weight / step_pnl_weight / daily_progress_weight /
+#      drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight + a failed_day_penalty
+#      mirror). reward.py reads it; env threads it; defaults preserved except daily_progress_weight
+#      raised 1e-4->1e-3 ("matters most", E8-verified). Names are the C16 taxonomy over the existing
+#      proxy terms — re-pointing the math to literally compute each name is a separate (sign-off) change.
+#   C: The training objective is legible, tunable, and captured per run, with Layer-0 dominance intact —
+#      so the operator shapes HOW the bot passes without editing locked code, and runs stay reproducible.

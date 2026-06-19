@@ -1022,6 +1022,35 @@ def test_env_uses_layered_reward_engine():
     assert isinstance(reward, float)                 # layered reward returned, no crash
 
 
+def test_c16_reward_config_named_weights_keys_unchanged():
+    """C16: shaping weights live in a plain-English RewardConfig; RewardEngine reads them, the
+    decompose() layer KEYS are unchanged (E8 proof intact), and a custom config changes the weights."""
+    rc = cfg.RewardConfig()
+    # the rename preserved the original defaults except daily_progress_weight (raised 1e-4 -> 1e-3)
+    assert rc.net_pnl_weight == 1.0 and rc.step_pnl_weight == 1e-4
+    assert rc.daily_progress_weight == 1e-3 and rc.drawdown_pain_weight == 5e-4
+    assert rc.drawdown_pain_steepness == 4.0 and rc.trade_quality_weight == 5e-5
+    assert rc.failed_day_penalty == 5.0
+    d = RewardEngine().decompose(RewardContext(
+        net_pnl_delta=0.01, in_position=True, momentum_aligned=True, stagnation=True,
+        drawdown_pct=3.8, day_progress=1.0, breach_risk=False))
+    assert set(d) == {"L0", "L1", "L2", "L3", "L4", "L5_mult", "shaped", "total"}  # keys UNCHANGED
+    assert d["L0"] == 0.01 and d["L1"] == 1e-4 and d["L2"] == -1e-3                 # weights applied
+    d2 = RewardEngine(reward_cfg=cfg.RewardConfig(step_pnl_weight=0.0, daily_progress_weight=0.0)
+                      ).decompose(RewardContext(net_pnl_delta=0.01, in_position=True,
+                                                momentum_aligned=True, stagnation=True))
+    assert d2["L1"] == 0.0 and d2["L2"] == 0.0                                      # custom config wins
+
+
+def test_c16_env_threads_reward_config():
+    """C16: TradingEnv accepts a reward_cfg and threads it into its RewardEngine (kept on reset)."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)},
+                     reward_cfg=cfg.RewardConfig(daily_progress_weight=2e-3))
+    assert env.reward_engine.reward_cfg.daily_progress_weight == 2e-3
+    env.reset(challenge=cfg.make_challenge(daily_target_pct=3))
+    assert env.reward_engine.reward_cfg.daily_progress_weight == 2e-3   # rebuild keeps reward_cfg
+
+
 # =============================================================================
 # SECTION J — CURRICULUM + TWO-PHASE EPISODE RULE (M7)
 # FTMO link: the two-phase rule banks the +2.5% behind a tight 1% wall (challenge-

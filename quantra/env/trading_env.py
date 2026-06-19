@@ -122,6 +122,7 @@ class TradingEnv:
         cost_cfg: Optional[cfg.CostConfig] = None,
         training_wheels: Optional[bool] = None,
         episode_days: Optional[int] = None,
+        reward_cfg: Optional[cfg.RewardConfig] = None,
     ):
         self.symbols: List[str] = list(data.keys())            # fixed processing order
         self.data = data
@@ -145,9 +146,12 @@ class TradingEnv:
         self.start = max(d.valid_from for d in data.values())  # after every warmup
 
         self.risk_cfg = risk_cfg or cfg.RiskConfig()
+        # C16 [2026-06-19]: operator-tunable reward weights (plain-English RewardConfig). Threaded
+        # into the RewardEngine here + on reset(challenge=) so a run's objective is explicit + saved.
+        self.reward_cfg = reward_cfg or cfg.RewardConfig()
         self.risk = RiskManager(self.challenge_cfg.ftmo_account_size, self.risk_cfg)
         self.cost = CostLayer(cost_cfg)
-        self.reward_engine = RewardEngine(self.challenge_cfg)   # M6 layered reward
+        self.reward_engine = RewardEngine(self.challenge_cfg, self.reward_cfg)   # M6 layered reward
         self.slots: Dict[str, List[Slot]] = {}
         self.account: ChallengeState = None  # set in reset()
         self.reset()
@@ -161,7 +165,7 @@ class TradingEnv:
         if challenge is not None:
             self.challenge_cfg = challenge
             self.risk = RiskManager(self.challenge_cfg.ftmo_account_size, self.risk_cfg)
-            self.reward_engine = RewardEngine(self.challenge_cfg)
+            self.reward_engine = RewardEngine(self.challenge_cfg, self.reward_cfg)
         self.t = self.start
         self.cursor = 0  # which symbol acts next within the bar
         self.done = False
