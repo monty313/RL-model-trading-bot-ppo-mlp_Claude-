@@ -1840,6 +1840,38 @@ def test_daily_reset_fires_on_calendar_day_change():
     assert env.account.phase == "A" and env.account.target_hit is False
 
 
+# ---- Issue 2: the challenge-day reset boundary is 00:00 CE(S)T (Europe/Prague), not naive UTC ----
+def test_challenge_day_id_rolls_at_cest_midnight_not_utc():
+    """challenge_day_ids() builds the per-bar day-id at 00:00 Europe/Prague. Winter (CET = UTC+1):
+    Prague midnight is 23:00 UTC. So crossing UTC midnight (but not Prague midnight) must NOT roll
+    the day, and crossing Prague midnight (even with no UTC crossing) MUST roll it exactly once."""
+    import pandas as pd
+    from quantra.env.trading_env import challenge_day_ids
+    # (a) 23:30 -> 00:00 -> 00:30 UTC on Jan 4/5 = Prague 00:30/01:00/01:30 Jan 5 (one Prague day).
+    a = challenge_day_ids(pd.date_range("2021-01-04 23:30", periods=3, freq="30min"))
+    assert int((np.diff(a) != 0).sum()) == 0          # crossed UTC midnight, NOT Prague -> no roll
+    # (b) 22:30 -> 23:00 -> 23:30 UTC Jan 4 = Prague 23:30 Jan4 -> 00:00/00:30 Jan5 (one Prague roll).
+    b = challenge_day_ids(pd.date_range("2021-01-04 22:30", periods=3, freq="30min"))
+    assert int((np.diff(b) != 0).sum()) == 1          # crossed Prague midnight (no UTC cross) -> 1 roll
+
+
+def test_challenge_day_id_one_reset_across_dst_transition():
+    """DST spring-forward in Europe/Prague (2021-03-28, 02:00->03:00 local): the local day is still a
+    single calendar date, so a span crossing exactly one Prague midnight rolls the id exactly once —
+    zoneinfo handles CET<->CEST and converting FROM UTC is unambiguous (no gap/duplicate-hour error)."""
+    import pandas as pd
+    from quantra.env.trading_env import challenge_day_ids
+    idx = pd.date_range("2021-03-27 22:00", periods=10, freq="1h")   # UTC; crosses Prague midnight once
+    d = challenge_day_ids(idx)
+    assert d is not None and int((np.diff(d) != 0).sum()) == 1
+
+
+def test_challenge_day_ids_none_for_non_datetime_index():
+    """A non-datetime index (synthetic tests) -> None, preserving single-episode semantics."""
+    from quantra.env.trading_env import challenge_day_ids
+    assert challenge_day_ids(np.arange(10)) is None
+
+
 # =============================================================================
 # SECTION W — C10/C11 MULTI-DAY EPISODE + FAILED-DAY PENALTY (2026-06-19)
 # FTMO link: an episode is N TRADING DAYS on ONE continuous account. A daily-wall breach LOCKS OUT

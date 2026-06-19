@@ -626,14 +626,28 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
     close = df_1m["close"].to_numpy(dtype=np.float64)
     atr = ind.atr(df_1m["high"], df_1m["low"], df_1m["close"], ind.ATR_PERIOD).fillna(0.0).to_numpy()
     spread = (df_1m["spread"].astype(float) * ps).to_numpy()
-    # Calendar-day id per bar (midnight-normalized) so the env can fire the daily reset on a
-    # day change [2026-06-15 fix]. Non-datetime index (synthetic tests) -> None (single episode).
-    try:
-        dates = df_1m.index.normalize().asi8.copy()
-    except Exception:
-        dates = None
+    dates = challenge_day_ids(df_1m.index)
     return SymbolData(matrix=mm.matrix, close=close, atr=atr, spread=spread,
                       valid_from=mm.valid_from, dates=dates)
+
+
+def challenge_day_ids(index) -> Optional[np.ndarray]:
+    """Per-bar calendar-day id at the FTMO reset boundary = 00:00 cfg.CHALLENGE_TZ (Europe/Prague).
+
+    The loader's bar index is tz-naive UTC, so we localize UTC -> CHALLENGE_TZ and floor to LOCAL
+    midnight; `.asi8` is the UTC instant of that local midnight, so consecutive bars in the same
+    CE(S)T day share an id and the id changes EXACTLY at CE(S)T midnight [2026-06-19 fix: was a naive
+    UTC date roll]. _advance_bar() only diffs consecutive ids, so it needs no change; and
+    scripts/emit_real_telemetry.py reads this same SymbolData.dates, so its day rollover inherits the
+    CE(S)T basis too. zoneinfo handles DST (CET<->CEST) automatically, and converting FROM UTC is
+    unambiguous (no nonexistent/duplicate local-time errors). A non-datetime index (synthetic tests)
+    -> None, which keeps the env's single-episode semantics.
+    COUPLING -> runtime/config.py (cfg.CHALLENGE_TZ) + env _advance_bar (diffs these ids)."""
+    try:
+        idx_utc = index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
+        return idx_utc.tz_convert(cfg.CHALLENGE_TZ).normalize().asi8.copy()
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,3 +744,16 @@ def prepare_symbol_data(df_1m, symbol: str = "EURUSD", point_size: Optional[floa
 #   C: The reward the bot actually receives now rewards getting closer to each day's target and BANKING
 #      winners (and discourages round-tripping them into losses/breaches) — directly shaping the
 #      consistent, profit-locking behaviour that passing FTMO repeatedly requires, with L0 still dominant.
+# [2026-06-19] Issue-2 — daily reset now fires at 00:00 CE(S)T (Europe/Prague), not naive UTC.
+#   I: The challenge-day reset keyed off df_1m.index.normalize() on the loader's tz-naive UTC index, so
+#      it rolled at UTC midnight — 1–2h off FTMO's CE(S)T reset and DST-naive. A "day" in the sim did
+#      not line up with FTMO's challenge day, skewing the daily target/wall re-anchor and pass grading.
+#   R: Operator decision 2026-06-19 (Issue 2): the authoritative reset boundary is 00:00 Europe/Prague.
+#   A: Extracted challenge_day_ids(index): localize UTC -> cfg.CHALLENGE_TZ, floor to LOCAL midnight,
+#      return .asi8 — so the id changes exactly at CE(S)T midnight (DST handled by zoneinfo; FROM-UTC
+#      conversion is unambiguous). prepare_symbol_data() calls it; _advance_bar()'s consecutive-id diff
+#      is unchanged; emit_real_telemetry.py reads the same SymbolData.dates so it inherits the basis.
+#      COUPLING -> runtime/config.py (cfg.CHALLENGE_TZ). Swap (Issue 1) deferred by operator.
+#   C: A simulated "day" now matches FTMO's real CE(S)T challenge day, so the daily target/wall re-anchor
+#      and the failed-day grading happen at the same instant the real challenge does — closing a
+#      timezone-realism gap between a sim pass and a live-legal pass.

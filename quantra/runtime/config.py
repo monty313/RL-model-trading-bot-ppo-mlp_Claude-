@@ -274,6 +274,15 @@ TRAINING_DAYS: int = 180
 EVAL_DAYS: int = 8
 ACCOUNT_FLOOR_EQUITY: float = 0.0   # episode ends if equity reaches/below this ("account hits zero")
 
+# CHALLENGE_TZ — the timezone whose MIDNIGHT defines the FTMO challenge-day reset boundary.
+# FTMO resets the daily target/trailing wall at 00:00 CE(S)T (Europe/Prague), which is UTC+1 (CET,
+# winter) / UTC+2 (CEST, summer). The loader yields tz-naive UTC bars, so env/trading_env.py
+# prepare_symbol_data() localizes UTC -> CHALLENGE_TZ before flooring to local midnight to build the
+# per-bar day-id; the env (_advance_bar) + scripts/emit_real_telemetry.py just diff consecutive ids,
+# so the reset fires at CE(S)T midnight. zoneinfo handles DST automatically (converting FROM UTC is
+# unambiguous). COUPLING -> env/trading_env.py prepare_symbol_data() reads cfg.CHALLENGE_TZ.
+CHALLENGE_TZ: str = "Europe/Prague"
+
 
 # COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
 # env/trading_env.py + live_bridge/live_session.py: they read these exact field names
@@ -581,3 +590,10 @@ def in_colab() -> bool:
 #      + the notebooks' HYPERPARAMETERS cell (builds objects -> this -> auto_name/build_card).
 #   C: A run's exact deviation from baseline is captured once, drives a unique auto-name, and is saved in
 #      the manifest — so policies are distinguishable on the Leaderboard and every run is reproducible.
+# [2026-06-19] Issue-2 — added CHALLENGE_TZ (the FTMO daily-reset timezone).
+#   I: The daily reset rolled at naive UTC midnight; FTMO resets at 00:00 CE(S)T (Europe/Prague), so a
+#      sim "day" was 1–2h off the real challenge day (and DST-naive).
+#   R: Operator decision 2026-06-19 (Issue 2): authoritative reset boundary = 00:00 Europe/Prague.
+#   A: Added CHALLENGE_TZ = "Europe/Prague". COUPLING -> env/trading_env.py challenge_day_ids() reads it
+#      to build the per-bar day-id (localize UTC -> CHALLENGE_TZ -> floor to local midnight).
+#   C: The configurable, DST-safe reset timezone lines the sim's challenge day up with FTMO's real one.
