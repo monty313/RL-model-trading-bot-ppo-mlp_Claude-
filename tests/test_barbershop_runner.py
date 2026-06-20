@@ -13,7 +13,8 @@ from quantra.market_pipeline.feature_builder import PRECOMPUTED_DIM, PRECOMPUTED
 from quantra.learning_system.ppo_agent.agent import PPOAgent
 from quantra.learning_system.barbershop_runner import build_env, run_pass, slice_symbol_data
 
-_ROW_KEYS = {"day", "passed", "pnl_pct", "dd_pct", "breached", "trades", "gate_block_rate"}
+_ROW_KEYS = {"day", "passed", "pnl_pct", "dd_pct", "breached", "trades",
+             "wins", "closes", "win_rate", "gate_block_rate"}
 
 
 def _multiday_data(days: int = 3, bpd: int = 30, atr: float = 1e-4):
@@ -40,6 +41,8 @@ def test_run_pass_returns_one_real_row_per_day():
         assert isinstance(r["passed"], bool) and isinstance(r["breached"], bool)
         assert r["dd_pct"] <= 0.0                         # drawdown reported as a non-positive %
         assert r["trades"] >= 0 and 0.0 <= r["gate_block_rate"] <= 1.0
+        # win rate is a real percentage over the day's discretionary closes (0..100), wins <= closes
+        assert 0 <= r["wins"] <= r["closes"] and 0.0 <= r["win_rate"] <= 100.0
 
 
 def test_run_pass_rows_feed_passrecord_schema():

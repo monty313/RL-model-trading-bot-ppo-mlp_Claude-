@@ -96,6 +96,13 @@ class _DayAccum:
         self.coerced = 0
         self.steps = 0
         self.breached = False
+        # Win rate is measured over the policy's DISCRETIONARY closes (CLOSE actions): each CLOSE realizes
+        # one slot's PnL, so closes == round-trip trades. A "win" is a close whose realized PnL is positive
+        # NET of the close cost (info["realized"] is gross uPnL at the close price; info["cost"] the close
+        # cost — both from env._apply_action's CLOSE branch). Forced flattens (breach/target/EOD) aren't
+        # surfaced per-close in info, so they're excluded — this is the win rate of the trades the bot CHOSE.
+        self.closes = 0
+        self.wins = 0
 
     def update(self, env: TradingEnv, info: dict) -> None:
         acct = env.account
@@ -104,6 +111,10 @@ class _DayAccum:
                               (self.peak - acct.equity) / acct.account_size * 100.0)
         if info.get("executed", "HOLD") in _TRADE_ACTIONS:
             self.trades += 1
+        if info.get("executed") == "CLOSE":                       # one realized round-trip trade
+            self.closes += 1
+            if (info.get("realized", 0.0) - info.get("cost", 0.0)) > 0.0:
+                self.wins += 1                                     # winner NET of the close cost
         if info.get("coerced"):
             self.coerced += 1
         if info.get("breached") or info.get("locked_out"):
@@ -116,9 +127,12 @@ class _DayAccum:
         # condition the env/scoreboard use (peak reaching target == ChallengeState.target_hit latch).
         target_reached = self.peak >= self.open_equity * (1.0 + target_pct / 100.0)
         block_rate = (self.coerced / self.steps) if self.steps else 0.0
+        # win_rate = % of discretionary closes that won (NET of cost); 0.0 when the day closed no trades.
+        win_rate = (100.0 * self.wins / self.closes) if self.closes else 0.0
         return {"day": day_idx, "passed": bool(target_reached and not self.breached),
                 "pnl_pct": round(pnl_pct, 2), "dd_pct": round(-self.max_dd_pct, 2),
                 "breached": bool(self.breached), "trades": self.trades,
+                "wins": self.wins, "closes": self.closes, "win_rate": round(win_rate, 1),
                 "gate_block_rate": round(block_rate, 3)}
 
 
@@ -127,7 +141,8 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
              return_account: bool = False):
     """Run ONE Barbershop pass = N_DAYS on one continuous account; return a per-day scoreboard list
     whose dict schema matches the loop's print_pass_table/summarize_pass + registry PassRecord:
-    {"day","passed","pnl_pct","dd_pct","breached","trades","gate_block_rate"}.
+    {"day","passed","pnl_pct","dd_pct","breached","trades","wins","closes","win_rate","gate_block_rate"}
+    (wins/closes/win_rate = winning DISCRETIONARY closes, count, and % won NET of cost — see _DayAccum).
 
     `agent` is a PPOAgent (untrained until M8 wires training; the metrics are REAL either way — they
     are what THIS policy actually did on the env, no placeholders). `deterministic` uses the live
@@ -223,3 +238,14 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
 #      RiskConfig + env/trading_env.py (risk_cfg -> RiskManager).
 #   C: The operator can now cap position size from one knob, so a bad day physically can't blow past the
 #      wall — the structural fix that keeps the policy ALIVE long enough for training to search for an edge.
+# [2026-06-20] Per-day WIN RATE on the scoreboard + the cci_regime_gate override (reporting only).
+#   I: The day-by-day scoreboard showed pnl/dd/trades but not how OFTEN the bot's trades won, so the
+#      operator couldn't see whether a regime gate (or any change) improves trade selection vs just sizing.
+#   R: Operator request 2026-06-20 — surface "% of trades won". Reporting-layer only (no env/locked-core
+#      change): each CLOSE realizes one round-trip trade; a win is realized PnL NET of the close cost > 0.
+#   A: _DayAccum tracks closes/wins from info["executed"]=="CLOSE" + (info["realized"]-info["cost"])>0 and
+#      finalize() adds wins/closes/win_rate to the per-day row; run_pass schema doc updated. build_env also
+#      honors the temporary OVERRIDES["cci_regime_gate"] (defaults to cfg.CCI_REGIME_GATE). COUPLING ->
+#      env/trading_env.py (_apply_action CLOSE info keys realized/cost; cci_regime_gate) + tests _ROW_KEYS.
+#   C: Every eval/gauge day now reports the policy's win rate alongside PnL, so the operator can judge
+#      whether a guardrail improves the QUALITY of trades (win rate) — not only whether it survives the wall.
