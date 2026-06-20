@@ -66,6 +66,8 @@ class RewardContext:
     day_target_equity: float = 1.0  # L2: day_start_equity*(1+target%) (USD) — the progress denominator
     trade_close_quality: float = 0.0  # L4: signed, account-normalized realized-on-close quality, summed
     #                                   over trades CLOSED this step (0 on steps with no close)
+    profit_hold_count: float = 0.0    # L4 [2026-06-20]: # of profitable closes held >= profit_hold_min_bars
+    #                                   this step — a small EXTRA L4 bonus (env produces it; weight in config)
 
 
 @dataclass
@@ -104,7 +106,11 @@ class RewardEngine:
         # is 0). env/trading_env.py _record_close_quality() already applied the operator's sign rules
         # (reward winners; penalize giving back a once-profitable trade; ignore never-profitable
         # losers) AND normalized by account_size, so here it is a pure scaled passthrough.
-        l4 = rc.trade_quality_weight * ctx.trade_close_quality
+        # L4 also carries the [2026-06-20] profit-hold bonus: a SMALL extra reward per profitable close
+        # held >= profit_hold_min_bars (env supplies the count). Folded into L4 (NOT a new layer) so the
+        # decompose KEY SET — hence the policy compatibility signature — is UNCHANGED (resume-safe; per the
+        # C18 note above, changing the MATH inside an existing layer is allowed). Default weight 0.0 -> no-op.
+        l4 = rc.trade_quality_weight * ctx.trade_close_quality + rc.profit_hold_weight * ctx.profit_hold_count
         # L5 category multiplier on the dense shaping (breach-risk = protect capital:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
@@ -208,6 +214,10 @@ class QuadBonus:
 # drawdown_pain_steepness | 4.0   | Layer-3 shape: exponential steepness of the pain ramp (was PAIN_K) | reward.py (_pain), config.py (def)
 # trade_quality_weight    | 5e-5  | Layer-4 (C17): fires ON CLOSE only — +winner, -gave-back-a-once-profitable-trade, 0 never-profitable | reward.py (decompose L4), config.py (def); env/trading_env.py PRODUCES the input signal (trade_close_quality), NOT the weight
 # failed_day_penalty      | 5.0   | C11 end-of-day hit = -weight * day_shortfall_fraction. AUTHORITATIVE in ChallengeConfig; the RewardConfig copy is a VISIBILITY mirror only | env/trading_env.py (_failed_day_penalty, via ChallengeConfig), config.py (def + mirror); challenge_state.py supplies the shortfall it multiplies
+# profit_hold_weight      | 0.0   | [2026-06-20] SMALL extra L4 reward per profitable close held >= profit_hold_min_bars (folded INTO L4, no new layer) | reward.py (decompose L4), config.py (def); env/trading_env.py PRODUCES profit_hold_count
+# profit_hold_min_bars    | 5     | [2026-06-20] min bars a winner must be held to earn the profit-hold bonus (env-side gate) | env/trading_env.py (_record_close), config.py (def)
+# fast_pass_bonus         | 0.0   | [2026-06-20] BIG env-level event reward paid ONCE/day when the day's +target is hit within fast_pass_hours of the open. EXEMPT from per-step E8 (like failed_day_penalty); added in env step(), NOT in decompose | env/trading_env.py (_consume_fast_pass), config.py (def)
+# fast_pass_hours         | 12.0  | [2026-06-20] the window (from the day's open) the fast pass must land in to earn fast_pass_bonus | env/trading_env.py, config.py (def)
 #
 # Also: every weight above is forwarded into RewardConfig by learning_system/barbershop_runner.py and
 # captured per-run (reproducible policy names + manifests) by learning_system/policy_registry/registry.py.
@@ -282,3 +292,18 @@ class QuadBonus:
 #      is read by env via ChallengeConfig, not challenge_state). No math/keys/defaults changed.
 #   C: A future reader/editor (or the LLM Risk Doctor) can see every weight, its value, and exactly which
 #      file to open before touching it — protecting the locked reward shape that lets the bot pass FTMO.
+# [2026-06-20] Exit-shaping additions — profit-hold L4 bonus + fast-pass event bonus (defaults OFF).
+#   I: The exits were the weak point: the bot cut winners early, rode losers to the wall, and dawdled. The
+#      operator wants (a) a SMALL reward for closing in profit only after holding a winner >= a few minutes
+#      (discourage instant scalps) and (b) a BIG reward for passing the day's target FAST (within 12h).
+#   R: Operator decision 2026-06-20. (a) folds into L4 (extra reward per profitable close held >=
+#      profit_hold_min_bars) so the decompose KEY SET — and the policy compatibility signature — is
+#      UNCHANGED (resume-safe; changing math INSIDE a layer is allowed). (b) is an env-level EVENT reward,
+#      EXEMPT from the per-step E8 whisper rule exactly like the C11 failed_day_penalty (its positive twin).
+#   A: RewardContext gained profit_hold_count; decompose L4 += profit_hold_weight*profit_hold_count.
+#      fast_pass_bonus/fast_pass_hours are NOT in decompose — env/trading_env.py adds the bonus in step()
+#      (once/day, when target_hit lands within the window). All four knobs default 0/off, so the existing
+#      reward + the E8 dominance proof are byte-identical until the operator turns them on. COUPLING ->
+#      config.RewardConfig (the four fields) + env/trading_env.py (_record_close, _consume_fast_pass).
+#   C: With a hard stop cutting losers, these tell the policy to LET WINNERS DEVELOP and to make the day's
+#      2.5% quickly — the exact exit/payoff structure a trend entry needs to actually be profitable.

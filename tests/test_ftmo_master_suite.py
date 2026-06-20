@@ -746,6 +746,77 @@ def test_rule2_end_of_day_flatten_closes_all_and_counts_the_trade():
     assert saw_eod
 
 
+def _stop_env(close, *, hard_stop=0.0, reward_cfg=None, target=99.0):
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    mat = np.tile(row, (len(close), 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.asarray(close, float), atr=np.full(len(close), 1e-3),
+                    spread=np.full(len(close), 2e-5), valid_from=0)
+    return TradingEnv({"EURUSD": sd}, challenge=cfg.make_challenge(daily_target_pct=target, daily_risk_pct=4.0),
+                      episode_days=1, risk_cfg=cfg.RiskConfig(hard_stop_frac=hard_stop), reward_cfg=reward_cfg)
+
+
+def test_hard_stop_caps_per_trade_loss_below_the_wall():
+    """A hard per-trade stop (0.5% of the initial balance) closes a losing trade EARLY, every bar — so a
+    single trade can't ride to the -4% wall. With the stop OFF the same trade rides far deeper."""
+    T = 60; entry = 1.20
+    close = np.concatenate([[entry], entry - np.linspace(0, 0.02, T - 1)])    # steady decline
+
+    def loss_pct(frac):
+        env = _stop_env(close, hard_stop=frac)
+        env.reset(); env.step((OPEN_LONG, 1.0, 0)); a0 = env.account.account_size
+        for _ in range(T - 5):
+            env.step((0, 0.0, 0))
+            if env._n_open("EURUSD") == 0:
+                break
+        return (env.account.equity - a0) / a0 * 100.0
+    on, off = loss_pct(0.005), loss_pct(0.0)
+    assert -1.5 < on < 0.0          # the stop bounds the per-trade loss well short of the 4% wall
+    assert off < on - 2.0           # without the stop, the same trade rides much deeper (toward the wall)
+
+
+def test_profit_hold_bonus_rewards_a_held_winner_only():
+    """A small EXTRA reward for closing in profit ONLY after holding >= profit_hold_min_bars bars; an
+    instant scalp earns nothing extra."""
+    T = 40
+    close = np.concatenate([[1.20], np.linspace(1.20, 1.24, T - 1)])          # rising -> a long wins
+
+    def close_reward(weight, hold):
+        env = _stop_env(close, reward_cfg=cfg.RewardConfig(profit_hold_weight=weight, profit_hold_min_bars=5))
+        env.reset(); env.step((OPEN_LONG, 0.5, 0))
+        for _ in range(hold):
+            env.step((0, 0.0, 0))
+        _, r, _, _ = env.step((CLOSE, 0.0, 0))
+        return r
+    assert close_reward(0.01, 7) > close_reward(0.0, 7)            # held >=5 bars -> earns the bonus
+    assert abs(close_reward(0.01, 1) - close_reward(0.0, 1)) < 1e-9  # held <5 bars -> NO bonus
+
+
+def test_profit_hold_folds_into_l4_without_a_new_layer():
+    """The profit-hold bonus lands in the EXISTING L4 key (resume-safe — no new reward layer)."""
+    from quantra.learning_system.reward_engine.reward import RewardEngine, RewardContext
+    eng = RewardEngine(reward_cfg=cfg.RewardConfig(profit_hold_weight=1e-3))
+    base = eng.decompose(RewardContext(net_pnl_delta=0.0))
+    boost = eng.decompose(RewardContext(net_pnl_delta=0.0, profit_hold_count=2.0))
+    assert set(base) == set(boost)                                # identical layer KEYS (compat sig intact)
+    assert boost["L4"] > base["L4"] and abs((boost["L4"] - base["L4"]) - 2e-3) < 1e-9   # = weight*count in L4
+
+
+def test_fast_pass_bonus_pays_once_when_target_banked_fast():
+    """The BIG fast-pass bonus fires EXACTLY once — when the day's +target is hit AND all trades are
+    closed (flat) within fast_pass_hours of the open."""
+    T = 120
+    close = np.concatenate([[1.20], np.linspace(1.20, 1.40, T - 1)])          # clears +2.5% early
+    env = _stop_env(close, reward_cfg=cfg.RewardConfig(fast_pass_bonus=5.0, fast_pass_hours=12.0), target=2.5)
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    bonus_steps = 0
+    for _ in range(40):
+        _, r, _, _ = env.step((0, 0.0, 0))
+        if r >= 4.0:                                              # the +5 event bonus landed on this step
+            bonus_steps += 1
+            assert env.account.phase == "B" and env._n_open("EURUSD") == 0   # target banked + flat
+    assert bonus_steps == 1                                       # paid once, not every bar after target
+
+
 # =============================================================================
 # SECTION G — ENV + RISKMANAGER + COSTLAYER (M4)
 # FTMO link: this is the challenge physics. The B5 invariant — 4 symbols can't

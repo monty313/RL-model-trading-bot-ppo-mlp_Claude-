@@ -194,6 +194,14 @@ class TradingEnv:
         # EVERY trade (all are closed by EOD), not just the bot's voluntary closes. COUPLING ->
         # learning_system/barbershop_runner.py _DayAccum reads info["n_closed"]/info["n_wins"].
         self._step_closed_nets: List[float] = []
+        # [2026-06-20] profit-hold L4 bonus: # of profitable closes held >= reward_cfg.profit_hold_min_bars
+        # accrued this step (consumed in _reward -> RewardContext.profit_hold_count). Exit-shaping reward.
+        self._pending_profit_hold = 0.0
+        # [2026-06-20] FAST-PASS big bonus: the bar the current day OPENED on + whether the once-per-day
+        # bonus has been paid, so _consume_fast_pass() awards it exactly once when the +target lands within
+        # reward_cfg.fast_pass_hours of the open. Reset at every midnight boundary in _advance_bar().
+        self._day_open_t = self.start
+        self._fast_pass_awarded = False
         self.account = ChallengeState(self.challenge_cfg.ftmo_account_size, self.challenge_cfg)
         self.slots = {s: [Slot() for _ in range(N_SLOTS)] for s in self.symbols}
         # PER-SYMBOL reward attribution [2026-06-15 fix]: each symbol's L0 reflects ONLY its
@@ -418,9 +426,8 @@ class TradingEnv:
             self.account.realize(realized)
             self.account.charge(cc.total)
             self._sym_realized[sym] += realized - cc.total   # per-symbol attribution
-            # C17: feed L4 trade-quality (read sl.mfe BEFORE the slot is freed -> reward_engine L4).
-            self._record_close_quality(realized, sl.mfe > 0.0)
-            self._step_closed_nets.append(realized - cc.total)   # RULE 2: this round-trip's net result
+            # C17 L4 + RULE 2 ledger + profit-hold bonus (read sl.age/mfe BEFORE the slot is freed).
+            self._record_close(realized, realized - cc.total, sl.age, sl.mfe > 0.0)
             info.update(executed="CLOSE", lots=sl.lots, cost=cc.total, realized=realized)
             self.slots[sym][idx] = Slot()  # free it
 
@@ -448,6 +455,9 @@ class TradingEnv:
             # forward across the boundary — only the day anchors + breach/lockout flags reset (C10).
             self._pending_day_penalty += self._failed_day_penalty()
             self.account.reset_day()
+            # [2026-06-20] new day -> re-anchor the fast-pass window to this day's open + re-arm the bonus.
+            self._day_open_t = self.t
+            self._fast_pass_awarded = False
             self._days_elapsed += 1
             # C10: an episode is episode_days TRADING DAYS; end it once they are exhausted.
             if self.episode_days is not None and self._days_elapsed >= self.episode_days:
@@ -492,26 +502,44 @@ class TradingEnv:
             self.account.locked_out = True
         self._mark_to_market()
 
+    def _realize_slot(self, sym: str, i: int, t: int) -> None:
+        """Realize+free ONE occupied slot at bar t (price close[t]) and record every reward/ledger
+        signal via _record_close. Shared by _force_flatten and _apply_stop_losses."""
+        sl = self.slots[sym][i]
+        pnl = sl.upnl(self.data[sym].close[t], self._contract(sym))
+        cost = self.cost.close_cost(sym, sl.lots).total
+        self.account.realize(pnl)
+        self.account.charge(cost)
+        self._sym_realized[sym] += pnl - cost                 # per-symbol attribution
+        # read sl.age/mfe BEFORE freeing the slot (RULE 2 ledger + C17 L4 + profit-hold bonus).
+        self._record_close(pnl, pnl - cost, sl.age, sl.mfe > 0.0)
+        self.slots[sym][i] = Slot()
+
     def _force_flatten(self, at_t: Optional[int] = None) -> None:
         """Realize every open slot at current price + close cost. Used by a breach/lockout, the
         target auto-flat, AND the end-of-day flatten (RULE 2). `at_t` overrides the price bar — the
         EOD flatten passes the day's LAST bar (self.t - 1) so trades close at the day's close."""
         t = self.t if at_t is None else at_t
         for sym in self.symbols:
-            c = self.data[sym].close[t]
-            con = self._contract(sym)
             for i, sl in enumerate(self.slots[sym]):
                 if sl.occupied:
-                    pnl = sl.upnl(c, con)
-                    cost = self.cost.close_cost(sym, sl.lots).total
-                    self.account.realize(pnl)
-                    self.account.charge(cost)
-                    self._sym_realized[sym] += pnl - cost     # per-symbol attribution
-                    self._step_closed_nets.append(pnl - cost)  # RULE 2: a forced/EOD close is a real result
-                    # C17: a forced close still feeds L4 trade-quality (read sl.mfe before freeing)
-                    # — round-tripping a winner into a breach/lockout is exactly a "gave back a winner".
-                    self._record_close_quality(pnl, sl.mfe > 0.0)
-                    self.slots[sym][i] = Slot()
+                    self._realize_slot(sym, i, t)
+
+    def _apply_stop_losses(self) -> None:
+        """Hard per-trade STOP-LOSS [operator 2026-06-20]: close ANY single slot whose loss reaches
+        risk_cfg.hard_stop_frac of the INITIAL account balance, checked EVERY bar (tick by tick). Cuts a
+        losing trade small so it can't ride to the daily wall. 0.0 = OFF. The closed slot feeds the win
+        rate + L4 like any other close. COUPLING -> runtime/config.RiskConfig.hard_stop_frac."""
+        frac = self.risk_cfg.hard_stop_frac
+        if frac <= 0.0:
+            return
+        threshold = -frac * self.account.account_size         # max loss (USD) a single trade may carry
+        for sym in self.symbols:
+            c = self.data[sym].close[self.t]
+            con = self._contract(sym)
+            for i, sl in enumerate(self.slots[sym]):
+                if sl.occupied and sl.upnl(c, con) <= threshold:
+                    self._realize_slot(sym, i, self.t)
 
     def _failed_day_penalty(self) -> float:
         """C11 [2026-06-19]: the end-of-day penalty for the day that just finished. A LARGE,
@@ -530,6 +558,42 @@ class TradingEnv:
         (cfg.ACCOUNT_FLOOR_EQUITY, default 0.0). A daily breach only LOCKS OUT the day; only a blown
         account (or exhausting episode_days / end-of-data) ends the multi-day episode."""
         return self.account.equity <= cfg.ACCOUNT_FLOOR_EQUITY
+
+    def _record_close(self, realized_gross: float, net: float, age: int, ever_in_profit: bool) -> None:
+        """Record ONE closed trade's reward + ledger signals — shared by EVERY close path (discretionary
+        CLOSE, breach/target/EOD flatten, hard stop). `net` = realized - close cost.
+          - RULE 2 ledger: append `net` so it counts toward the day's win rate (info n_closed/n_wins).
+          - C17 L4 trade-quality via _record_close_quality(realized_gross, ever_in_profit).
+          - [2026-06-20] profit-hold bonus: +1 to the L4 profit-hold count when this is a PROFITABLE close
+            (net > 0) held >= reward_cfg.profit_hold_min_bars bars (let a winner develop, don't insta-scalp).
+        COUPLING -> learning_system/barbershop_runner.py (_DayAccum reads n_closed/n_wins) + reward_engine."""
+        self._step_closed_nets.append(net)
+        self._record_close_quality(realized_gross, ever_in_profit)
+        if net > 0.0 and age >= self.reward_cfg.profit_hold_min_bars:
+            self._pending_profit_hold += 1.0
+
+    def _consume_profit_hold(self) -> float:
+        """Return + reset the profit-hold count accrued this step (-> RewardContext.profit_hold_count, L4)."""
+        q = self._pending_profit_hold
+        self._pending_profit_hold = 0.0
+        return q
+
+    def _consume_fast_pass(self) -> float:
+        """BIG once-per-day bonus [operator 2026-06-20]: paid when the day's +target is hit AND EVERY trade
+        is closed (account flat) — i.e. the +2.5% is BANKED, not floating — all within reward_cfg.
+        fast_pass_hours of the day's open. Env-level EVENT reward, EXEMPT from per-step E8 (like the
+        failed-day penalty, its positive twin); added to the step reward in step(). Paid at most once per
+        day; _fast_pass_awarded + _day_open_t reset at every midnight boundary (_advance_bar)."""
+        b = self.reward_cfg.fast_pass_bonus
+        if b <= 0.0 or self._fast_pass_awarded:
+            return 0.0
+        window = int(self.reward_cfg.fast_pass_hours * 60)          # hours -> 1m bars from the day's open
+        flat = all(self._n_open(s) == 0 for s in self.symbols)      # "all trades closed by the 12th hour"
+        if (self.account.target_hit and not self.account.breached and flat
+                and (self.t - self._day_open_t) <= window):
+            self._fast_pass_awarded = True
+            return b
+        return 0.0
 
     def _record_close_quality(self, realized_gross: float, ever_in_profit: bool) -> None:
         """C17 [2026-06-19]: accrue ONE closed trade's trade-quality whisper for the current step.
@@ -601,6 +665,8 @@ class TradingEnv:
             # (_record_close_quality, called from _apply_action's CLOSE branch + _force_flatten);
             # consume-and-reset it here so it lands on exactly this step's L4 trade-quality term.
             trade_close_quality=self._consume_trade_quality(),
+            # [2026-06-20] profit-hold count accrued by _record_close this step -> L4 += weight*count.
+            profit_hold_count=self._consume_profit_hold(),
         )
         return self.reward_engine.reward(ctx)
 
@@ -623,6 +689,8 @@ class TradingEnv:
 
         info = self._apply_action(sym, direction, raw_size, pointer)
         self._mark_to_market()  # equity reflects this symbol's cost/realize at bar t
+        self._apply_stop_losses()  # hard per-trade stop (each bar) — cut a losing trade BEFORE the wall
+        self._mark_to_market()
 
         # C10 [2026-06-19]: a daily-wall breach FORCE-FLATTENS all + LOCKS OUT the rest of the day
         # (account.locked_out was set in mark_to_market) but does NOT end the episode — the day
@@ -648,6 +716,8 @@ class TradingEnv:
                 else:
                     self._advance_bar()   # may end the episode at episode_days + stash a C11 penalty
                     self._mark_to_market()
+                    self._apply_stop_losses()   # hard per-trade stop on the new bar too (tick by tick)
+                    self._mark_to_market()
                     if self.account.breached:
                         self._force_flatten()
                         self._mark_to_market()
@@ -660,7 +730,9 @@ class TradingEnv:
         # by _advance_bar at the midnight boundary) on top of the per-step layered reward.
         day_penalty = self._pending_day_penalty
         self._pending_day_penalty = 0.0
-        reward = self._reward(sym) + day_penalty
+        # [2026-06-20] + the BIG fast-pass bonus (once/day) when the +target is hit AND all trades are
+        # closed within fast_pass_hours of the day's open — an env-level EVENT reward, E8-exempt like day_penalty.
+        reward = self._reward(sym) + day_penalty + self._consume_fast_pass()
         self._prev_equity = self.account.equity
         # RULE 2: every trade realized this step (discretionary CLOSE + breach/target/EOD flatten) and
         # how many won NET of cost — the scoreboard's win rate is built from these (all trades close by EOD).
@@ -864,3 +936,22 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #   C: Each day now ends flat with a complete, honest win rate over ALL of its trades (no cross-day
 #      positions, no 0/0 blind spots) — so the scoreboard finally reflects how often the bot's trades win,
 #      which is the signal the operator needs to judge whether a change improves trade QUALITY.
+# [2026-06-20] Exit overhaul — hard per-trade stop + profit-hold L4 bonus + BIG fast-pass bonus (all default OFF).
+#   I: Diagnosis showed the EXITS were the killer: no stop (losers rode to the wall), winners cut early, and
+#      no incentive to pass the day quickly. The operator specified three fixes to give a trend entry a real
+#      payoff structure: (1) hard stop at 0.5% of the initial balance per trade, checked tick by tick; (2) a
+#      small reward for closing in profit only after holding >= 5-10 min; (3) a BIG reward for passing the
+#      day's target within 12h of the open, paid only once ALL trades are closed (the +2.5% is BANKED).
+#   R: Operator decision 2026-06-20. Stop lives in RiskConfig.hard_stop_frac; profit-hold folds into L4
+#      (reward.py decompose, same key -> resume-safe); fast-pass is an env-level EVENT reward, EXEMPT from
+#      the per-step E8 whisper rule exactly like the C11 failed-day penalty (its positive twin). All knobs
+#      default 0/off, so the locked masks/laws/wall AND the existing reward+E8 proof are unchanged until on.
+#   A: _apply_stop_losses() closes any slot whose loss <= -hard_stop_frac*account_size, called after EVERY
+#      mark in step() before the wall check (via _realize_slot, which routes through _record_close so a stop
+#      counts in the win rate + L4). _record_close also accrues _pending_profit_hold (+1 per profitable
+#      close held >= reward_cfg.profit_hold_min_bars) -> RewardContext.profit_hold_count -> L4. _consume_fast_pass()
+#      pays reward_cfg.fast_pass_bonus once/day when target_hit AND flat AND within fast_pass_hours of
+#      _day_open_t (re-armed each midnight). COUPLING -> runtime/config.RiskConfig.hard_stop_frac +
+#      RewardConfig.{profit_hold_weight,profit_hold_min_bars,fast_pass_bonus,fast_pass_hours} + reward_engine.
+#   C: With losers cut small, winners rewarded for developing, and a big prize for banking the 2.5% fast, the
+#      policy finally has the "cut losers / let winners run / pass quickly" payoff a profitable strategy needs.

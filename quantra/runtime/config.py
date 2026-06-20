@@ -158,6 +158,12 @@ class RiskConfig:
     min_lot: float = 0.01
     max_lot: float = 50.0
     max_per_trade_risk_frac: float = 0.01  # per-trade cap = 1% of account size
+    # Hard per-trade STOP-LOSS [operator 2026-06-20]: close any single trade once its loss reaches this
+    # fraction of the INITIAL account balance, checked every bar (tick by tick). 0.0 = OFF (no hard stop;
+    # a trade only ends on a discretionary close / daily-wall breach / EOD). Set 0.005 for a 0.5% stop so
+    # one trade can't ride to the 4% wall (5 slots x 0.5% = 2.5% < 4%). COUPLING -> env/trading_env.py
+    # _apply_stop_losses(); barbershop_runner.build_env forwards the OVERRIDES["hard_stop_frac"] value.
+    hard_stop_frac: float = 0.0
 
 
 # COUPLING -> learning_system/reward_engine/reward.py: RewardEngine reads these exact field NAMES
@@ -187,6 +193,14 @@ class RewardConfig:
     drawdown_pain_steepness: float = 4.0   # exponential steepness of the pain ramp (was PAIN_K)
     trade_quality_weight: float = 5e-5     # close-quality / target-progress whisper (tiniest)
     failed_day_penalty: float = 5.0        # C11 — lives at the ENV level (per operator); mirrored here for VISIBILITY
+    # --- [operator 2026-06-20] exit-shaping additions (defaults 0/off -> existing behaviour + E8 proof unchanged) ---
+    profit_hold_weight: float = 0.0        # SMALL +reward per profitable close held >= profit_hold_min_bars
+    profit_hold_min_bars: int = 5          #   bars (1m) a winner must be held to earn the profit-hold bonus
+    #   folded into L4 (decompose: l4 += profit_hold_weight*profit_hold_count) — same layer KEY, resume-safe.
+    # BIG event-level bonus (EXEMPT from per-step E8, like failed_day_penalty): paid ONCE when the day's
+    # +target is hit within fast_pass_hours of the day's open — rewards passing the day FAST and decisively.
+    fast_pass_bonus: float = 0.0           # reward added once/day on a fast pass (0.0 = OFF)
+    fast_pass_hours: float = 12.0          # the window from the day's open within which the pass must land
 
 
 # COUPLING [C5] -> data_loader/loader.py: loader.py resolves each SYMBOL's bars via

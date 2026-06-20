@@ -40,7 +40,9 @@ from quantra.market_pipeline.law_mask_engine.engine import build_pointer_mask
 # COUPLING -> runtime/config.RewardConfig field names: only these weight knobs are forwarded from an
 # OVERRIDES dict into RewardConfig (failed_day_penalty is a challenge knob, handled by make_challenge).
 _REWARD_KEYS = ("net_pnl_weight", "step_pnl_weight", "daily_progress_weight",
-                "drawdown_pain_weight", "drawdown_pain_steepness", "trade_quality_weight")
+                "drawdown_pain_weight", "drawdown_pain_steepness", "trade_quality_weight",
+                # [2026-06-20] exit-shaping knobs — forwarded so eval sizes/rewards EXACTLY like training.
+                "profit_hold_weight", "profit_hold_min_bars", "fast_pass_bonus", "fast_pass_hours")
 _TRADE_ACTIONS = ("OPEN_LONG", "OPEN_SHORT", "CLOSE")
 
 
@@ -62,8 +64,15 @@ def build_env(data: Dict[str, "object"], overrides: Optional[dict], n_days: int)
     # Lower this to shrink position size so a day physically can't lose more than ~N_SLOTS*frac before the
     # wall — the structural lever for stopping breaches (reward shaping can't, by E8). COUPLING ->
     # runtime/config.py RiskConfig.max_per_trade_risk_frac + env/trading_env.py (risk_cfg -> RiskManager).
-    risk_frac = ov.get("max_per_trade_risk_frac")
-    risk_cfg = cfg.RiskConfig(max_per_trade_risk_frac=float(risk_frac)) if risk_frac is not None else None
+    # Build a RiskConfig only if the OVERRIDES touch sizing — per-trade cap and/or the hard stop-loss
+    # [2026-06-20]; both must match training so the eval's risk physics is identical. None -> default 1%/trade,
+    # no hard stop. COUPLING -> runtime/config.RiskConfig.{max_per_trade_risk_frac,hard_stop_frac}.
+    _risk_kwargs = {}
+    if ov.get("max_per_trade_risk_frac") is not None:
+        _risk_kwargs["max_per_trade_risk_frac"] = float(ov["max_per_trade_risk_frac"])
+    if ov.get("hard_stop_frac") is not None:
+        _risk_kwargs["hard_stop_frac"] = float(ov["hard_stop_frac"])
+    risk_cfg = cfg.RiskConfig(**_risk_kwargs) if _risk_kwargs else None
     phase = ov.get("training_phase")
     if phase is not None:   # COUPLING -> law_mask_engine reads cfg.TRAINING_PHASE (a module global)
         cfg.TRAINING_PHASE = cfg.PHASE_CONSTRAINED if str(phase) == "constrained" else cfg.PHASE_FREE
