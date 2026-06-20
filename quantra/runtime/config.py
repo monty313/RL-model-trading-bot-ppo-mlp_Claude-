@@ -239,6 +239,22 @@ TRAINING_WHEELS: bool = True
 
 
 # ---------------------------------------------------------------------------
+# CCI_REGIME_GATE — TEMPORARY, EXPERIMENTAL, OFF by default [operator 2026-06-20].
+# A reversible "trade only in a clean CCI regime" open-gate, layered on TOP of the
+# existing masks (only REMOVES options, never re-opens). When ON, a NEW open is allowed
+# only when BOTH CCI30 AND CCI100 sit on the SAME side of their (existing period-2/shift-4)
+# SMA on BOTH the 1m AND 30m timeframes: all four above -> longs only, all four below ->
+# shorts only, anything mixed -> no new opens at all. HOLD/CLOSE are never touched.
+# Default False so the repo behaves IDENTICALLY when the experiment is off — flip one flag
+# (or pass cci_regime_gate=True / OVERRIDES["cci_regime_gate"]=True) to turn it on, and back
+# to remove it with zero residue. COUPLING -> env/trading_env.py reads the precomputed
+# cci{30,100}_{1m,30m} vs cci{30,100}_sma_{1m,30m} columns and applies the gate in
+# direction_mask(); barbershop_runner.build_env honors the cci_regime_gate override.
+# ---------------------------------------------------------------------------
+CCI_REGIME_GATE: bool = False
+
+
+# ---------------------------------------------------------------------------
 # TRAINING_PHASE — gates the ENFORCEMENT of the market-condition signals
 # (market_volatility_obs / market_stationarity_obs / market_spread_obs). These
 # signals are ALWAYS in the observation; this flag only controls whether they

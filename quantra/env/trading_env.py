@@ -61,6 +61,12 @@ from quantra.market_pipeline.feature_builder.schema import N_SLOTS, PRECOMPUTED_
 # COUPLING [C1 in COUPLINGS.md]: depends on schema.PRECOMPUTED_NAMES ORDER (same map
 # laws._IDX + scheduler._COL build). A feature reorder invalidates these lookups.
 _COL = {name: i for i, name in enumerate(PRECOMPUTED_NAMES)}
+# CCI_REGIME_GATE ingredients [temporary experiment, off by default — see cfg.CCI_REGIME_GATE].
+# The (timeframe, period) pairs the regime gate reads: CCI30 + CCI100 on 1m + 30m, each compared
+# to its EXISTING period-2/shift-4 SMA (cci{p}_sma_{tf}). COUPLING [C1] -> schema CCI_TFS/_CCI_PERIODS:
+# every "cci{p}_{tf}" and "cci{p}_sma_{tf}" below must be a real precomputed column name.
+_CCI_REGIME_TFS = ("1m", "30m")
+_CCI_REGIME_PERIODS = (30, 100)
 # COUPLING [C2] -> quantra/market_pipeline/law_mask_engine/engine.py: direction action ints
 # {HOLD=0,OPEN_LONG=1,OPEN_SHORT=2,CLOSE=3} are defined there and indexed in _apply_action; they
 # must match ppo_agent/agent.py's direction head + live_bridge/live_session.py. Reorder -> wrong trades.
@@ -123,6 +129,7 @@ class TradingEnv:
         training_wheels: Optional[bool] = None,
         episode_days: Optional[int] = None,
         reward_cfg: Optional[cfg.RewardConfig] = None,
+        cci_regime_gate: Optional[bool] = None,
     ):
         self.symbols: List[str] = list(data.keys())            # fixed processing order
         self.data = data
@@ -139,6 +146,10 @@ class TradingEnv:
         # Training wheels [operator 2026-06-15]: semi-permanent counter-trend OPEN blocks.
         # Default follows config.TRAINING_WHEELS so a global flip removes them everywhere.
         self.training_wheels = cfg.TRAINING_WHEELS if training_wheels is None else bool(training_wheels)
+        # CCI-regime gate [temporary experiment 2026-06-20, off by default]: trade only in a clean
+        # CCI regime (see cfg.CCI_REGIME_GATE). Default follows the config flag so a global flip
+        # removes it everywhere; pass cci_regime_gate=True to turn it on for one env only.
+        self.cci_regime_gate = cfg.CCI_REGIME_GATE if cci_regime_gate is None else bool(cci_regime_gate)
 
         lengths = {len(d.matrix) for d in data.values()}
         assert len(lengths) == 1, "all symbols must share one aligned index/length"
@@ -280,6 +291,21 @@ class TradingEnv:
         row = self.data[sym].matrix[self.t]
         return np.array([row[_COL["tw_cci_block"]], row[_COL["tw_bb_block"]]], dtype=np.float32)
 
+    def _cci_regime(self, sym: str) -> int:
+        """CCI-regime classifier for the TEMPORARY open-gate (off by default; see cfg.CCI_REGIME_GATE).
+        Reads the precomputed RAW CCI30 + CCI100 on 1m + 30m and compares each to its EXISTING
+        period-2/shift-4 SMA (cci{p}_sma_{tf}). Returns +1 when ALL four are above their SMA
+        (clean bull -> longs only), -1 when ALL four are below (clean bear -> shorts only), and
+        0 otherwise (mixed -> no new opens). COUPLING [C1] -> schema CCI feature names."""
+        row = self.data[sym].matrix[self.t]
+        diffs = [row[_COL[f"cci{p}_{tf}"]] - row[_COL[f"cci{p}_sma_{tf}"]]
+                 for tf in _CCI_REGIME_TFS for p in _CCI_REGIME_PERIODS]
+        if all(d > 0 for d in diffs):
+            return 1
+        if all(d < 0 for d in diffs):
+            return -1
+        return 0
+
     def direction_mask(self, sym: str) -> np.ndarray:
         m = build_direction_mask(
             self._law_states(sym), self._position(sym), self._n_open(sym),
@@ -287,6 +313,20 @@ class TradingEnv:
             training_wheels=self.training_wheels,
             wheel_states=self._wheel_states(sym) if self.training_wheels else None,
         )
+        # CCI-regime gate [TEMPORARY experiment, off by default via cfg.CCI_REGIME_GATE]: applied on
+        # TOP of the locked-core mask (additive — only REMOVES opens, never re-opens). Allow NEW opens
+        # only in a clean CCI regime — +1 (all CCI30/100 above SMA on 1m+30m) -> longs only; -1 (all
+        # below) -> shorts only; 0 (mixed) -> no new opens. HOLD/CLOSE untouched; removable via the flag.
+        if self.cci_regime_gate:
+            regime = self._cci_regime(sym)
+            m = m.copy()
+            if regime > 0:
+                m[OPEN_SHORT] = -1e9
+            elif regime < 0:
+                m[OPEN_LONG] = -1e9
+            else:
+                m[OPEN_LONG] = -1e9
+                m[OPEN_SHORT] = -1e9
         # C10 [2026-06-19]: while the day is locked out (a daily-wall breach OR an OFF-mode
         # stop-for-day at target), forbid NEW opens for the rest of that day — the account is flat
         # and stays flat until midnight reset_day() lifts the lockout. CLOSE/HOLD stay legal. The
@@ -757,3 +797,17 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #   C: A simulated "day" now matches FTMO's real CE(S)T challenge day, so the daily target/wall re-anchor
 #      and the failed-day grading happen at the same instant the real challenge does — closing a
 #      timezone-realism gap between a sim pass and a live-legal pass.
+# [2026-06-20] TEMPORARY experiment — CCI-regime open-gate (off by default).
+#   I: The bot over-trades and breaches; the operator wants a REVERSIBLE test of "only trade in a clean
+#      CCI regime" without touching the locked core, to accept/reject after seeing day-by-day results.
+#   R: Operator decision 2026-06-20: allow NEW opens only when CCI30 AND CCI100 are BOTH on the same
+#      side of their (existing period-2/shift-4) SMA on BOTH 1m AND 30m — all above => longs only, all
+#      below => shorts only, mixed => no new opens. Additive (only removes), removable via one flag.
+#   A: Added self.cci_regime_gate (defaults to cfg.CCI_REGIME_GATE = False) + _cci_regime(sym) reading
+#      the precomputed cci{30,100}_{1m,30m} vs cci{30,100}_sma_{1m,30m}; direction_mask() applies the
+#      block on TOP of the locked-core mask (HOLD/CLOSE untouched). barbershop_runner.build_env honors a
+#      cci_regime_gate override so a run can flip it on. COUPLING -> runtime/config.CCI_REGIME_GATE +
+#      feature_builder/schema.py CCI names. The locked masks/laws/sizing/wall are UNCHANGED when off.
+#   C: While on, the policy can only open with a confirmed multi-timeframe CCI regime (no chop, no
+#      counter-regime opens) — a cheap, fully-reversible structural restraint the operator can keep or
+#      drop after watching the per-day scoreboard, with the locked core identical either way.

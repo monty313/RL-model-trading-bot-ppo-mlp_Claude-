@@ -69,6 +69,7 @@ def build_env(data: Dict[str, "object"], overrides: Optional[dict], n_days: int)
         cfg.TRAINING_PHASE = cfg.PHASE_CONSTRAINED if str(phase) == "constrained" else cfg.PHASE_FREE
     return TradingEnv(data, challenge=challenge, reward_cfg=reward_cfg, risk_cfg=risk_cfg,
                       training_wheels=ov.get("training_wheels", cfg.TRAINING_WHEELS),
+                      cci_regime_gate=ov.get("cci_regime_gate", cfg.CCI_REGIME_GATE),
                       episode_days=n_days)
 
 

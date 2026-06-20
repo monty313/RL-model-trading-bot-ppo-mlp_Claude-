@@ -640,6 +640,54 @@ def test_env_direction_mask_applies_wheels_when_enabled():
     assert off.direction_mask("EURUSD")[OPEN_SHORT] == 0    # wheels off -> short legal
 
 
+def _cci_regime_env(**cci):
+    """An env on a single bar with gates OPEN (opens legal absent any gate) + the given CCI
+    features set, training wheels OFF, so ONLY the CCI-regime gate decides the open mask."""
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3,
+                    adf_stat_1m=-3.5, **cci)
+    mat = np.tile(row, (3, 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.full(3, 100.0), atr=np.full(3, 1.0),
+                    spread=np.full(3, 10.0), valid_from=0)
+    return sd
+
+
+# CCI30+CCI100 on 1m+30m, each vs its existing period-2/shift-4 SMA. All four above -> bull.
+_CCI_BULL = dict(cci30_1m=50, cci30_sma_1m=10, cci100_1m=40, cci100_sma_1m=10,
+                 cci30_30m=50, cci30_sma_30m=10, cci100_30m=40, cci100_sma_30m=10)
+_CCI_BEAR = dict(cci30_1m=-50, cci30_sma_1m=-10, cci100_1m=-40, cci100_sma_1m=-10,
+                 cci30_30m=-50, cci30_sma_30m=-10, cci100_30m=-40, cci100_sma_30m=-10)
+# Bull on 1m but CCI100 is BELOW its SMA on 30m -> not a clean regime (mixed).
+_CCI_MIXED = dict(_CCI_BULL, cci100_30m=-40, cci100_sma_30m=-10)
+
+
+def test_cci_regime_gate_off_is_a_noop():
+    """Default (cfg.CCI_REGIME_GATE False): the gate never fires, both opens stay legal even in a
+    mixed regime — the repo behaves identically when the experiment is off."""
+    sd = _cci_regime_env(**_CCI_MIXED)
+    off = TradingEnv({"EURUSD": sd})                              # default: gate off
+    m = off.direction_mask("EURUSD")
+    assert m[OPEN_LONG] == 0 and m[OPEN_SHORT] == 0 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_bull_allows_longs_only():
+    sd = _cci_regime_env(**_CCI_BULL)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_LONG] == 0 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_bear_allows_shorts_only():
+    sd = _cci_regime_env(**_CCI_BEAR)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_SHORT] == 0 and m[OPEN_LONG] < -1e8 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_mixed_blocks_all_new_opens():
+    """No clean multi-timeframe regime -> NO new opens (both blocked), but HOLD/CLOSE stay legal."""
+    sd = _cci_regime_env(**_CCI_MIXED)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+
+
 # =============================================================================
 # SECTION G — ENV + RISKMANAGER + COSTLAYER (M4)
 # FTMO link: this is the challenge physics. The B5 invariant — 4 symbols can't
