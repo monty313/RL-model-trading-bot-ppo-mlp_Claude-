@@ -688,6 +688,64 @@ def test_cci_regime_gate_mixed_blocks_all_new_opens():
     assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
 
 
+def _rule_env(close, dates=None, target=2.5):
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    mat = np.tile(row, (len(close), 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.asarray(close, float), atr=np.full(len(close), 1e-3),
+                    spread=np.full(len(close), 2e-5), valid_from=0, dates=dates)
+    return TradingEnv({"EURUSD": sd}, challenge=cfg.make_challenge(daily_target_pct=target, daily_risk_pct=4.0),
+                      episode_days=2 if dates is not None else 1)
+
+
+def test_rule1_target_flattens_all_and_enters_1pct_phase_b():
+    """RULE 1 (already implemented — pinned): hitting +2.5% auto-flats ALL trades and switches to the
+    tighter 1% Phase-B trailing wall, then keeps trading."""
+    env = _rule_env(np.linspace(1.20, 1.50, 40))           # rises hard so a long clears +2.5%
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    for _ in range(15):
+        env.step((0, 0.0, 0))
+        if env.account.phase == "B":
+            break
+    assert env.account.phase == "B" and env._n_open("EURUSD") == 0     # flattened all at the flip
+    gap = (env.account.peak_equity - env.account.wall_equity) / env.account.account_size * 100.0
+    assert abs(gap - 1.0) < 1e-6                                       # fresh 1% trailing wall
+
+
+def test_rule3_breach_stops_trading_for_the_day_each_bar():
+    """RULE 3 (already implemented — pinned): touching the 4% wall force-flattens and BLOCKS new opens
+    for the rest of that day, checked every bar."""
+    env = _rule_env(np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.10, 37)]))   # drop -> breach
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    breached = False
+    for _ in range(25):
+        _, _, _, info = env.step((0, 0.0, 0))
+        if info["breached"]:
+            breached = True
+            assert env._n_open("EURUSD") == 0                          # force-flattened at the wall
+            m = env.direction_mask("EURUSD")
+            assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8        # opens blocked the rest of the day
+            break
+    assert breached
+
+
+def test_rule2_end_of_day_flatten_closes_all_and_counts_the_trade():
+    """RULE 2 (new): a trade left open at midnight is flattened at the day's LAST bar (no cross-day
+    positions), and that realized close is counted in info n_closed/n_wins so it feeds the win rate."""
+    bpd = 20; T = 2 * bpd + 1
+    dates = (np.arange(T) // bpd).astype(np.int64)         # day id changes at bar bpd
+    env = _rule_env(np.linspace(1.20, 1.26, T), dates=dates, target=99.0)   # rising; target never hit
+    env.reset(); env.step((OPEN_LONG, 0.5, 0))             # open on day 1, never close it manually
+    saw_eod = False
+    for _ in range(bpd + 2):
+        _, _, _, info = env.step((0, 0.0, 0))
+        if info["n_closed"] > 0:                           # the EOD flatten realized the carried trade
+            saw_eod = True
+            assert info["n_wins"] >= 1                     # it was a winner (price rose)
+            assert env._n_open("EURUSD") == 0              # flat after the boundary -> no cross-day position
+            break
+    assert saw_eod
+
+
 # =============================================================================
 # SECTION G — ENV + RISKMANAGER + COSTLAYER (M4)
 # FTMO link: this is the challenge physics. The B5 invariant — 4 symbols can't

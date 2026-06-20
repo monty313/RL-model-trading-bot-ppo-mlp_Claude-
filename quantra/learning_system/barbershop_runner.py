@@ -96,11 +96,11 @@ class _DayAccum:
         self.coerced = 0
         self.steps = 0
         self.breached = False
-        # Win rate is measured over the policy's DISCRETIONARY closes (CLOSE actions): each CLOSE realizes
-        # one slot's PnL, so closes == round-trip trades. A "win" is a close whose realized PnL is positive
-        # NET of the close cost (info["realized"] is gross uPnL at the close price; info["cost"] the close
-        # cost — both from env._apply_action's CLOSE branch). Forced flattens (breach/target/EOD) aren't
-        # surfaced per-close in info, so they're excluded — this is the win rate of the trades the bot CHOSE.
+        # RULE 2 [operator 2026-06-20]: win rate is measured over EVERY trade realized in the day — a
+        # discretionary CLOSE, a breach/target force-flatten, OR the end-of-day flatten (all positions
+        # are closed by EOD, so every trade gets a verdict). A "win" is a close whose realized PnL is
+        # positive NET of the close cost. The env surfaces both per step as info["n_closed"]/["n_wins"]
+        # (env._step_closed_nets), so this no longer undercounts the trades the bot didn't close itself.
         self.closes = 0
         self.wins = 0
 
@@ -111,10 +111,8 @@ class _DayAccum:
                               (self.peak - acct.equity) / acct.account_size * 100.0)
         if info.get("executed", "HOLD") in _TRADE_ACTIONS:
             self.trades += 1
-        if info.get("executed") == "CLOSE":                       # one realized round-trip trade
-            self.closes += 1
-            if (info.get("realized", 0.0) - info.get("cost", 0.0)) > 0.0:
-                self.wins += 1                                     # winner NET of the close cost
+        self.closes += int(info.get("n_closed", 0))               # RULE 2: ALL realized closes this step
+        self.wins += int(info.get("n_wins", 0))                   # ... that won NET of the close cost
         if info.get("coerced"):
             self.coerced += 1
         if info.get("breached") or info.get("locked_out"):
@@ -249,3 +247,14 @@ def run_pass(agent, data: Dict[str, "object"], overrides: Optional[dict], n_days
 #      env/trading_env.py (_apply_action CLOSE info keys realized/cost; cci_regime_gate) + tests _ROW_KEYS.
 #   C: Every eval/gauge day now reports the policy's win rate alongside PnL, so the operator can judge
 #      whether a guardrail improves the QUALITY of trades (win rate) — not only whether it survives the wall.
+# [2026-06-20] RULE 2 — win rate counts EVERY realized close (all trades close by EOD).
+#   I: The discretionary-only win rate showed 0/0 on days the bot opened but never closed itself (it rode
+#      positions to the wall), so the column was blind exactly when it mattered.
+#   R: Operator rule 2026-06-20: every trade must be CLOSED BY END OF DAY to count; count all realized
+#      closes (discretionary + breach/target/EOD flatten). The env now flattens at EOD and surfaces every
+#      realized close per step.
+#   A: _DayAccum.update now sums info["n_closed"]/info["n_wins"] (env._step_closed_nets) instead of only
+#      info["executed"]=="CLOSE"; closes == round-trip trades, wins == positive net of cost. COUPLING ->
+#      env/trading_env.py (step() surfaces n_closed/n_wins; _advance_bar EOD _force_flatten).
+#   C: The per-day win rate is now complete and honest over ALL of a day's trades — no 0/0 blind spots —
+#      so the operator can actually read whether the policy's trades are winning.

@@ -185,6 +185,12 @@ class TradingEnv:
         # C17: signed, account-normalized trade-quality accrued by this step's closes; consumed in
         # _reward() -> RewardContext.trade_close_quality -> reward_engine/reward.py decompose() L4.
         self._pending_trade_quality = 0.0
+        # RULE 2 [operator 2026-06-20]: net PnL (after close cost) of every trade realized THIS step —
+        # from a discretionary CLOSE, a breach/target force-flatten, OR the end-of-day flatten. step()
+        # resets this each call and surfaces n_closed/n_wins in info so the scoreboard's win rate counts
+        # EVERY trade (all are closed by EOD), not just the bot's voluntary closes. COUPLING ->
+        # learning_system/barbershop_runner.py _DayAccum reads info["n_closed"]/info["n_wins"].
+        self._step_closed_nets: List[float] = []
         self.account = ChallengeState(self.challenge_cfg.ftmo_account_size, self.challenge_cfg)
         self.slots = {s: [Slot() for _ in range(N_SLOTS)] for s in self.symbols}
         # PER-SYMBOL reward attribution [2026-06-15 fix]: each symbol's L0 reflects ONLY its
@@ -411,6 +417,7 @@ class TradingEnv:
             self._sym_realized[sym] += realized - cc.total   # per-symbol attribution
             # C17: feed L4 trade-quality (read sl.mfe BEFORE the slot is freed -> reward_engine L4).
             self._record_close_quality(realized, sl.mfe > 0.0)
+            self._step_closed_nets.append(realized - cc.total)   # RULE 2: this round-trip's net result
             info.update(executed="CLOSE", lots=sl.lots, cost=cc.total, realized=realized)
             self.slots[sym][idx] = Slot()  # free it
 
@@ -427,6 +434,12 @@ class TradingEnv:
         # fires]. Needs SymbolData.dates; synthetic data without dates keeps single-episode semantics.
         d = self.data[self.symbols[0]].dates
         if d is not None and d[self.t] != d[self.t - 1]:
+            # RULE 2 [operator 2026-06-20]: END-OF-DAY FLATTEN — close EVERY open trade at the finished
+            # day's LAST bar (self.t - 1) so no position spans days and every trade gets a realized
+            # verdict that counts toward THAT day's win rate. Re-mark so equity reflects the realized
+            # closes BEFORE the failed-day penalty grades the day and reset_day re-anchors.
+            self._force_flatten(at_t=self.t - 1)
+            self._mark_to_market()
             # C11 [2026-06-19]: grade the FINISHED day BEFORE reset_day re-anchors. The penalty is
             # stashed and added to this step's reward in step(). The account (balance/equity) carries
             # forward across the boundary — only the day anchors + breach/lockout flags reset (C10).
@@ -476,10 +489,13 @@ class TradingEnv:
             self.account.locked_out = True
         self._mark_to_market()
 
-    def _force_flatten(self) -> None:
-        """Breach / lockout: realize every open slot at current price + close cost."""
+    def _force_flatten(self, at_t: Optional[int] = None) -> None:
+        """Realize every open slot at current price + close cost. Used by a breach/lockout, the
+        target auto-flat, AND the end-of-day flatten (RULE 2). `at_t` overrides the price bar — the
+        EOD flatten passes the day's LAST bar (self.t - 1) so trades close at the day's close."""
+        t = self.t if at_t is None else at_t
         for sym in self.symbols:
-            c = self.data[sym].close[self.t]
+            c = self.data[sym].close[t]
             con = self._contract(sym)
             for i, sl in enumerate(self.slots[sym]):
                 if sl.occupied:
@@ -488,6 +504,7 @@ class TradingEnv:
                     self.account.realize(pnl)
                     self.account.charge(cost)
                     self._sym_realized[sym] += pnl - cost     # per-symbol attribution
+                    self._step_closed_nets.append(pnl - cost)  # RULE 2: a forced/EOD close is a real result
                     # C17: a forced close still feeds L4 trade-quality (read sl.mfe before freeing)
                     # — round-tripping a winner into a breach/lockout is exactly a "gave back a winner".
                     self._record_close_quality(pnl, sl.mfe > 0.0)
@@ -599,6 +616,7 @@ class TradingEnv:
         direction, raw_size, pointer = int(action[0]), float(action[1]), int(action[2])
         sym = self.symbols[self.cursor]
         self._decision_t = self.t          # bar the action is decided on (pre any advance)
+        self._step_closed_nets = []        # RULE 2: ledger of every trade realized during THIS step
 
         info = self._apply_action(sym, direction, raw_size, pointer)
         self._mark_to_market()  # equity reflects this symbol's cost/realize at bar t
@@ -641,10 +659,14 @@ class TradingEnv:
         self._pending_day_penalty = 0.0
         reward = self._reward(sym) + day_penalty
         self._prev_equity = self.account.equity
+        # RULE 2: every trade realized this step (discretionary CLOSE + breach/target/EOD flatten) and
+        # how many won NET of cost — the scoreboard's win rate is built from these (all trades close by EOD).
         info.update(symbol=sym, equity=self.account.equity,
                     remaining_buffer=self.account.remaining_buffer,
                     breached=self.account.breached, locked_out=self.account.locked_out,
-                    day_penalty=day_penalty, days_elapsed=self._days_elapsed)
+                    day_penalty=day_penalty, days_elapsed=self._days_elapsed,
+                    n_closed=len(self._step_closed_nets),
+                    n_wins=sum(1 for x in self._step_closed_nets if x > 0.0))
         obs = None if self.done else self._obs()
         return obs, reward, self.done, info
 
@@ -811,3 +833,20 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #   C: While on, the policy can only open with a confirmed multi-timeframe CCI regime (no chop, no
 #      counter-regime opens) — a cheap, fully-reversible structural restraint the operator can keep or
 #      drop after watching the per-day scoreboard, with the locked core identical either way.
+# [2026-06-20] RULE 2 — end-of-day flatten + count every realized close toward the win rate.
+#   I: Positions carried across the midnight boundary, so a trade could span days and the win rate (which
+#      only saw discretionary CLOSE actions) showed 0/0 on days the bot opened but never closed itself —
+#      it just rode positions into the wall. The operator's rule: every trade must be CLOSED BY END OF DAY
+#      to count, so each day's trades are self-contained and every one gets a win/loss verdict.
+#   R: Operator decision 2026-06-20 (rule 2). Close all open trades at the day's last bar; count a "win"
+#      as a realized close positive NET of the close cost, for EVERY close (discretionary, breach/target,
+#      or EOD). Rules 1 (target->flatten->1% Phase B) and 3 (per-bar breach->stop-for-day) were verified
+#      already correct and are unchanged.
+#   A: _advance_bar() now calls _force_flatten(at_t=self.t-1) + _mark_to_market() at the calendar-day
+#      boundary BEFORE grading/reset_day, so the day closes flat at its last bar. _force_flatten gained an
+#      at_t arg. step() resets a per-step ledger (_step_closed_nets) that _apply_action's CLOSE and every
+#      _force_flatten append each realized trade's NET result to, and surfaces info["n_closed"]/["n_wins"].
+#      COUPLING -> learning_system/barbershop_runner.py _DayAccum sums those into closes/wins/win_rate.
+#   C: Each day now ends flat with a complete, honest win rate over ALL of its trades (no cross-day
+#      positions, no 0/0 blind spots) — so the scoreboard finally reflects how often the bot's trades win,
+#      which is the signal the operator needs to judge whether a change improves trade QUALITY.
