@@ -651,13 +651,13 @@ def _cci_regime_env(**cci):
     return sd
 
 
-# CCI30+CCI100 on 1m+30m, each vs its existing period-2/shift-4 SMA. All four above -> bull.
+# CCI30+CCI100 on 1m+4H, each vs its existing period-2/shift-4 SMA. All four above -> bull.
 _CCI_BULL = dict(cci30_1m=50, cci30_sma_1m=10, cci100_1m=40, cci100_sma_1m=10,
-                 cci30_30m=50, cci30_sma_30m=10, cci100_30m=40, cci100_sma_30m=10)
+                 cci30_4H=50, cci30_sma_4H=10, cci100_4H=40, cci100_sma_4H=10)
 _CCI_BEAR = dict(cci30_1m=-50, cci30_sma_1m=-10, cci100_1m=-40, cci100_sma_1m=-10,
-                 cci30_30m=-50, cci30_sma_30m=-10, cci100_30m=-40, cci100_sma_30m=-10)
-# Bull on 1m but CCI100 is BELOW its SMA on 30m -> not a clean regime (mixed).
-_CCI_MIXED = dict(_CCI_BULL, cci100_30m=-40, cci100_sma_30m=-10)
+                 cci30_4H=-50, cci30_sma_4H=-10, cci100_4H=-40, cci100_sma_4H=-10)
+# Bull on 1m but CCI100 is BELOW its SMA on 4H -> not a clean regime (mixed).
+_CCI_MIXED = dict(_CCI_BULL, cci100_4H=-40, cci100_sma_4H=-10)
 
 
 def test_cci_regime_gate_off_is_a_noop():

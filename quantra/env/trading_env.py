@@ -62,10 +62,13 @@ from quantra.market_pipeline.feature_builder.schema import N_SLOTS, PRECOMPUTED_
 # laws._IDX + scheduler._COL build). A feature reorder invalidates these lookups.
 _COL = {name: i for i, name in enumerate(PRECOMPUTED_NAMES)}
 # CCI_REGIME_GATE ingredients [temporary experiment, off by default — see cfg.CCI_REGIME_GATE].
-# The (timeframe, period) pairs the regime gate reads: CCI30 + CCI100 on 1m + 30m, each compared
-# to its EXISTING period-2/shift-4 SMA (cci{p}_sma_{tf}). COUPLING [C1] -> schema CCI_TFS/_CCI_PERIODS:
-# every "cci{p}_{tf}" and "cci{p}_sma_{tf}" below must be a real precomputed column name.
-_CCI_REGIME_TFS = ("1m", "30m")
+# The (timeframe, period) pairs the regime gate reads: CCI30 + CCI100 on 1m + 4H, each compared
+# to its EXISTING period-2/shift-4 SMA (cci{p}_sma_{tf}). The 4H leg gives a real higher-timeframe
+# trend backdrop; 1m times the entry. NOTE: using 4H to ENFORCE (not just observe) is an operator
+# override of the 4H-observation-only rule [2026-06-20], same precedent as the training wheels.
+# COUPLING [C1] -> schema CCI_TFS/_CCI_PERIODS: every "cci{p}_{tf}" and "cci{p}_sma_{tf}" below
+# must be a real precomputed column name (1m + 4H + CCI 30/100 are all present).
+_CCI_REGIME_TFS = ("1m", "4H")
 _CCI_REGIME_PERIODS = (30, 100)
 # COUPLING [C2] -> quantra/market_pipeline/law_mask_engine/engine.py: direction action ints
 # {HOLD=0,OPEN_LONG=1,OPEN_SHORT=2,CLOSE=3} are defined there and indexed in _apply_action; they
@@ -299,7 +302,7 @@ class TradingEnv:
 
     def _cci_regime(self, sym: str) -> int:
         """CCI-regime classifier for the TEMPORARY open-gate (off by default; see cfg.CCI_REGIME_GATE).
-        Reads the precomputed RAW CCI30 + CCI100 on 1m + 30m and compares each to its EXISTING
+        Reads the precomputed RAW CCI30 + CCI100 on 1m + 4H and compares each to its EXISTING
         period-2/shift-4 SMA (cci{p}_sma_{tf}). Returns +1 when ALL four are above their SMA
         (clean bull -> longs only), -1 when ALL four are below (clean bear -> shorts only), and
         0 otherwise (mixed -> no new opens). COUPLING [C1] -> schema CCI feature names."""
@@ -321,7 +324,7 @@ class TradingEnv:
         )
         # CCI-regime gate [TEMPORARY experiment, off by default via cfg.CCI_REGIME_GATE]: applied on
         # TOP of the locked-core mask (additive — only REMOVES opens, never re-opens). Allow NEW opens
-        # only in a clean CCI regime — +1 (all CCI30/100 above SMA on 1m+30m) -> longs only; -1 (all
+        # only in a clean CCI regime — +1 (all CCI30/100 above SMA on 1m+4H) -> longs only; -1 (all
         # below) -> shorts only; 0 (mixed) -> no new opens. HOLD/CLOSE untouched; removable via the flag.
         if self.cci_regime_gate:
             regime = self._cci_regime(sym)
@@ -833,6 +836,17 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #   C: While on, the policy can only open with a confirmed multi-timeframe CCI regime (no chop, no
 #      counter-regime opens) — a cheap, fully-reversible structural restraint the operator can keep or
 #      drop after watching the per-day scoreboard, with the locked core identical either way.
+# [2026-06-20] CCI-regime gate timeframes 30m -> 4H (operator decision).
+#   I: On 1m+30m the gate's win rate came in BELOW random — a 1m+30m "trend" is mostly fast noise, so
+#      the higher-TF leg wasn't a real trend backdrop. The operator wants the slow leg on 4H instead.
+#   R: Operator decision 2026-06-20: read CCI30+CCI100 on 1m + 4H (was 1m + 30m). 4H is a genuine
+#      higher-timeframe trend context; 1m still times the entry. Using 4H to ENFORCE (not just observe)
+#      is an explicit operator override of the 4H-observation-only rule (same precedent as TRAINING_WHEELS).
+#   A: _CCI_REGIME_TFS = ("1m", "4H"); _cci_regime() now reads cci{30,100}_{1m,4H} vs their SMAs. The
+#      4H CCI columns already exist in the precomputed block (CCI_TFS includes 4H) so no pipeline change.
+#      Logic (all-above => longs only / all-below => shorts only / mixed => no opens) is unchanged.
+#   C: A new open now needs the 4H CCI trend AND the 1m CCI to agree, so the gate aligns entries with the
+#      real higher-timeframe direction rather than 1m chop — the operator's next test of the regime theory.
 # [2026-06-20] RULE 2 — end-of-day flatten + count every realized close toward the win rate.
 #   I: Positions carried across the midnight boundary, so a trade could span days and the win rate (which
 #      only saw discretionary CLOSE actions) showed 0/0 on days the bot opened but never closed itself —
