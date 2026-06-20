@@ -255,6 +255,18 @@ CCI_REGIME_GATE: bool = False
 
 
 # ---------------------------------------------------------------------------
+# MIN_AGGRESSION — exploration FLOOR for the aggression scheduler [operator 2026-06-20].
+# Default 0.0 = LOCKED behaviour unchanged. The G8 miss-rate is diluted toward 0 by bars where a
+# mask/guardrail (CCI gate, training wheels, laws) holds the bot FLAT, and the scheduler's pure-EMA
+# update decays aggression (entropy_coef/LR/epochs) to ~0 before a fresh policy can learn. Raise this
+# (e.g. 0.3–0.4) to keep exploration of the still-available options alive under masks; the scheduler
+# never lets aggression fall below it. COUPLING -> trainer/scheduler.py (AggressionScheduler.min_aggression)
+# + the notebook passes this into AggressionScheduler(min_aggression=...).
+# ---------------------------------------------------------------------------
+MIN_AGGRESSION: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # TRAINING_PHASE — gates the ENFORCEMENT of the market-condition signals
 # (market_volatility_obs / market_stationarity_obs / market_spread_obs). These
 # signals are ALWAYS in the observation; this flag only controls whether they

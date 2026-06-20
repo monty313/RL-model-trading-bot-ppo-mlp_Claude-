@@ -1277,6 +1277,26 @@ def test_aggression_cools_as_misses_fall():
     assert sch.aggression < 0.1                        # aggression cools toward low end
 
 
+def test_aggression_floor_keeps_exploration_alive_under_masks():
+    """Operator exploration floor (min_aggression): with a diluted miss-rate (masks hold the bot flat),
+    aggression must NOT collapse to ~0 — it stays at/above the floor so entropy/LR/epochs keep exploring.
+    Default 0.0 is unchanged (the cool-down test above still holds)."""
+    floor = 0.35
+    sch = AggressionScheduler(start=1.0, min_aggression=floor)
+    for _ in range(200):
+        sch.update(miss_rate=0.0)                      # mask-diluted signal -> EMA wants to go to 0
+    assert sch.aggression >= floor - 1e-9              # but the floor holds exploration up
+    v = sch.values()                                   # dials sit ABOVE the cold floor, still in-range
+    rng = sch.ranges
+    assert v.entropy_coef > rng.entropy[0] and v.lr > rng.lr[0] and v.epochs > rng.epochs[0]
+    assert rng.entropy[0] <= v.entropy_coef <= rng.entropy[1] and rng.lr[0] <= v.lr <= rng.lr[1]
+    # the default scheduler (no floor) still collapses — the floor is strictly opt-in
+    cold = AggressionScheduler(start=1.0)
+    for _ in range(200):
+        cold.update(miss_rate=0.0)
+    assert cold.aggression < floor
+
+
 def test_g8_missed_opportunity_requires_multi_tf_agreement_flat_and_move():
     row = _feat_row(ssma_align_5m=1, ssma_align_30m=1, ssma_align_4H=1)
     assert missed_opportunity(row, was_flat=True, realized_move_atr=2.0) is True   # all align + ran 2 ATR
