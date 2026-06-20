@@ -917,8 +917,20 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #   A: _CCI_REGIME_TFS = ("1m", "4H"); _cci_regime() now reads cci{30,100}_{1m,4H} vs their SMAs. The
 #      4H CCI columns already exist in the precomputed block (CCI_TFS includes 4H) so no pipeline change.
 #      Logic (all-above => longs only / all-below => shorts only / mixed => no opens) is unchanged.
-#   C: A new open now needs the 4H CCI trend AND the 1m CCI to agree, so the gate aligns entries with the
-#      real higher-timeframe direction rather than 1m chop — the operator's next test of the regime theory.
+#   C: [SUPERSEDED by the finding below — experiment failed.]
+# [2026-06-20] CCI-regime gate EXPERIMENT CONCLUDED — KEEP OFF.
+#   I: The exit-overhaul run (with CCI_REGIME_GATE=True in the notebook) showed 0 trades/day on every
+#      eval day and health trace ent≈0, miss≈0, kl≈0 — the policy converged to always-HOLD.
+#   R: Root cause: on real EURUSD the "all four 1m+4H CCIs agree" condition is met on <1% of bars.
+#      The gate was blocking ~99% of opens during rollout collection. The policy saw almost nothing
+#      but HOLD, miss_rate stayed near 0 (G8 requires SSMA 3-TF agreement too), aggression decayed
+#      to its floor, and PPO optimised toward the only action ever rewarded: HOLD.
+#   A: CCI_REGIME_GATE defaulted False in config.py (unchanged); notebook toggle set back to False.
+#      The 4H CCI regime features (cci{30,100}_{1m,4H} vs their SMAs) remain in the observation so
+#      the policy can learn the regime as a soft signal. No code change needed (gate is additive;
+#      toggling False removes it with zero residue).
+#   C: The bot will now see opens on the vast majority of bars it was previously masked flat on,
+#      allowing the policy to trade, learn from outcomes, and develop a real directional brain.
 # [2026-06-20] RULE 2 — end-of-day flatten + count every realized close toward the win rate.
 #   I: Positions carried across the midnight boundary, so a trade could span days and the win rate (which
 #      only saw discretionary CLOSE actions) showed 0/0 on days the bot opened but never closed itself —

@@ -253,19 +253,17 @@ TRAINING_WHEELS: bool = True
 
 
 # ---------------------------------------------------------------------------
-# CCI_REGIME_GATE — TEMPORARY, EXPERIMENTAL, OFF by default [operator 2026-06-20].
-# A reversible "trade only in a clean CCI regime" open-gate, layered on TOP of the
-# existing masks (only REMOVES options, never re-opens). When ON, a NEW open is allowed
-# only when BOTH CCI30 AND CCI100 sit on the SAME side of their (existing period-2/shift-4)
-# SMA on BOTH the 1m AND 4H timeframes: all four above -> longs only, all four below ->
-# shorts only, anything mixed -> no new opens at all. HOLD/CLOSE are never touched. [2026-06-20:
-# the slow leg moved 30m -> 4H so it's a real higher-timeframe trend backdrop; using 4H to ENFORCE
-# is an operator override of the 4H-observation-only rule, same precedent as TRAINING_WHEELS.]
-# Default False so the repo behaves IDENTICALLY when the experiment is off — flip one flag
-# (or pass cci_regime_gate=True / OVERRIDES["cci_regime_gate"]=True) to turn it on, and back
-# to remove it with zero residue. COUPLING -> env/trading_env.py reads the precomputed
-# cci{30,100}_{1m,4H} vs cci{30,100}_sma_{1m,4H} columns and applies the gate in
-# direction_mask(); barbershop_runner.build_env honors the cci_regime_gate override.
+# CCI_REGIME_GATE — EXPERIMENT CONCLUDED, KEEP OFF [operator 2026-06-20].
+# The "trade only in a clean CCI regime" open-gate was tested with all four 1m+4H CCI
+# (CCI30 AND CCI100 on BOTH 1m AND 4H) required to agree. RESULT: FAILED. On real
+# EURUSD the "all four agree" condition is met on <1% of bars — the gate blocked ~99%
+# of opens during training. The policy saw nearly nothing but HOLD, miss_rate collapsed
+# to 0, aggression decayed to its floor, and the net converged to always-HOLD (confirmed:
+# 0 trades/day on every eval scoreboard after the exit-overhaul run). The 4H CCI regime
+# IS in the observation (cci{30,100}_{1m,4H} vs their SMAs) so the policy can learn it
+# as a soft signal — it must not be a hard gate. Default remains False (no behaviour
+# change); the toggle is retained so the experiment can be reproduced. COUPLING ->
+# env/trading_env.py direction_mask(); barbershop_runner.build_env honors the override.
 # ---------------------------------------------------------------------------
 CCI_REGIME_GATE: bool = False
 
