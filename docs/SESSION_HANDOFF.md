@@ -8,6 +8,22 @@ off. Read `CLAUDE.md` first for durable orientation; this is the current state +
 
 ---
 
+## ▶️ START THE NEXT SESSION — copy-paste this as your first message
+> Open a new Claude Code session on this repo, branch `claude/focused-faraday-if1ue7`, then paste:
+
+```
+Read CLAUDE.md and docs/SESSION_HANDOFF.md in full, then give me a 5-line recap of where
+we are and what's next — don't change anything yet. Context: a PPO bot to repeatedly PASS
+FTMO-style challenges (+2.5%/day without breaching the 4% trailing DD). Priority: (1) pass
+consistently, (2) +2.5% without breaching trailing DD, (3) everything else. We just added
+return normalization and are about to run training on real EURUSD to check the whipsaw is
+gone and breaches trend down. I'll paste scoreboards as they stream; help me read them and
+decide the next lever (next candidate: the drawdown-pain weight for green-day peak-giveback
+breaches). Respect 🔴-locked items, keep every change one-line revertible in the notebook.
+```
+
+---
+
 ## The goal (north star)
 A PPO policy that **repeatedly PASSES** FTMO-style challenges: **+2.5%/day without breaching
 the 4% trailing daily drawdown**, day after day, on one continuous account. Priority order:
