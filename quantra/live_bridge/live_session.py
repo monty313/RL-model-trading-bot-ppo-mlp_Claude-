@@ -3,7 +3,7 @@
 WHAT THIS MODULE DOES
 ---------------------
 The missing live loop (the M14 CLI said "no feed wired"; this wires it). Each time a
-new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 207-dim
+new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 215-dim
 observation (M2 features + M3 law states + a LIVE portfolio/account mirror), computes
 the masks, runs the policy DETERMINISTICALLY, sizes via the RiskManager, and executes
 via the ExecutionAdapter — honoring the manual halt + 4% breach auto-flat. Two feeds:
@@ -238,8 +238,12 @@ class LiveSession:
         self.portfolio.mark(sym, price, atr)
         law = compute_law_states(market_row)
         # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py + env/trading_env.py:
-        # assemble_state's block order (market, law, trade, portfolio, account) + account_block() names
-        # must match schema; mismatch => live obs misaligned vs the trained STATE_DIM vector.
+        # assemble_state's block order (market, law, trade, portfolio, account, trade_state) +
+        # account_block() names must match schema; mismatch => live obs misaligned vs trained STATE_DIM.
+        # TODO [2026-06-21]: the env-filled `trade_state` block (8 account-level discipline scalars) is
+        # omitted here -> assemble_state zero-fills it, so live obs is the right WIDTH but those 8 features
+        # read 0 live. Wire a live trade_state mirror (trades_today / streaks / idle timer / realized day
+        # PnL%) before live trading, or the policy sees a train/live mismatch on that block.
         obs = assemble_state(market_row, law_flags=law,
                              trade=self.portfolio.trade_block(sym),
                              portfolio=self.portfolio.portfolio_block(sym),

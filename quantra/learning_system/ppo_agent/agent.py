@@ -15,7 +15,7 @@ OPEN fires, the pointer head only when CLOSE fires (masked heads -> 0 logp/entro
 
 HOW IT SERVES REPEATED FTMO-STYLE PASSING
 -----------------------------------------
-This is the brain that turns the 207-dim FTMO observation into a legal, sized,
+This is the brain that turns the 215-dim FTMO observation into a legal, sized,
 slot-aware action. The −1e9 masks are applied to the logits HERE, so the policy can
 literally never sample a breach-bound or illegal action. The shared trunk lets the
 critic's patience (high-γ value) and the actor's restraint come from the same belief,

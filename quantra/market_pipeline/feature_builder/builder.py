@@ -332,14 +332,18 @@ def assemble_state(
     trade: Optional[np.ndarray] = None,
     portfolio: Optional[np.ndarray] = None,
     account: Optional[np.ndarray] = None,
+    trade_state: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Concatenate blocks into the full STATE_DIM vector in canonical schema order.
 
     ``precomputed_row`` is one row of build_market_matrix (the market + market_raw
     blocks, width PRECOMPUTED_DIM). The env (M4) appends the live law/trade/
-    portfolio/account sub-vectors; any omitted block is zero-filled (M2 tests +
-    warmup). Width is asserted == STATE_DIM so a block-size drift fails loudly
+    portfolio/account/trade_state sub-vectors; any omitted block is zero-filled (M2
+    tests + warmup). Width is asserted == STATE_DIM so a block-size drift fails loudly
     rather than silently feeding the policy a malformed world.
+
+    ``trade_state`` [2026-06-21, operator] is the 8-scalar account-level trading-discipline
+    block (env._trade_state_block); omitted -> zeros (e.g. live_session until wired, warmup).
     """
     pre = np.asarray(precomputed_row, dtype=np.float32).ravel()
     if pre.shape[0] != PRECOMPUTED_DIM:
@@ -364,6 +368,7 @@ def assemble_state(
         _blk("trade", trade),
         _blk("portfolio", portfolio),
         _blk("account", account),
+        _blk("trade_state", trade_state),   # account-level discipline state (operator 2026-06-21)
     ])
     assert state.shape[0] == STATE_DIM, f"assembled {state.shape[0]} != {STATE_DIM}"
     return state.astype(np.float32)

@@ -479,15 +479,16 @@ class RuntimeConfig:
     seed: int = 0
 
     # Nominal state-vector width for the *startup* benchmark only. Mirrors
-    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (207 with raw inputs
-    # on; 189 off) without importing it (avoids an import cycle); the master suite
+    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (215 with raw inputs
+    # on; 197 off) without importing it (avoids an import cycle); the master suite
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
-    # suite). 207 with raw inputs on (raw CCI + raw price-SMA + training wheels), 189 off.
+    # suite). 215 with raw inputs on (raw CCI + raw price-SMA + training wheels + trade_state), 197 off.
     # CHANGED: 2026-06-18 | nominal_state_dim 206->207 / 188->189 (C12 account scalar)
-    # WHY: distance_to_permanent_dd added to the account block; config width must match schema
+    # CHANGED: 2026-06-21 | nominal_state_dim 207->215 / 189->197 (operator trade_state block, +8)
+    # WHY: env-filled trade_state block (8 account-level discipline scalars); config width must match schema
     # AFFECTS: schema.STATE_DIM (asserted == this by the master suite), tests/snapshots/state_vector.json
-    nominal_state_dim: int = field(default_factory=lambda: 207 if INCLUDE_RAW_INPUTS else 189)
+    nominal_state_dim: int = field(default_factory=lambda: 215 if INCLUDE_RAW_INPUTS else 197)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss

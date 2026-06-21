@@ -7,15 +7,16 @@ blocks, so the total width is fixed and asserted everywhere. This is the contrac
 the FeatureBuilder fills, the env assembles, the PPO trunk consumes, and the
 TelemetryLogger labels (the data contract requires "grouped feature block names").
 
-Block widths (default INCLUDE_RAW_INPUTS=True -> total 207):
-    market     131   market+time + gate ingredients + RAW CCI + RAW Bollinger + training wheels
-    market_raw  18   RAW price-SMA inputs (operator-directed; precomputed)
-    law         12   9 laws + 3 market-condition signals (filled by LawMask, M3)
-    trade x5    35   7 features x 5 slots (env, M4)
-    portfolio    3   aggregates across slots (env, M4)
-    account      8   equity/buffers + challenge-progress + C12 perm-DD runway (env, M4)
+Block widths (default INCLUDE_RAW_INPUTS=True -> total 215):
+    market      131  market+time + gate ingredients + RAW CCI + RAW Bollinger + training wheels
+    market_raw   18  RAW price-SMA inputs (operator-directed; precomputed)
+    law          12  9 laws + 3 market-condition signals (filled by LawMask, M3)
+    trade x5     35  7 features x 5 slots (env, M4)
+    portfolio     3  aggregates across slots (env, M4)
+    account       8  equity/buffers + challenge-progress + C12 perm-DD runway (env, M4)
+    trade_state   8  account-level trading-discipline state (env; operator request 2026-06-21)
     ------------------
-    TOTAL      207   (189 when INCLUDE_RAW_INPUTS=False)
+    TOTAL       215  (197 when INCLUDE_RAW_INPUTS=False)
 
 CCI is kept RAW (operator decision 2026-06-13): no /100, no normalized deviation —
 the raw CCI value + its raw shifted-forward SMA(2, shift4) are exposed so the policy
@@ -220,6 +221,28 @@ def _account_names() -> List[str]:
     ]
 
 
+# COUPLING [C-TS1] -> quantra/env/trading_env.py (_trade_state_block fills these) +
+# feature_builder/builder.py (assemble_state `trade_state` kwarg). The 8 names + order are the
+# env-filled "trade_state" block: ACCOUNT-LEVEL trading-discipline state the operator asked the
+# policy to see directly (2026-06-21). ACTION-DEPENDENT (the agent's own trade history) -> NOT
+# precomputed; the env fills it per step like law/trade/portfolio/account. APPENDED at the very END
+# (after account) so every pre-existing feature index is unchanged. Reorder/rename => fix the env
+# block builder + assemble_state's concat order. Some names intentionally restate info already in the
+# account/trade blocks (daily_drawdown_pct ~ acct_equity_dev, risk_budget_remaining ~ acct_trailing_
+# buffer, position_open ~ per-slot occupied) — operator wants them as explicit, named scalars.
+def _trade_state_names() -> List[str]:
+    return [
+        "daily_realized_pnl_pct",   # realized day PnL as % of the day's opening balance
+        "daily_drawdown_pct",       # trailing intraday drawdown from peak, % of account
+        "trades_today",             # opens since midnight, normalized
+        "consecutive_losses",       # current losing-trade streak, normalized
+        "consecutive_wins",         # current winning-trade streak, normalized
+        "position_open",            # 1.0 if the account holds any open trade else 0.0
+        "risk_budget_remaining",    # USD before the wall as % of account (RiskManager budget)
+        "time_since_last_trade",    # bars since the last open, normalized
+    ]
+
+
 # Ordered blocks: (name, builder). Order IS the observation order. market + market_raw
 # are the precomputed (action-independent) blocks.
 # COUPLING [C1] -> quantra/env/trading_env.py (assemble_state block order) + feature_builder/builder.py:
@@ -232,6 +255,7 @@ _BLOCK_BUILDERS = [
     ("trade", _trade_names),
     ("portfolio", _portfolio_names),
     ("account", _account_names),
+    ("trade_state", _trade_state_names),   # env-filled, action-dependent (operator 2026-06-21)
 ]
 _PRECOMPUTED_BLOCKS = ("market", "market_raw")
 
@@ -288,7 +312,7 @@ SCHEMA = build_schema()
 # ✅ SAFE TO CHANGE without a fresh start (these never touch STATE_DIM): training_phase, training_wheels,
 #    the challenge numbers (daily_target/daily_risk/permanent_dd/failed_day_penalty), and ALL reward
 #    weights + term math (RewardConfig C16/C17). Shape the policy with THOSE and old policies still resume.
-STATE_DIM = SCHEMA.dim                                   # 207 (raw on) / 189 (raw off)
+STATE_DIM = SCHEMA.dim                                   # 215 (raw on) / 197 (raw off)
 FEATURE_NAMES = SCHEMA.feature_names
 
 # The precomputed (action-independent) feature set = market + market_raw, in order.
@@ -325,6 +349,7 @@ EXPECTED_WIDTHS = {
     "market": 131,  # 128 + 3 new 5m-ATR feats (atr_level/ref/dev_5m for market_volatility_obs)
     "market_raw": 18 if INCLUDE_RAW_INPUTS else 0,   # raw price-SMA only (raw CCI moved to `market`)
     "law": 12, "trade": 35, "portfolio": 3, "account": 8,  # account 7->8: +acct_dist_to_perm_dd (C12, 2026-06-18)
+    "trade_state": 8,   # account-level trading-discipline state (env-filled; operator 2026-06-21)
 }
 
 
@@ -429,3 +454,21 @@ def state_vector_fingerprint() -> dict:
 #   C: The flags become hard counter-trend masks (engine), so the bot can't open into the
 #      wheels' uptrend/downtrend - fewer breach-bound opens, faster convergence to passing -
 #      while the locked laws stay untouched and the wheels can be removed later.
+# [2026-06-21] Operator request — added the env-filled `trade_state` block (8 scalars).
+#   I: The operator wants the policy to SEE its own trading-discipline state directly:
+#      daily_realized_pnl_pct, daily_drawdown_pct, trades_today, consecutive_losses,
+#      consecutive_wins, position_open, risk_budget_remaining, time_since_last_trade. Some of these
+#      were only implicit (drawdown ~ acct_equity_dev) or absent entirely (trade counters / streaks /
+#      time-since-trade), so the policy had to infer "how am I trading today" instead of being told.
+#   R: Operator directive 2026-06-21. ACTION-DEPENDENT -> NOT precomputed; the env fills it per step
+#      (like law/trade/portfolio/account). Additive + APPENDED after `account` so every pre-existing
+#      index is unchanged. Bounded values -> normal path, NOT RAW_FEATURE_NAMES.
+#   A: Added _trade_state_names() (8), the ("trade_state", ...) _BLOCK_BUILDERS entry, and
+#      EXPECTED_WIDTHS["trade_state"]=8. STATE_DIM 207->215 (189->197 raw off). assemble_state() gains
+#      a `trade_state` kwarg; env._trade_state_block() fills it; config.nominal_state_dim 207->215.
+#   C: The bot now directly observes its session discipline (over-trading, losing streaks, runway to
+#      the wall), which the operator believes is decision-relevant for NOT breaching and passing
+#      consistently. ⚠️ STATE_DIM changed -> every saved policy's compatibility signature changes
+#      (registry refuses RESUME) -> a fresh retrain is required (operator-accepted). COUPLING (both
+#      directions): env/trading_env.py (_trade_state_block + counters), builder.assemble_state
+#      (concat order), config.nominal_state_dim, tests/snapshots/state_vector.json (re-pinned).

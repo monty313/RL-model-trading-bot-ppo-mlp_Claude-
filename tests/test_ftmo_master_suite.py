@@ -258,16 +258,25 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_207_with_raw_bollinger_and_training_wheels():
-    # market 131 (prev 128 + 3 new 5m-ATR feats for market_volatility_obs) + 18 raw
-    # price-SMA + 12 law + 35 trade + 3 portfolio + 8 account (C12 +acct_dist_to_perm_dd) = 207
-    assert STATE_DIM == 207
+def test_schema_total_is_215_with_raw_bollinger_training_wheels_and_trade_state():
+    # market 131 (prev 128 + 3 new 5m-ATR feats for market_volatility_obs) + 18 raw price-SMA
+    # + 12 law + 35 trade + 3 portfolio + 8 account (C12 +acct_dist_to_perm_dd)
+    # + 8 trade_state (operator 2026-06-21) = 215
+    assert STATE_DIM == 215
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
     assert EXPECTED_WIDTHS["market"] == 131 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["trade_state"] == 8
     # the two training-wheel block flags exist (the operator's enforced "acts")
     assert "tw_cci_block" in SCHEMA.feature_names and "tw_bb_block" in SCHEMA.feature_names
+    # the 8 operator-requested trade_state scalars exist, appended after `account` (no index shift)
+    for n in ("daily_realized_pnl_pct", "daily_drawdown_pct", "trades_today",
+              "consecutive_losses", "consecutive_wins", "position_open",
+              "risk_budget_remaining", "time_since_last_trade"):
+        assert n in SCHEMA.feature_names
+    assert SCHEMA.block_spans["trade_state"][1] == STATE_DIM   # it is the LAST block
+    assert SCHEMA.block_spans["account"][1] == SCHEMA.block_spans["trade_state"][0]
     assert len(SCHEMA.feature_names) == STATE_DIM
     assert len(set(SCHEMA.feature_names)) == STATE_DIM  # names unique
 
@@ -1539,8 +1548,10 @@ def test_telemetry_header_carries_block_names_for_the_llm():
     log = TelemetryLogger("run_hdr")
     recs = log._buf
     blocks = recs[0]["blocks"]
-    assert set(blocks) == {"market", "market_raw", "law", "trade", "portfolio", "account"}
+    assert set(blocks) == {"market", "market_raw", "law", "trade", "portfolio",
+                           "account", "trade_state"}   # +trade_state (operator 2026-06-21)
     assert "law_super_trend_bb" in blocks["law"]
+    assert "daily_drawdown_pct" in blocks["trade_state"]
 
 
 # =============================================================================

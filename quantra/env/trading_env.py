@@ -28,7 +28,7 @@ LLM RISK DOCTOR — HOW TO THINK ABOUT THIS FILE
 ----------------------------------------------
 Rulebook: ``docs/MLP_INTERPRETABILITY_LAYER.md``. The observation handed to the
 policy is assembled here (precomputed market+raw 149 · law 12 · trade 35 · portfolio
-3 · account 8 = 207). For a breach, the env's force-flatten + ChallengeState.breached
+3 · account 8 · trade_state 8 = 215). For a breach, the env's force-flatten + ChallengeState.breached
 mark the moment; correlate it with the action distribution to find the danger-
 blindness window. The env NEVER lets a masked action execute — a "bad action" in
 telemetry was legal here, so blame the actor's intent, not the env.
@@ -115,6 +115,16 @@ class Slot:
         if not self.occupied:
             return 0.0
         return (close - self.entry_price) * self.direction * self.lots * contract
+
+
+# Normalization for the env-filled `trade_state` block [operator request 2026-06-21]. Counts/bars are
+# divided by these to keep the features O(1); the whole block is clipped to ±_TRADE_STATE_CLIP
+# (assemble_state does NOT clip env-filled blocks). Tunable; promotable to config.py later. COUPLING ->
+# _trade_state_block() + schema._trade_state_names (order) + builder.assemble_state(trade_state=).
+_TRADES_TODAY_NORM = 20.0      # ~a busy day's opens -> 1.0
+_STREAK_NORM = 5.0             # a 5-trade win/loss streak -> 1.0
+_TIME_SINCE_NORM = 60.0        # 60 1m bars (~1h) since the last open -> 1.0
+_TRADE_STATE_CLIP = 10.0       # final safety clip (matches the precomputed block's ±CLIP)
 
 
 class TradingEnv:
@@ -211,6 +221,16 @@ class TradingEnv:
         self._sym_realized = {s: 0.0 for s in self.symbols}
         self._sym_contrib_prev = {s: 0.0 for s in self.symbols}
         self._decision_t = self.t
+        # trade_state counters [operator 2026-06-21]: account-level trading-discipline state the policy
+        # observes directly. trades_today resets at midnight (_advance_bar); the win/loss streaks persist
+        # across days (a trade streak, not a daily one) and reset only here; day_start_balance anchors the
+        # realized daily-PnL%. COUPLING -> _trade_state_block + _apply_action(open) + _record_close(close)
+        # + _advance_bar(midnight). Account-wide (across symbols), matching the shared account.
+        self._trades_today = 0
+        self._consec_wins = 0
+        self._consec_losses = 0
+        self._bars_since_trade = 0
+        self._day_start_balance = self.account.balance
         self._mark_to_market()
         self._prev_equity = self.account.equity
         return self._obs()
@@ -299,6 +319,33 @@ class TradingEnv:
         total_upnl = sum(sl.upnl(c, con) for sl in open_slots) / self.account.account_size
         return np.array([net_exposure, net_size, total_upnl], dtype=np.float32)
 
+    def _trade_state_block(self) -> np.ndarray:
+        """8 account-level trading-discipline features [operator request 2026-06-21], schema order.
+
+        ACTION-DEPENDENT (the account's own trade history) -> filled here per step, NOT precomputed.
+        Account-wide (across all symbols), matching the shared account. Bounded + clipped to
+        ±_TRADE_STATE_CLIP. COUPLING [C-TS1] -> schema._trade_state_names (this EXACT order) +
+        builder.assemble_state(trade_state=) + the counters in reset()/_apply_action/_record_close/
+        _advance_bar. The %-named scalars are TRUE percent (×100); counts/bars are /norm constants.
+        """
+        acct = max(self.account.account_size, 1e-9)
+        base = max(self._day_start_balance, 1e-9)
+        realized_day_pct = (self.account.balance - self._day_start_balance) / base * 100.0
+        dd_pct = max(0.0, (self.account.peak_equity - self.account.equity) / acct * 100.0)
+        risk_rem_pct = self.account.remaining_buffer / acct * 100.0
+        any_open = any(sl.occupied for s in self.symbols for sl in self.slots[s])
+        out = np.array([
+            realized_day_pct,                          # daily_realized_pnl_pct (% of day's open balance)
+            dd_pct,                                    # daily_drawdown_pct (% of account, from peak)
+            self._trades_today / _TRADES_TODAY_NORM,   # trades_today (normalized count)
+            self._consec_losses / _STREAK_NORM,        # consecutive_losses (normalized streak)
+            self._consec_wins / _STREAK_NORM,          # consecutive_wins (normalized streak)
+            1.0 if any_open else 0.0,                  # position_open (account holds any open trade)
+            risk_rem_pct,                              # risk_budget_remaining (% of account before wall)
+            self._bars_since_trade / _TIME_SINCE_NORM, # time_since_last_trade (normalized bars)
+        ], dtype=np.float32)
+        return np.clip(out, -_TRADE_STATE_CLIP, _TRADE_STATE_CLIP)
+
     def _law_states(self, sym: str) -> np.ndarray:
         return compute_law_states(self.data[sym].matrix[self.t])
 
@@ -365,6 +412,7 @@ class TradingEnv:
             trade=self._trade_block(sym),
             portfolio=self._portfolio_block(sym),
             account=self.account.account_block(),
+            trade_state=self._trade_state_block(),   # operator 2026-06-21: discipline-state block
         )
 
     # ------------------------------------------------------------------ execution
@@ -414,6 +462,9 @@ class TradingEnv:
             self._sym_realized[sym] -= oc.total          # per-symbol attribution
             info.update(executed=("OPEN_LONG" if d == 1 else "OPEN_SHORT"),
                         lots=sr.lots, cost=oc.total)
+            # trade_state [2026-06-21]: a trade actually opened -> count it + reset the idle timer.
+            self._trades_today += 1
+            self._bars_since_trade = 0
 
         elif direction == CLOSE:
             occ = [i for i, sl in enumerate(self.slots[sym]) if sl.occupied]
@@ -458,10 +509,16 @@ class TradingEnv:
             # [2026-06-20] new day -> re-anchor the fast-pass window to this day's open + re-arm the bonus.
             self._day_open_t = self.t
             self._fast_pass_awarded = False
+            # trade_state [2026-06-21]: new day -> reset the daily trade count + re-anchor the realized-
+            # PnL base to this day's opening (realized) balance. The EOD flatten already ran above, so
+            # balance == equity here. The win/loss streaks intentionally carry across the day boundary.
+            self._trades_today = 0
+            self._day_start_balance = self.account.balance
             self._days_elapsed += 1
             # C10: an episode is episode_days TRADING DAYS; end it once they are exhausted.
             if self.episode_days is not None and self._days_elapsed >= self.episode_days:
                 self.done = True
+        self._bars_since_trade += 1   # trade_state [2026-06-21]: bars since the last open (per bar)
         for sym in self.symbols:
             c = self.data[sym].close[self.t]
             con = self._contract(sym)
@@ -571,6 +628,15 @@ class TradingEnv:
         self._record_close_quality(realized_gross, ever_in_profit)
         if net > 0.0 and age >= self.reward_cfg.profit_hold_min_bars:
             self._pending_profit_hold += 1.0
+        # trade_state [2026-06-21] win/loss streaks: EVERY close (discretionary / flatten / hard stop)
+        # funnels through here, so update the streak off `net` (realized minus close cost). A flat
+        # close (net == 0) leaves both streaks unchanged.
+        if net > 0.0:
+            self._consec_wins += 1
+            self._consec_losses = 0
+        elif net < 0.0:
+            self._consec_losses += 1
+            self._consec_wins = 0
 
     def _consume_profit_hold(self) -> float:
         """Return + reset the profit-hold count accrued this step (-> RewardContext.profit_hold_count, L4)."""
@@ -967,3 +1033,22 @@ def challenge_day_ids(index) -> Optional[np.ndarray]:
 #      RewardConfig.{profit_hold_weight,profit_hold_min_bars,fast_pass_bonus,fast_pass_hours} + reward_engine.
 #   C: With losers cut small, winners rewarded for developing, and a big prize for banking the 2.5% fast, the
 #      policy finally has the "cut losers / let winners run / pass quickly" payoff a profitable strategy needs.
+# [2026-06-21] Operator request — env-filled `trade_state` observation block (8 scalars).
+#   I: The operator wants the policy to SEE its own trading-discipline state directly (daily realized PnL%,
+#      daily drawdown%, trades today, consecutive losses/wins, position open, risk budget remaining, time
+#      since last trade). Most were absent (trade counters / streaks / idle timer) or only implicit; the
+#      bot had to infer "how am I trading today" from raw equity/slot features.
+#   R: Operator directive 2026-06-21. Observation-only (NOT a mask/gate/reward). ACTION-DEPENDENT -> filled
+#      by the env per step (cannot be precomputed). Additive + APPENDED after `account` so every pre-existing
+#      observation index is unchanged. Counts/bars normalized; whole block clipped to ±_TRADE_STATE_CLIP.
+#   A: Added account-wide counters in reset() (_trades_today, _consec_wins/_losses, _bars_since_trade,
+#      _day_start_balance); bump on a real OPEN (_apply_action) + reset the idle timer; update win/loss
+#      streaks in _record_close (the single funnel for EVERY close path); per-bar idle increment + midnight
+#      trades_today reset + day_start_balance re-anchor in _advance_bar. _trade_state_block() emits the 8
+#      scalars in schema order; _obs() passes them via assemble_state(trade_state=). COUPLING ->
+#      feature_builder/schema.py (_trade_state_names, EXPECTED_WIDTHS, STATE_DIM 207->215) +
+#      builder.assemble_state(trade_state=) + runtime/config.nominal_state_dim + tests/snapshots/state_vector.json.
+#   C: The bot now directly observes over-trading, losing streaks, drawdown, and runway-to-the-wall — state
+#      the operator judges decision-relevant for NOT breaching and passing consistently — with masks, sizing,
+#      the wall, and the reward all UNCHANGED. ⚠️ STATE_DIM changed -> old policies can't RESUME (registry
+#      compatibility) -> a fresh retrain is required (operator-accepted).
