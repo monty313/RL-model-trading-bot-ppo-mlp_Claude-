@@ -87,17 +87,35 @@ We had (pre-normalization): breaches 8/8 → 6/8 over 1000→2000 updates, win ~
    the next lever is the **`DRAWDOWN_PAIN_WEIGHT`** (the "without breaching trailing DD" term) —
    raise it so protecting the peak is learned. Don't touch locked items.
 
-## PARKED / IN-FLIGHT IDEAS (not yet built)
-- **Expert Signal Layer (Idea B) — DESIGN DOC WRITTEN, build greenlit but not started.**
-  See [`docs/EXPERT_SIGNAL_DESIGN.md`](EXPERT_SIGNAL_DESIGN.md). Turn the operator's STRAT
-  portfolio (the strategies PDF) into a small block of **soft observation features**
-  (`expert_long/short`, `regime_bias`, `confidence`, `trend_strength`, `volatility_ok`,
-  `session_ok`, soft `do_not_trade`). Scope this round: **STRAT-001…006** (market-based;
-  news/COT/opening-bell deferred — need external data). Key facts: the `law` block already
-  encodes ~80% of it, so the engine is mostly a **vote aggregator** over existing signals;
-  it's **action-independent → precomputed** in the FeatureBuilder; 🔴 `do_not_trade` stays a
-  FEATURE never a mask (the CCI-gate lesson); adding the block changes `STATE_DIM` →
-  **forces a fresh retrain** (operator accepted). Operator chose "doc only for now".
+## 🧭 BASELINES / ROLLBACK LADDER (named recoverable states on `claude/focused-faraday-if1ue7`)
+Reverting CODE is easy (Git); training CONTINUITY is not — any policy trained under a given
+`STATE_DIM` only resumes on that same observation contract. So we keep named anchors:
+
+| Commit | Observation | What it is | Trainable baseline? |
+|---|---|---|---|
+| **`d796b42`** | **207-dim** | **last PRE-change baseline** — no expert engine, no trade_state. "Go back to the old learner" = this. | ✅ the canonical 207-dim baseline |
+| `c4f3d5c` | 207-dim | expert engine added but **UNWIRED** (pure module; obs unchanged) | ✅ also 207-dim trainable |
+| **`286adc9`** | **215-dim** | **current integration point** — `trade_state` block wired (+8). | ✅ new 215-dim contract |
+
+⚠️ **`STATE_DIM` 207 → 215 at `286adc9`** → the registry will NOT resume any 207-dim checkpoint
+(compatibility signature changed). The next Colab run is a **fresh retrain** on the 215-dim obs.
+Treat any artifacts trained from `286adc9` on as belonging to the 215-dim regime, never mixed
+with old 207-dim policies.
+
+## DONE / IN-FLIGHT / PARKED
+- **`trade_state` observation block — DONE + WIRED (commit `286adc9`).** 8 account-level
+  discipline scalars the operator asked the policy to see: `daily_realized_pnl_pct`,
+  `daily_drawdown_pct`, `trades_today`, `consecutive_losses`, `consecutive_wins`,
+  `position_open`, `risk_budget_remaining`, `time_since_last_trade`. Env-filled (action-dependent),
+  appended after `account`; masks/sizing/wall/reward untouched. Tests green (217 passed, 1 skipped).
+- **Expert Signal Layer (Idea B) — Phase 1 BUILT + TESTED, NOT WIRED (commit `c4f3d5c`).**
+  See [`docs/EXPERT_SIGNAL_DESIGN.md`](EXPERT_SIGNAL_DESIGN.md). Pure engine in
+  `quantra/market_pipeline/expert_signal/` (soft features: `regime_bias`, `confidence`,
+  `trend_strength`, `volatility_ok`, `session_ok`, soft `do_not_trade`, derived `expert_long/short`)
+  over STRAT-001/002/004/006; reuses `compute_law_states`; 18 tests. 🔴 `do_not_trade` stays a
+  FEATURE never a mask (the CCI-gate lesson). **Deliberately NOT wired** — wiring adds +8 →
+  ANOTHER `STATE_DIM` change / fresh-start, so batch it intentionally with the next fresh-start
+  plan (operator decision). Pause here to first test whether the trade_state features help.
 - **Behavioral Cloning (Idea A) — PARKED.** Auto-generate `(obs, direction)` demos by
   replaying the rules through the env, warm-start the direction head before PPO (class-weight
   to avoid always-HOLD), behind a `BC_WARMSTART_EPOCHS` knob. Bigger lever for the
