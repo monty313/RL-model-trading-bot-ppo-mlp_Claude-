@@ -3,8 +3,9 @@
 WHAT THIS MODULE DOES
 ---------------------
 Computes the layered reward (REWARD_DESIGN.md):
-    r(t) = L0_dNetPnL + (a*L1_momentum - b*L2_stagnation + e*L4_target) * L5_category
-           - d*L3_painzone   [+ L6 daily bonus at end of day]
+    r(t) = L0_dNetPnL + (L1_momentum + L2_dailyProgress + L4_tradeQuality) * L5_category
+           - L3_painzone   [+ L6 daily bonus at end of day]
+(C17 2026-06-19: L2 is now per-step daily-progress, L4 is per-close trade-quality — see decompose.)
 Layer 0 (net PnL after costs) is the dominant driver; the shaping layers are tiny
 "whispers" (small coefficients) that help timing/restraint without ever winning the
 reward game while losing the trading game (the E8 rule). The QUAD daily bonus (E9)
@@ -33,31 +34,40 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from quantra.runtime.config import ChallengeConfig
+from quantra.runtime.config import ChallengeConfig, RewardConfig
 
-# Shaping coefficients — deliberately TINY vs typical per-step net PnL so Layer 0
-# dominates (REWARD_DESIGN: "whisper, not a shout"). Units: account fraction.
-ALPHA = 1e-4   # L1 momentum bonus
-BETA = 1e-4    # L2 stagnation penalty
-DELTA = 5e-4   # L3 pain-zone (slightly larger — it must be felt near the wall)
-EPS = 5e-5     # L4 target progress (tiniest)
-PAIN_K = 4.0   # exponential steepness of the pain ramp
+# C16 (2026-06-19): the per-layer shaping WEIGHTS now live in RewardConfig (config.py) as
+# plain-English, operator-tunable fields — net_pnl_weight / step_pnl_weight /
+# daily_progress_weight / drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight.
+# The MATH/STRUCTURE + decompose() layer KEYS (L0..L5) are UNCHANGED; only names + default values
+# changed, so the E8 Layer-0 dominance proof still holds. (Former globals: ALPHA/BETA/DELTA/EPS/PAIN_K;
+# defaults preserved except daily_progress_weight raised 1e-4 -> 1e-3 per the C16 spec.)
 
 
 @dataclass
 class RewardContext:
-    # COUPLING -> env/trading_env.py: _reward()/build-context constructs RewardContext by
-    # these exact keyword field NAMES (net_pnl_delta, in_position, momentum_aligned,
-    # stagnation, drawdown_pct, day_progress, breach_risk). Renaming a field breaks that call.
+    # COUPLING -> env/trading_env.py _reward(): constructs RewardContext by these exact keyword
+    # field NAMES every step; renaming/removing one here breaks that call (and vice-versa). The
+    # C17 re-pointed inputs are produced upstream and flow ACROSS three files:
+    #   day_pnl, day_target_equity  <- ftmo_passing/challenge_state.py (ChallengeState.day_pnl and
+    #                                  .daily_target_equity properties), read in env _reward().
+    #   trade_close_quality         <- env/trading_env.py _record_close_quality() (called from the
+    #                                  CLOSE branch of _apply_action + from _force_flatten), summed
+    #                                  per step and ALREADY signed + account-normalized there.
     """Everything the engine needs for one step — the env populates it."""
 
-    net_pnl_delta: float           # L0: equity change after costs this step / account
+    net_pnl_delta: float            # L0: equity change after costs this step / account (dominant)
     in_position: bool = False
-    momentum_aligned: bool = False  # small CCI back in sync + ATR alive, in trade dir
-    stagnation: bool = False        # favorable legal state, no improvement, 3x5m bars
-    drawdown_pct: float = 0.0       # current DAILY drawdown % (for the pain zone)
-    day_progress: float = 0.0       # day PnL vs target (1.0 = target hit)
-    breach_risk: bool = False       # in pain zone / near wall (the explicit L5 category)
+    momentum_aligned: bool = False  # L1: small CCI back in sync + ATR alive, in trade dir
+    drawdown_pct: float = 0.0       # L3: current DAILY drawdown % (for the pain zone)
+    breach_risk: bool = False       # L5: in pain zone / near wall (the explicit category multiplier)
+    # --- C17 [2026-06-19] re-pointed inputs (daily-progress L2 + trade-quality L4) ---------------
+    day_pnl: float = 0.0            # L2: equity - day_start_equity (USD); reward only while > 0
+    day_target_equity: float = 1.0  # L2: day_start_equity*(1+target%) (USD) — the progress denominator
+    trade_close_quality: float = 0.0  # L4: signed, account-normalized realized-on-close quality, summed
+    #                                   over trades CLOSED this step (0 on steps with no close)
+    profit_hold_count: float = 0.0    # L4 [2026-06-20]: # of profitable closes held >= profit_hold_min_bars
+    #                                   this step — a small EXTRA L4 bonus (env produces it; weight in config)
 
 
 @dataclass
@@ -65,6 +75,7 @@ class RewardEngine:
     """Pure layered-reward computation. One instance per training run."""
 
     challenge: ChallengeConfig = field(default_factory=ChallengeConfig)
+    reward_cfg: RewardConfig = field(default_factory=RewardConfig)   # C16 operator-tunable weights
     quad_enabled: bool = True       # ON in training, OFF in early law school
 
     def _pain(self, dd_pct: float) -> float:
@@ -75,17 +86,31 @@ class RewardEngine:
         if dd_pct <= lo:
             return 0.0
         frac = min(1.0, (dd_pct - lo) / max(1e-9, hi - lo))
-        return math.expm1(PAIN_K * frac) / math.expm1(PAIN_K)   # 0..1, convex
+        k = self.reward_cfg.drawdown_pain_steepness            # C16: was the PAIN_K global
+        return math.expm1(k * frac) / math.expm1(k)            # 0..1, convex
 
     def decompose(self, ctx: RewardContext) -> Dict[str, float]:
-        """Per-layer contributions (for telemetry + the E8 dominance proof)."""
-        l0 = ctx.net_pnl_delta
-        l1 = ALPHA if (ctx.in_position and ctx.momentum_aligned) else 0.0
-        l2 = -BETA if ctx.stagnation else 0.0
-        l3 = -DELTA * self._pain(ctx.drawdown_pct)
-        # Clamp at target (1.0): a whisper in ALL modes, incl. ftmo-OFF where day_progress is
-        # unbounded (~40 at 1% target / 40% envelope) and could otherwise rival L0 [2026-06-15 fix].
-        l4 = EPS * min(1.0, max(0.0, ctx.day_progress))
+        """Per-layer contributions (for telemetry + the E8 dominance proof). Weights come from
+        RewardConfig (C16); L2 + L4 math was RE-POINTED (C17) to literally compute daily-progress
+        and trade-quality. The layer KEYS are unchanged so the Risk Doctor / E8 readers still work."""
+        rc = self.reward_cfg
+        l0 = rc.net_pnl_weight * ctx.net_pnl_delta             # dominant outcome base (weight 1.0)
+        l1 = rc.step_pnl_weight if (ctx.in_position and ctx.momentum_aligned) else 0.0
+        # L2 daily-progress (C17): every step, a positive whisper that GROWS as equity climbs toward
+        # the day's target and switches OFF while the day is flat/negative. day_pnl + day_target_equity
+        # come straight from ChallengeState (ftmo_passing/challenge_state.py) via env _reward(); the
+        # ratio is dimensionless (~0.024 at a 2.5% target) so it stays a whisper without a clamp.
+        l2 = rc.daily_progress_weight * (max(0.0, ctx.day_pnl) / max(1e-9, ctx.day_target_equity))
+        l3 = -rc.drawdown_pain_weight * self._pain(ctx.drawdown_pct)
+        # L4 trade-quality (C17): nonzero ONLY on bars where a trade closed (else trade_close_quality
+        # is 0). env/trading_env.py _record_close_quality() already applied the operator's sign rules
+        # (reward winners; penalize giving back a once-profitable trade; ignore never-profitable
+        # losers) AND normalized by account_size, so here it is a pure scaled passthrough.
+        # L4 also carries the [2026-06-20] profit-hold bonus: a SMALL extra reward per profitable close
+        # held >= profit_hold_min_bars (env supplies the count). Folded into L4 (NOT a new layer) so the
+        # decompose KEY SET — hence the policy compatibility signature — is UNCHANGED (resume-safe; per the
+        # C18 note above, changing the MATH inside an existing layer is allowed). Default weight 0.0 -> no-op.
+        l4 = rc.trade_quality_weight * ctx.trade_close_quality + rc.profit_hold_weight * ctx.profit_hold_count
         # L5 category multiplier on the dense shaping (breach-risk = protect capital:
         # damp upside shaping, keep protection). Bounded so it can't flip dominance.
         l5_mult = 0.5 if ctx.breach_risk else 1.0
@@ -93,6 +118,13 @@ class RewardEngine:
         # COUPLING [C8] -> diagnostics/mlp_interpreter/interpreter.py + llm_risk_doctor/
         # doctor.py: both read the "L0".."L5_mult"/"shaped" keys by name (L0-dominance /
         # Reward-Hijack checks). "total" is consumed by reward()/env. Keep these key names.
+        # ⚠️ COMPATIBILITY [C18+] -> policy_registry/registry.py (default_reward_layer_keys ->
+        # compatibility_signature): the set of "L*" keys here IS the reward LAYER ARRANGEMENT, the
+        # SECOND input to a policy's compatibility hash. Tuning a WEIGHT (C16) or re-pointing a term's
+        # MATH (C17) keeps these keys, so old policies stay RESUME-safe. But ADDING / REMOVING / RENAMING
+        # a layer changes the hash -> the registry forces a fresh start (old policies can't be resumed).
+        # ✅ SAFE TO CHANGE without a fresh start: any RewardConfig weight value AND the math INSIDE an
+        #    existing layer (what l1..l4 compute) — shape behaviour freely as long as the L-keys are intact.
         return {"L0": l0, "L1": l1, "L2": l2, "L3": l3, "L4": l4,
                 "L5_mult": l5_mult, "shaped": shaped, "total": l0 + shaped + l3}
 
@@ -168,9 +200,38 @@ class QuadBonus:
         return bonus_frac * max(0.0, m.day_pnl)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# REWARD REFERENCE BLOCK — C16 weights + C17 re-pointed math (APPROVED; do not change without IRAC)
+# The WEIGHTS are defined (with these defaults) in quantra/runtime/config.py RewardConfig; the MATH that
+# consumes them is decompose()/_pain() ABOVE. Tuning a weight VALUE, or the math INSIDE an existing layer,
+# is RESUME-safe (keeps the compatibility signature); ADDING/REMOVING/RENAMING a layer is NOT.
+#
+# name                    | value | what it does (plain English)                                      | files that read it
+# net_pnl_weight          | 1.0   | Layer-0: scales raw step net-PnL (realized+unrealized / account); the dominant, E8-protected outcome base (keep 1.0) | reward.py (decompose L0), config.py (def)
+# step_pnl_weight         | 1e-4  | Layer-1: tiny per-bar bonus while in-position AND momentum-aligned | reward.py (decompose L1), config.py (def)
+# daily_progress_weight   | 1e-3  | Layer-2 (C17): every step, +weight*max(0,day_pnl)/day_target_equity — rewards equity progress toward the +2.5% day target; OFF when flat/negative | reward.py (decompose L2), config.py (def)
+# drawdown_pain_weight    | 5e-4  | Layer-3: penalty as daily drawdown enters the pain zone (3.5% -> 4.0% wall) | reward.py (decompose L3), config.py (def)
+# drawdown_pain_steepness | 4.0   | Layer-3 shape: exponential steepness of the pain ramp (was PAIN_K) | reward.py (_pain), config.py (def)
+# trade_quality_weight    | 5e-5  | Layer-4 (C17): fires ON CLOSE only — +winner, -gave-back-a-once-profitable-trade, 0 never-profitable | reward.py (decompose L4), config.py (def); env/trading_env.py PRODUCES the input signal (trade_close_quality), NOT the weight
+# failed_day_penalty      | 5.0   | C11 end-of-day hit = -weight * day_shortfall_fraction. AUTHORITATIVE in ChallengeConfig; the RewardConfig copy is a VISIBILITY mirror only | env/trading_env.py (_failed_day_penalty, via ChallengeConfig), config.py (def + mirror); challenge_state.py supplies the shortfall it multiplies
+# profit_hold_weight      | 0.0   | [2026-06-20] SMALL extra L4 reward per profitable close held >= profit_hold_min_bars (folded INTO L4, no new layer) | reward.py (decompose L4), config.py (def); env/trading_env.py PRODUCES profit_hold_count
+# profit_hold_min_bars    | 5     | [2026-06-20] min bars a winner must be held to earn the profit-hold bonus (env-side gate) | env/trading_env.py (_record_close), config.py (def)
+# fast_pass_bonus         | 0.0   | [2026-06-20] BIG env-level event reward paid ONCE/day when the day's +target is hit within fast_pass_hours of the open. EXEMPT from per-step E8 (like failed_day_penalty); added in env step(), NOT in decompose | env/trading_env.py (_consume_fast_pass), config.py (def)
+# fast_pass_hours         | 12.0  | [2026-06-20] the window (from the day's open) the fast pass must land in to earn fast_pass_bonus | env/trading_env.py, config.py (def)
+#
+# Also: every weight above is forwarded into RewardConfig by learning_system/barbershop_runner.py and
+# captured per-run (reproducible policy names + manifests) by learning_system/policy_registry/registry.py.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UPDATE LOG (IRAC) - standing rule since 2026-06-13. I/R/A/C; Conclusion is always
 # why this helps the bot pass FTMO consistently. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
+# STANDING RULE [2026-06-19, operator] — applies to THIS file and EVERY file going forward: keep
+# SHOWING THE WORK. On every edit (1) append a DATED IRAC entry here, and (2) in the code comments
+# DOCUMENT the cross-file RELATIONSHIPS the change depends on (the COUPLING) — name the other file(s)
+# and the exact attr/field/key relied on, in BOTH directions — and date the re-pointed logic, so any
+# future reader/editor can see what connects to what, and what breaks where, and when it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] M6 — implemented the layered reward + QUAD bonus.
 #   I: The env returned a raw Layer-0 proxy; the bot needs the full layered objective
@@ -189,3 +250,60 @@ class QuadBonus:
 #   A: l4 = EPS*min(1.0, max(0.0, day_progress)) — caps the shaping at target in every mode.
 #   C: L0 stays the dominant objective even in the new OFF configuration, so the bot keeps
 #      optimizing REAL net money (no reward hijack) - the basis of consistent passing.
+# [2026-06-19] C16 — reward weights renamed to a plain-English, operator-tunable RewardConfig.
+#   I: The shaping weights were cryptic module globals (ALPHA/BETA/DELTA/EPS/PAIN_K) — not
+#      operator-visible, not captured per run, and not matching the multi-day consistency philosophy.
+#   R: Operator spec 2026-06-19 (C16: rename to plain English + retune defaults; do NOT change the
+#      reward math/structure; keep the E8 Layer-0 dominance proof valid — E8 guards the per-step
+#      shaping, C11's failed-day penalty stays an exempt env-level event).
+#   A: Weights moved to config.RewardConfig (net_pnl_weight / step_pnl_weight / daily_progress_weight /
+#      drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight + a failed_day_penalty
+#      mirror); RewardEngine reads reward_cfg; decompose() math + the L0..L5 keys are UNCHANGED; only
+#      daily_progress_weight was raised 1e-4->1e-3 ("matters most"), verified E8-safe (worst shaping/L0
+#      ratio ~0.26 over 1000x256 rollouts).
+#   C: The training objective is now legible, tunable, and captured per run, the consistency driver is
+#      weighted up, and Layer-0 still provably dominates the per-step shaping — so the bot optimizes
+#      real net progress toward passing while the operator can shape HOW it gets there.
+# [2026-06-19] C17 — re-pointed two reward terms so their MATH matches their plain-English names.
+#   I: After C16 the names were a taxonomy over proxy math: daily_progress_weight scaled the old
+#      stagnation flag and trade_quality_weight scaled target-progress — neither literally measured
+#      what its name said, so tuning them was misleading.
+#   R: Operator spec 2026-06-19 (C17: re-point exactly these two terms, change nothing else;
+#      re-verify E8; full suite; IRAC). The other terms (L0/L1/L3/L5, QUAD) are untouched.
+#   A: L2 daily-progress = daily_progress_weight * max(0, day_pnl)/day_target_equity (per step, OFF
+#      when the day is flat/negative). L4 trade-quality fires only on a CLOSE: +winners,
+#      -gave-back-a-once-profitable-trade, 0 for never-profitable losers. CROSS-FILE WIRING:
+#      RewardContext gained day_pnl/day_target_equity/trade_close_quality; env/trading_env.py reads
+#      ChallengeState.day_pnl + .daily_target_equity and accrues close-quality in _record_close_quality()
+#      (using Slot.mfe>0 as the "ever in profit" signal, normalized by account_size). Dropped the now-dead
+#      stagnation/day_progress ctx fields. E8 re-verified at the new math (worst shaping/L0 ~0.05 over
+#      1000x256 rollouts; trade-quality term is the tiniest).
+#   C: The knobs now mean exactly what they say — daily_progress literally rewards getting closer to the
+#      day's target and trade_quality literally rewards banking winners / discourages round-tripping them
+#      — so the operator can shape consistent, winner-keeping behaviour while Layer-0 still dominates.
+# [2026-06-19] Fix 2 (audit S4) — added the REWARD REFERENCE BLOCK (comment-only).
+#   I: The audit found no single, labelled table of the live reward weights — their values, plain-English
+#      meaning, and which files actually read them were scattered across config.py + decompose().
+#   R: Operator audit decision (keep the 6-weight C16/C17 scheme; add a reference block; comment only,
+#      zero logic; use REAL reader evidence, not assumptions).
+#   A: Inserted a "REWARD REFERENCE BLOCK" above this log: the 6 C16 weights + the failed_day_penalty
+#      mirror, each with its current default, what it does, and its TRUE readers (verified by grep — e.g.
+#      trade_quality_weight is applied in reward.py while env only PRODUCES its input; failed_day_penalty
+#      is read by env via ChallengeConfig, not challenge_state). No math/keys/defaults changed.
+#   C: A future reader/editor (or the LLM Risk Doctor) can see every weight, its value, and exactly which
+#      file to open before touching it — protecting the locked reward shape that lets the bot pass FTMO.
+# [2026-06-20] Exit-shaping additions — profit-hold L4 bonus + fast-pass event bonus (defaults OFF).
+#   I: The exits were the weak point: the bot cut winners early, rode losers to the wall, and dawdled. The
+#      operator wants (a) a SMALL reward for closing in profit only after holding a winner >= a few minutes
+#      (discourage instant scalps) and (b) a BIG reward for passing the day's target FAST (within 12h).
+#   R: Operator decision 2026-06-20. (a) folds into L4 (extra reward per profitable close held >=
+#      profit_hold_min_bars) so the decompose KEY SET — and the policy compatibility signature — is
+#      UNCHANGED (resume-safe; changing math INSIDE a layer is allowed). (b) is an env-level EVENT reward,
+#      EXEMPT from the per-step E8 whisper rule exactly like the C11 failed_day_penalty (its positive twin).
+#   A: RewardContext gained profit_hold_count; decompose L4 += profit_hold_weight*profit_hold_count.
+#      fast_pass_bonus/fast_pass_hours are NOT in decompose — env/trading_env.py adds the bonus in step()
+#      (once/day, when target_hit lands within the window). All four knobs default 0/off, so the existing
+#      reward + the E8 dominance proof are byte-identical until the operator turns them on. COUPLING ->
+#      config.RewardConfig (the four fields) + env/trading_env.py (_record_close, _consume_fast_pass).
+#   C: With a hard stop cutting losers, these tell the policy to LET WINNERS DEVELOP and to make the day's
+#      2.5% quickly — the exact exit/payoff structure a trend entry needs to actually be profitable.

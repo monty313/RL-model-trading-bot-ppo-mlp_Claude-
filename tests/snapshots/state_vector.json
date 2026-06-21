@@ -1,40 +1,45 @@
 {
   "schema_version": 1,
   "include_raw_inputs": true,
-  "state_dim": 203,
-  "precomputed_dim": 146,
+  "state_dim": 215,
+  "precomputed_dim": 149,
   "block_widths": {
-    "market": 128,
+    "market": 131,
     "market_raw": 18,
     "law": 12,
     "trade": 35,
     "portfolio": 3,
-    "account": 7
+    "account": 8,
+    "trade_state": 8
   },
   "blocks": {
     "market": [
       0,
-      128
+      131
     ],
     "market_raw": [
-      128,
-      146
+      131,
+      149
     ],
     "law": [
-      146,
-      158
+      149,
+      161
     ],
     "trade": [
-      158,
-      193
-    ],
-    "portfolio": [
-      193,
+      161,
       196
     ],
-    "account": [
+    "portfolio": [
       196,
-      203
+      199
+    ],
+    "account": [
+      199,
+      207
+    ],
+    "trade_state": [
+      207,
+      215
     ]
   },
   "raw_feature_names": [
@@ -176,6 +181,9 @@
     "atr_level_1m",
     "atr_ref_1m",
     "atr_dev_1m",
+    "atr_level_5m",
+    "atr_ref_5m",
+    "atr_dev_5m",
     "atr_level_30m",
     "atr_ref_30m",
     "atr_dev_30m",
@@ -263,9 +271,9 @@
     "law_pullback_bb",
     "law_pullback_cci",
     "law_pullback_ssma",
-    "gate_atr_liquidity",
-    "gate_spread",
-    "gate_stationarity",
+    "market_volatility_obs",
+    "market_spread_obs",
+    "market_stationarity_obs",
     "slot0_dir",
     "slot0_upnl",
     "slot0_age",
@@ -310,9 +318,18 @@
     "acct_trailing_buffer",
     "acct_daily_buffer",
     "acct_day_progress",
-    "acct_overall_progress"
+    "acct_overall_progress",
+    "acct_dist_to_perm_dd",
+    "daily_realized_pnl_pct",
+    "daily_drawdown_pct",
+    "trades_today",
+    "consecutive_losses",
+    "consecutive_wins",
+    "position_open",
+    "risk_budget_remaining",
+    "time_since_last_trade"
   ],
-  "sha256": "03920d635b25d6e2ef5478e38a3bed7d2863cb59bea817754a08949b37fdb813",
+  "sha256": "fdbf74d3e2fd147030befe6227ee91fc81330577e3c6759f2847bc30e9cd2c7f",
   "_llm_interpretation": {
     "purpose": "This snapshot pins the observation the PPO policy sees. Judged against repeated FTMO passing, not PnL. A drift means the policy's WORLD changed.",
     "blocks": {

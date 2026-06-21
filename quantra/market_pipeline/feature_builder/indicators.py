@@ -165,7 +165,7 @@ def candle_structure(o, h, l, c, atr_1m):
 ADF_CRIT_5PCT = -2.86
 
 
-def rolling_df_stat(close: pd.Series, window: int = 100) -> pd.Series:
+def rolling_df_stat(close: pd.Series, window: int = 30) -> pd.Series:
     """Vectorized rolling Dickey-Fuller t-statistic (0-lag ADF) — stationarity proxy.
 
     Regresses dy = a + b*y_lag over each trailing `window` and returns b/SE(b). A

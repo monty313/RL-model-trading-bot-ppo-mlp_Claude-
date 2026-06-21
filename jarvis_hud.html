@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<!--
+  QUANTRA · J.A.R.V.I.S. HUD  —  cinematic, self-contained real-time cockpit (Iron-Man style).
+  ─────────────────────────────────────────────────────────────────────────────────────────────
+  Single file. d3.js v7 (CDN) for the dependency graph; everything else is vanilla JS/SVG/Canvas/CSS.
+  Boot sequence → holographic HUD: arc-reactor core, radar sweep, rotating reticles, comet data-flow,
+  node pulse-rings, circular arc gauges, particle field, scanlines, chromatic flicker.
+
+  LIVE DATA: connects to ws://localhost:8765 (barbershop/ws_broadcaster.py streams
+  quantra.diagnostics.telemetry_logger). No socket? a built-in SIMULATOR keeps it alive (SIM pill).
+  EVENT SCHEMA (contract shared with ws_broadcaster.py):
+    {"t":"step","step":int,"module":"trainer","reward":float,"daily_pnl_pct":float,
+     "drawdown_pct":float,"win_rate":float,"ftmo":"PASSING|BUILDING|AT RISK|BREACH","action":"BUY EURUSD"}
+  Pipeline node ids mirror the SOW milestones; the accurate full import graph is barbershop/repo_graph.py.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>QUANTRA · J.A.R.V.I.S.</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#000308; --panel:rgba(8,18,32,0.40); --ink:#dff3ff; --muted:#6f8aa0;
+    --cyan:#2ce6ff; --cyan2:#6ff6ff; --gold:#ffce6a; --green:#4ef0a6; --amber:#ffc14d; --red:#ff6b6b;
+    --line:rgba(44,230,255,0.18); --grid:rgba(44,230,255,0.045);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--ink);overflow:hidden;
+    font-family:'SF Mono',ui-monospace,'Cascadia Code',Menlo,Consolas,monospace;
+    background-image:
+      radial-gradient(1100px 700px at 78% -12%, rgba(44,230,255,.12), transparent 60%),
+      radial-gradient(900px 600px at 6% 112%, rgba(255,206,106,.08), transparent 60%),
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:auto,auto,32px 32px,32px 32px;}
+  /* vignette + scanlines + holo flicker */
+  body::before{content:"";position:fixed;inset:0;z-index:60;pointer-events:none;
+    box-shadow:inset 0 0 240px rgba(0,0,0,.85);}
+  body::after{content:"";position:fixed;inset:0;z-index:61;pointer-events:none;
+    background:linear-gradient(rgba(255,255,255,0) 50%, rgba(0,12,20,.16) 50%);background-size:100% 3px;
+    animation:scan 7s linear infinite, flick 5s steps(60) infinite;mix-blend-mode:overlay;opacity:.5;}
+  @keyframes scan{from{background-position:0 0}to{background-position:0 1000px}}
+  @keyframes flick{0%,97%,100%{opacity:.5}98%{opacity:.28}99%{opacity:.62}}
+
+  #stars{position:fixed;inset:0;z-index:0}
+  .hud{position:relative;z-index:2;display:grid;gap:12px;padding:12px;height:100vh;
+    grid-template-rows:58px 1fr 172px;grid-template-columns:1fr 332px;
+    grid-template-areas:"head head" "graph stats" "log stats";opacity:0;transition:opacity 1.1s ease;}
+  .hud.on{opacity:1}
+
+  /* ── panels with breathing corner brackets ── */
+  .panel{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(8px);overflow:hidden}
+  .panel .cap{position:absolute;top:9px;left:15px;font-size:10px;letter-spacing:3px;color:var(--cyan);
+    opacity:.7;z-index:3;text-shadow:0 0 10px rgba(44,230,255,.5)}
+  .cnr{position:absolute;width:16px;height:16px;border:2px solid var(--cyan);z-index:3;opacity:.6;
+    animation:breathe 3.2s ease-in-out infinite}
+  .tl{top:6px;left:6px;border-right:0;border-bottom:0}.tr{top:6px;right:6px;border-left:0;border-bottom:0}
+  .bl{bottom:6px;left:6px;border-right:0;border-top:0}.br{bottom:6px;right:6px;border-left:0;border-top:0}
+  @keyframes breathe{0%,100%{opacity:.35;transform:scale(1)}50%{opacity:.9;transform:scale(1.12)}}
+
+  /* ── header + arc reactor ── */
+  header{grid-area:head;display:flex;align-items:center;gap:16px;padding:0 12px 0 8px}
+  .reactor{width:46px;height:46px;flex:0 0 46px}
+  .brand{font-weight:700;letter-spacing:4px;font-size:19px;
+    background:linear-gradient(90deg,var(--cyan),var(--cyan2),var(--gold));-webkit-background-clip:text;background-clip:text;color:transparent;
+    text-shadow:0 0 26px rgba(44,230,255,.3);animation:hue 9s ease-in-out infinite}
+  @keyframes hue{0%,100%{filter:none}50%{filter:brightness(1.25)}}
+  .sub{color:var(--muted);font-size:11px;letter-spacing:3px}
+  .spacer{flex:1}
+  .pill{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:2px;padding:7px 13px;
+    border-radius:999px;border:1px solid var(--line);background:rgba(0,0,0,.3)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--amber);box-shadow:0 0 12px currentColor;
+    animation:blip 1.6s ease-in-out infinite}
+  .dot.live{background:var(--green)} @keyframes blip{50%{opacity:.35}}
+  #clock{color:var(--cyan);letter-spacing:2px;font-size:13px;font-variant-numeric:tabular-nums}
+
+  /* ── graph ── */
+  #graph{grid-area:graph}
+  #sweep{position:absolute;inset:0;border-radius:14px;z-index:1;pointer-events:none;
+    background:conic-gradient(from 0deg, rgba(44,230,255,.16), rgba(44,230,255,0) 28%, rgba(44,230,255,0) 100%);
+    animation:radar 6s linear infinite;mask:radial-gradient(circle at center, #000 64%, transparent 66%)}
+  @keyframes radar{to{transform:rotate(360deg)}}
+  #graph svg{position:relative;z-index:2;width:100%;height:100%;display:block}
+  .link{fill:none;stroke:rgba(44,230,255,.18);stroke-width:1.3}
+  .comet{filter:drop-shadow(0 0 6px var(--cyan))}
+  .node circle.core{stroke-width:2;cursor:pointer;transition:r .2s}
+  .node circle.ring{fill:none;stroke-opacity:.5;stroke-width:1}
+  .node text{fill:#dff3ff;font-size:10px;text-anchor:middle;pointer-events:none}
+  .node text.tier{fill:var(--muted);font-size:7.5px;letter-spacing:1px}
+  .btns{position:absolute;top:9px;right:13px;z-index:4;display:flex;gap:6px}
+  .btns button{background:rgba(0,0,0,.4);color:var(--cyan);border:1px solid var(--line);border-radius:7px;
+    font:inherit;font-size:10px;padding:4px 10px;cursor:pointer;letter-spacing:1px}
+  .btns button:hover{box-shadow:0 0 12px rgba(44,230,255,.5)}
+
+  /* ── stats / gauges ── */
+  #stats{grid-area:stats;display:flex;flex-direction:column;gap:11px;padding:34px 14px 14px}
+  .reward{text-align:center;padding:6px 0 2px}
+  .reward .k{font-size:10px;letter-spacing:3px;color:var(--muted)}
+  .reward .v{font-size:40px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.05;
+    text-shadow:0 0 22px rgba(44,230,255,.35);transition:color .4s}
+  .gauges{display:flex;justify-content:space-around;gap:6px}
+  .gauge{position:relative;width:96px;height:96px;text-align:center}
+  .gauge svg{transform:rotate(-90deg)}
+  .gauge .lbl{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .gauge .num{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+  .gauge .cap2{font-size:8.5px;letter-spacing:1.5px;color:var(--muted);margin-top:2px}
+  .ftmo{display:flex;align-items:center;justify-content:space-between;
+    background:rgba(0,0,0,.25);border:1px solid var(--line);border-radius:11px;padding:11px 13px}
+  .badge{font-size:14px;font-weight:700;letter-spacing:2px;padding:6px 14px;border-radius:9px;border:1px solid;
+    animation:pulseB 2.4s ease-in-out infinite}
+  @keyframes pulseB{50%{box-shadow:0 0 16px currentColor}}
+  .k{font-size:10px;letter-spacing:2px;color:var(--muted)}
+
+  /* ── log ── */
+  #log{grid-area:log;padding:28px 8px 10px}
+  #logwrap{height:100%;overflow:hidden;display:flex;flex-direction:column-reverse;padding:0 12px;
+    font-size:11.5px;line-height:1.6}
+  .ln{white-space:pre;animation:lnin .35s ease}
+  @keyframes lnin{from{opacity:0;transform:translateX(-8px)}to{opacity:.95}}
+  .ln .ts{color:var(--muted)} .ln .tag{color:var(--gold)} .ln .msg{color:#bcd4e6}
+  .ln.good .msg{color:var(--green)} .ln.warn .msg{color:var(--amber)} .ln.bad .msg{color:var(--red)}
+
+  /* ── tooltip + cursor reticle ── */
+  .tip{position:fixed;z-index:99;pointer-events:none;background:rgba(6,14,24,.95);border:1px solid var(--cyan);
+    border-radius:9px;padding:8px 11px;font-size:11px;max-width:250px;box-shadow:0 0 18px rgba(44,230,255,.4);opacity:0;transition:opacity .15s}
+  #reticle{position:fixed;z-index:62;pointer-events:none;width:40px;height:40px;margin:-20px 0 0 -20px;opacity:.5;
+    border:1px solid rgba(44,230,255,.5);border-radius:50%;mix-blend-mode:screen;transition:opacity .3s}
+  #reticle::before,#reticle::after{content:"";position:absolute;background:rgba(44,230,255,.6)}
+  #reticle::before{left:50%;top:-6px;width:1px;height:12px;transform:translateX(-.5px)}
+  #reticle::after{top:50%;left:-6px;height:1px;width:12px;transform:translateY(-.5px)}
+
+  /* ── boot ── */
+  #boot{position:fixed;inset:0;z-index:200;background:radial-gradient(circle at center,#04111c,#02060c 70%);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;transition:opacity .9s}
+  #boot.gone{opacity:0;pointer-events:none}
+  #boot .ring{width:160px;height:160px}
+  #boot pre{font-size:12px;color:var(--cyan);text-shadow:0 0 10px rgba(44,230,255,.5);line-height:1.7;min-height:150px;letter-spacing:1px}
+  #boot .ok{color:var(--green)} #boot .ttl{color:var(--gold);letter-spacing:4px;font-size:15px}
+  .cur{animation:cur 1s steps(2) infinite}@keyframes cur{50%{opacity:0}}
+
+  /* ── JARVIS extras (C23): tech fonts · arc-reactor watermark · power-on sweep · hex gauges · holo flicker ── */
+  body{font-family:'Rajdhani',ui-sans-serif,system-ui,sans-serif;letter-spacing:.3px}
+  .brand,.cap,.cap2,.num,.reward .v,.badge,.sub,#boot .ttl,header .pill{font-family:'Orbitron',sans-serif}
+  #logwrap,#clock,#s-reward,.gauge .num{font-variant-numeric:tabular-nums}
+  #watermark{position:fixed;top:50%;left:50%;width:min(82vh,82vw);height:min(82vh,82vw);
+    transform:translate(-50%,-50%);z-index:1;opacity:.06;pointer-events:none;color:var(--cyan);
+    animation:spin60 60s linear infinite}
+  @keyframes spin60{to{transform:translate(-50%,-50%) rotate(360deg)}}
+  #sweepwave{position:fixed;inset:0;z-index:150;pointer-events:none;opacity:0;overflow:hidden}
+  #sweepwave.go{opacity:1}
+  #sweepwave .line{position:absolute;left:0;right:0;height:9%;top:-12%;filter:blur(3px);
+    background:linear-gradient(transparent,rgba(44,230,255,.6),transparent)}
+  #sweepwave.go .line{animation:sweepdown 1.05s ease-out forwards}
+  @keyframes sweepdown{from{top:-12%;opacity:1}to{top:112%;opacity:0}}
+  /* circle-in-hexagon JARVIS gauge frames */
+  .gauge::before{content:"";position:absolute;inset:-8px;background:var(--cyan);opacity:.5;z-index:-2;
+    clip-path:polygon(50% 1%,99% 26%,99% 74%,50% 99%,1% 74%,1% 26%);filter:drop-shadow(0 0 7px var(--cyan))}
+  .gauge::after{content:"";position:absolute;inset:-4px;background:#02070e;z-index:-1;
+    clip-path:polygon(50% 1%,99% 26%,99% 74%,50% 99%,1% 74%,1% 26%)}
+  .panel{animation:holo 7s ease-in-out infinite}
+  @keyframes holo{0%,100%{opacity:1}50%{opacity:.975}}
+
+  /* ── HELP panel (C30) ── */
+  #help-btn{cursor:pointer;color:var(--gold);border-color:rgba(255,206,106,.45);animation:blip 2.2s ease-in-out infinite}
+  #help-btn:hover{box-shadow:0 0 14px rgba(255,206,106,.55)}
+  .help-wrap{position:fixed;inset:0;z-index:180;display:none;align-items:center;justify-content:center;
+    background:rgba(2,6,12,.74);backdrop-filter:blur(4px)}
+  .help-wrap.on{display:flex;animation:lnin .3s ease}
+  .help-card{position:relative;max-width:700px;width:92%;max-height:86vh;overflow:auto;
+    background:linear-gradient(160deg,rgba(10,20,34,.98),rgba(6,12,22,.98));border:1px solid var(--cyan);
+    border-radius:16px;padding:24px 26px;box-shadow:0 0 44px rgba(44,230,255,.35),inset 0 0 60px rgba(44,230,255,.05);
+    font-size:13px;line-height:1.5}
+  .help-card h2{font-family:'Orbitron',sans-serif;color:var(--cyan);letter-spacing:3px;margin:0 0 4px;
+    text-shadow:0 0 16px rgba(44,230,255,.4)}
+  .help-card .lead{color:var(--muted);margin:0 0 16px;font-size:12px}
+  .help-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+  .help-grid>div{background:rgba(0,0,0,.28);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .help-grid b{display:block;color:var(--gold);font-family:'Orbitron',sans-serif;font-size:10.5px;letter-spacing:1px;margin-bottom:5px}
+  .help-card code{background:rgba(44,230,255,.12);color:var(--cyan2);padding:1px 6px;border-radius:5px}
+  .hc{color:var(--amber)} .hg{color:var(--green)}
+  .help-x{position:absolute;top:10px;right:14px;background:none;border:none;color:var(--muted);font-size:26px;cursor:pointer;line-height:1}
+  .help-x:hover{color:var(--cyan)}
+  .help-got{margin-top:16px;width:100%;background:rgba(44,230,255,.12);color:var(--cyan);border:1px solid var(--cyan);
+    border-radius:9px;padding:10px;font:inherit;font-family:'Orbitron',sans-serif;letter-spacing:2px;cursor:pointer}
+  .help-got:hover{box-shadow:0 0 16px rgba(44,230,255,.5)}
+  @media(max-width:640px){.help-grid{grid-template-columns:1fr}}
+
+  /* ── n8n-style graph cards + click-to-code panel (C31) ── */
+  .ncard text{pointer-events:none;font-family:'Rajdhani',sans-serif}
+  rect.card{transition:stroke-width .15s}
+  .link.hot{stroke:#fff;stroke-opacity:.95;stroke-width:2.2}
+  .link.dim{stroke-opacity:.05}
+  #nodecard{position:absolute;top:42px;left:14px;z-index:6;width:264px;display:none;
+    background:rgba(6,14,24,.97);border:1px solid var(--cyan);border-radius:12px;padding:14px;
+    box-shadow:0 0 26px rgba(44,230,255,.32)}
+  #nodecard.on{display:block;animation:lnin .25s ease}
+  #nodecard .nc-head{display:flex;align-items:center;gap:10px}
+  #nc-ic{font-size:22px}
+  #nc-name{font-family:'Orbitron',sans-serif;font-size:13px;text-transform:capitalize;color:#eaf6ff}
+  #nc-tier{font-size:10px;letter-spacing:1px}
+  #nc-role{font-size:12px;color:#bcd4e6;margin:9px 0 11px;line-height:1.45}
+  #nc-link{display:inline-block;font-size:11px;color:var(--gold);text-decoration:none;
+    border:1px solid rgba(255,206,106,.45);border-radius:8px;padding:6px 10px}
+  #nc-link:hover{box-shadow:0 0 12px rgba(255,206,106,.55)}
+  #nc-close{position:absolute;top:8px;right:11px;background:none;border:none;color:var(--muted);
+    font-size:19px;cursor:pointer;line-height:1}
+  #graph svg{cursor:grab}
+  #legend{position:absolute;bottom:10px;left:14px;z-index:5;display:flex;flex-wrap:wrap;gap:5px 12px;
+    background:rgba(6,14,24,.55);border:1px solid var(--line);border-radius:9px;padding:7px 11px;
+    font-size:10px;letter-spacing:.5px;backdrop-filter:blur(4px)}
+  #legend .lg{display:flex;align-items:center;gap:5px;color:#9fb6c8}
+  #legend .sw{width:9px;height:9px;border-radius:2px;box-shadow:0 0 7px currentColor}
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas>
+<svg id="watermark" viewBox="0 0 100 100" fill="none" stroke="currentColor">
+  <circle cx="50" cy="50" r="48" stroke-width=".4"/><circle cx="50" cy="50" r="40" stroke-width=".3"/>
+  <circle cx="50" cy="50" r="30" stroke-width=".5" stroke-dasharray="1 3"/><circle cx="50" cy="50" r="20" stroke-width=".3"/>
+  <circle cx="50" cy="50" r="10" stroke-width=".7"/>
+  <line x1="50" y1="2" x2="50" y2="14" stroke-width=".4"/><line x1="50" y1="86" x2="50" y2="98" stroke-width=".4"/>
+  <line x1="2" y1="50" x2="14" y2="50" stroke-width=".4"/><line x1="86" y1="50" x2="98" y2="50" stroke-width=".4"/>
+</svg>
+<div id="sweepwave"><div class="line"></div></div>
+<div id="reticle"></div>
+
+<!-- BOOT SEQUENCE -->
+<div id="boot">
+  <svg class="ring" viewBox="0 0 100 100">
+    <circle cx="50" cy="50" r="46" fill="none" stroke="rgba(44,230,255,.15)" stroke-width="1"/>
+    <circle cx="50" cy="50" r="46" fill="none" stroke="var(--cyan)" stroke-width="2" stroke-dasharray="60 230" stroke-linecap="round">
+      <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="1.4s" repeatCount="indefinite"/></circle>
+    <circle cx="50" cy="50" r="34" fill="none" stroke="var(--gold)" stroke-width="1.5" stroke-dasharray="20 200" stroke-linecap="round">
+      <animateTransform attributeName="transform" type="rotate" from="360 50 50" to="0 50 50" dur="2.2s" repeatCount="indefinite"/></circle>
+    <circle cx="50" cy="50" r="8" fill="var(--cyan)" opacity=".9"><animate attributeName="r" values="6;10;6" dur="1.2s" repeatCount="indefinite"/></circle>
+  </svg>
+  <pre id="boot-text"></pre>
+</div>
+
+<!-- HUD -->
+<div class="hud" id="hud">
+  <header class="panel">
+    <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+    <svg class="reactor" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(44,230,255,.2)" stroke-width="2"/>
+      <circle cx="50" cy="50" r="44" fill="none" stroke="var(--cyan)" stroke-width="3" stroke-dasharray="8 14" stroke-linecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="9s" repeatCount="indefinite"/></circle>
+      <circle cx="50" cy="50" r="30" fill="none" stroke="var(--gold)" stroke-width="2" stroke-dasharray="4 10">
+        <animateTransform attributeName="transform" type="rotate" from="360 50 50" to="0 50 50" dur="6s" repeatCount="indefinite"/></circle>
+      <circle cx="50" cy="50" r="13" fill="var(--cyan)" opacity=".85"><animate attributeName="opacity" values=".5;1;.5" dur="1.8s" repeatCount="indefinite"/></circle>
+      <circle cx="50" cy="50" r="13" fill="none" stroke="#fff" stroke-width="1.2"/>
+    </svg>
+    <div><div class="brand">QUANTRA</div><div class="sub">J.A.R.V.I.S. · FTMO AUTOPILOT</div></div>
+    <span class="spacer"></span>
+    <span class="pill"><span id="conn-dot" class="dot"></span><span id="conn-text">SIM</span></span>
+    <span class="pill"><span id="ftmo-dot" class="dot" style="background:var(--cyan)"></span><span id="ftmo-hdr" style="color:var(--cyan)">FTMO</span></span>
+    <span class="pill">◷ <span id="clock">--:--:--</span></span>
+    <span class="pill" id="help-btn" title="How to use this HUD">? HELP</span>
+  </header>
+
+  <section id="graph" class="panel">
+    <div id="sweep"></div>
+    <span class="cap">SYSTEM DATAFLOW · LIVE</span>
+    <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+    <div class="btns"><button id="btn-trace">▶ TRACE A TRADE</button><button id="btn-restart">↻ PULSE ALL</button></div>
+    <div id="nodecard">
+      <button id="nc-close" title="close">×</button>
+      <div class="nc-head"><span id="nc-ic">◆</span><div><div id="nc-name">node</div><div id="nc-tier">tier</div></div></div>
+      <div id="nc-role">role</div>
+      <a id="nc-link" href="#" target="_blank" rel="noopener">View code on GitHub →</a>
+    </div>
+    <div id="legend"></div>
+  </section>
+
+  <aside id="stats" class="panel">
+    <span class="cap">VITALS</span>
+    <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+    <div class="reward"><div class="k">EPISODE REWARD</div><div class="v" id="s-reward">+0.00</div></div>
+    <div class="gauges">
+      <div class="gauge"><svg width="96" height="96"><circle cx="48" cy="48" r="34" fill="none" stroke="rgba(44,230,255,.12)" stroke-width="7"/><circle id="g-win" cx="48" cy="48" r="34" fill="none" stroke="var(--cyan)" stroke-width="7" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="213.6" style="filter:drop-shadow(0 0 6px var(--cyan));transition:stroke-dashoffset .5s"/></svg><div class="lbl"><div class="num" id="t-win">0%</div><div class="cap2">WIN RATE</div></div></div>
+      <div class="gauge"><svg width="96" height="96"><circle cx="48" cy="48" r="34" fill="none" stroke="rgba(78,240,166,.12)" stroke-width="7"/><circle id="g-pnl" cx="48" cy="48" r="34" fill="none" stroke="var(--green)" stroke-width="7" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="213.6" style="filter:drop-shadow(0 0 6px var(--green));transition:stroke-dashoffset .5s,stroke .4s"/></svg><div class="lbl"><div class="num" id="t-pnl">0%</div><div class="cap2">PnL /2.5</div></div></div>
+      <div class="gauge"><svg width="96" height="96"><circle cx="48" cy="48" r="34" fill="none" stroke="rgba(255,107,107,.12)" stroke-width="7"/><circle id="g-dd" cx="48" cy="48" r="34" fill="none" stroke="var(--amber)" stroke-width="7" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="213.6" style="filter:drop-shadow(0 0 6px var(--amber));transition:stroke-dashoffset .5s,stroke .4s"/></svg><div class="lbl"><div class="num" id="t-dd">0%</div><div class="cap2">DD /4.0</div></div></div>
+    </div>
+    <div class="ftmo"><div><div class="k">FTMO STATUS</div><div class="k">step <span id="s-step">0</span></div></div>
+      <span class="badge" id="s-ftmo" style="color:var(--cyan);border-color:var(--cyan)">BOOT</span></div>
+  </aside>
+
+  <section id="log" class="panel">
+    <span class="cap">TELEMETRY STREAM</span>
+    <i class="cnr tl"></i><i class="cnr tr"></i><i class="cnr bl"></i><i class="cnr br"></i>
+    <div id="logwrap"></div>
+  </section>
+</div>
+<div class="tip" id="tip"></div>
+
+<!-- HELP overlay (auto-opens first visit; reopen via the ? HELP pill) -->
+<div class="help-wrap" id="help">
+  <div class="help-card">
+    <button class="help-x" id="help-close" title="close">×</button>
+    <h2>◆ J.A.R.V.I.S. — QUICK START</h2>
+    <p class="lead">A live cockpit for the RL trading bot. It runs on its own — no setup needed.</p>
+    <div class="help-grid">
+      <div><b>WHAT THIS IS</b>Center = the data pipeline (each node is a module). Right = FTMO vitals
+        (reward, win-rate, daily P&amp;L vs +2.5%, drawdown vs the −4% wall). Bottom = the telemetry log.</div>
+      <div><b>SIM vs LIVE · top-right pill</b><span class="hc">SIM</span> = built-in demo data (default,
+        so it's never blank). <span class="hg">LIVE</span> = real training telemetry is streaming in.</div>
+      <div><b>HOW TO GO LIVE</b>In a terminal, in the project folder:<br>
+        <code>pip install websockets</code><br><code>python -m barbershop.ws_broadcaster --demo</code><br>
+        then <b>refresh this page</b> → the pill turns green and nodes pulse with the stream.</div>
+      <div><b>EXPLORE</b>Drag the canvas to pan · scroll to zoom · drag a node to move it · <b>click a node</b>
+        to read its function and <b>open its code on GitHub</b> · <b>▶ TRACE A TRADE</b> walks one trade from
+        data-in all the way to a CLOSE.</div>
+      <div><b>THE OTHER TOOL — the dashboard</b>For the 6 diagnostic screens (Scoreboard, Trade Autopsy,
+        Repo Map, Risk Doctor) run <code>python run_dashboard.py</code>, or the Colab notebook
+        <code>colab/Quantra_Barbershop.ipynb</code> (Cell 1 → Cell 8). That's the X-ray tool; this is the cockpit.</div>
+      <div><b>MORE</b>Full guide: <code>JARVIS_HUD_GUIDE.md</code> · how to run everything:
+        <code>HOW_TO_RUN.md</code>. This HUD is READ-ONLY — it can't change or break anything.</div>
+    </div>
+    <button class="help-got" id="help-got">GOT IT ▸</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+// ── pipeline model (ids mirror ws_broadcaster module names; files are real repo paths) ──────────
+const GH="https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-/blob/claude/focused-faraday-if1ue7/";
+const TIERCOLOR={data:"#2ce6ff",env:"#38bdf8",locked:"#e24b4a",ftmo:"#4ef0a6",learn:"#ffce6a",diag:"#5dcaa5",live:"#3b82f6"};
+// id: [icon, "Mx · Name", tier, role/function, repo file, layer(left→right)]
+const META={
+ data_loader:["📡","M1 · DataLoader","data","Loads MT5 1m bars into lookahead-safe frames.","quantra/market_pipeline/data_loader/loader.py",0],
+ feature_builder:["🧠","M2 · FeatureBuilder","data","Builds the locked 203-scalar observation the bot sees.","quantra/market_pipeline/feature_builder/builder.py",1],
+ law_mask_engine:["⚖️","M3 · LawMask","data","9 laws + 3 gates → the legal-action mask.","quantra/market_pipeline/law_mask_engine/engine.py",2],
+ live_bridge:["🌉","M14 · LiveBridge","live","Guarded MT5 live runner feeding the env in production.","quantra/live_bridge/live_runner.py",2],
+ trading_env:["🌍","M4 · TradingEnv","env","4-symbol · 5-slot · FTMO account. Opens AND closes trades.","quantra/env/trading_env.py",3],
+ ppo_agent:["🤖","M5 · PPOAgent","learn","4-head policy · 3×256 trunk. Decides HOLD/OPEN/CLOSE.","quantra/learning_system/ppo_agent/agent.py",4],
+ reward_engine:["🏆","M6 · RewardEngine","learn","L0–L6 + QUAD reward · Layer-0 dominance (E8).","quantra/learning_system/reward_engine/reward.py",4],
+ curriculum_manager:["📚","M7 · Curriculum","learn","Sequences trend → reversion → stationarity.","quantra/learning_system/curriculum_manager/curriculum.py",4],
+ risk_manager:["🛡️","M4 · RiskManager","locked","Sizes each trade to the risk budget (locked).","quantra/locked_core/risk_manager/risk.py",4],
+ rollout_buffer:["📦","M5 · RolloutBuffer","learn","On-policy GAE store feeding the PPO update.","quantra/learning_system/rollout_buffer/buffer.py",5],
+ execution_adapter:["🔌","M14 · Execution","live","Routes the OPEN/CLOSE order (5-slot pointer CLOSE).","quantra/live_bridge/execution_adapter.py",5],
+ trainer:["🎯","M8 · Trainer","learn","PPO update · γ0.997 / λ0.97 (locked).","quantra/learning_system/trainer/trainer.py",6],
+ cost_layer:["💸","M4 · CostLayer","locked","Applies spread + commission on open/close.","quantra/locked_core/cost_layer/costs.py",6],
+ challenge_state:["🏦","M4 · ChallengeState","ftmo","Realizes PnL on CLOSE; tracks the account + −4% wall.","quantra/ftmo_passing/challenge_state.py",7],
+ telemetry_logger:["📊","M9 · Telemetry","diag","Versioned per-step data contract (what this HUD reads).","quantra/diagnostics/telemetry_logger/logger.py",7],
+ llm_risk_doctor:["🩺","M11 · RiskDoctor","diag","Read-only, evidence-only failure diagnosis.","quantra/diagnostics/llm_risk_doctor/doctor.py",7],
+ mlp_interpreter:["🔬","M10 · Interpreter","diag","The 7 diagnostic visuals over the trunk.","quantra/diagnostics/mlp_interpreter/interpreter.py",8],
+ scoreboard:["✅","M12 · Scoreboard","ftmo","pass-rate → breach → consistency → maxDD.","quantra/ftmo_passing/validation/scoreboard.py",8],
+};
+const NODES=Object.entries(META).map(([id,m])=>({id,icon:m[0],tier:m[1],tcls:m[2],role:m[3],file:m[4],
+ layer:m[5],color:TIERCOLOR[m[2]],energy:0}));
+const LINKS=[["data_loader","feature_builder"],["feature_builder","law_mask_engine"],["law_mask_engine","trading_env"],
+ ["live_bridge","trading_env"],["trading_env","ppo_agent"],["ppo_agent","rollout_buffer"],["rollout_buffer","trainer"],
+ ["reward_engine","trainer"],["curriculum_manager","trainer"],
+ ["trading_env","risk_manager"],["risk_manager","execution_adapter"],["execution_adapter","cost_layer"],
+ ["cost_layer","challenge_state"],["challenge_state","reward_engine"],["challenge_state","scoreboard"],
+ ["trainer","telemetry_logger"],["telemetry_logger","mlp_interpreter"],["trainer","llm_risk_doctor"]]
+ .map(([s,t])=>({source:s,target:t,comets:[Math.random(),Math.random()+.33,Math.random()+.66],energy:0}));
+// the "watch one trade flow to a CLOSE" trace — ordered [node id, log line]
+const TRACE=[["data_loader","1m bars in"],["feature_builder","→ 203-feature observation"],
+ ["law_mask_engine","→ legal-action mask"],["trading_env","→ env presents the state"],
+ ["ppo_agent","→ policy decides: CLOSE EURUSD"],["risk_manager","→ size validated"],
+ ["execution_adapter","→ CLOSE order routed (pointer slot)"],["cost_layer","→ spread + commission applied"],
+ ["challenge_state","→ PnL realized · TRADE CLOSED ✓"],["telemetry_logger","→ step logged"]];
+
+// ── starfield ──────────────────────────────────────────────────────────────────────────────
+const cv=$("stars"),cx=cv.getContext("2d");let stars=[];
+function resizeStars(){cv.width=innerWidth;cv.height=innerHeight;stars=Array.from({length:90},()=>({x:Math.random()*cv.width,y:Math.random()*cv.height,z:Math.random()*1.6+.3,s:Math.random()*1.4+.3}));}
+resizeStars();addEventListener("resize",resizeStars);
+function drawStars(){cx.clearRect(0,0,cv.width,cv.height);for(const s of stars){s.y+=s.z*.25;if(s.y>cv.height)s.y=0;cx.globalAlpha=.25+s.z*.4;cx.fillStyle="#9fe9ff";cx.beginPath();cx.arc(s.x,s.y,s.s,0,6.28);cx.fill();}cx.globalAlpha=1;requestAnimationFrame(drawStars);}
+drawStars();
+
+// ── n8n-style graph: cards · bezier connectors · pan/zoom/drag · click→code · trace ──────────
+const gEl=$("graph"),W=()=>gEl.clientWidth,H=()=>gEl.clientHeight,tip=$("tip");
+const svg=d3.select("#graph").append("svg").attr("viewBox",`0 0 ${W()} ${H()}`).attr("preserveAspectRatio","xMidYMid meet");
+svg.append("defs").append("filter").attr("id","glow").html('<feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>');
+const VP=svg.append("g").attr("id","vp");                          // pan/zoom viewport
+const linkG=VP.append("g"),pulseG=VP.append("g"),cometG=VP.append("g"),nodeG=VP.append("g");
+const CW=176,CH=50;
+const linkSel=linkG.selectAll("path").data(LINKS).join("path").attr("class","link");
+const cometSel=[];LINKS.forEach(l=>l.comets.forEach(()=>cometSel.push(cometG.append("circle").attr("class","comet").attr("r",2.6).attr("fill","#cffcff").datum(l))));
+const nodeSel=nodeG.selectAll("g").data(NODES).join("g").attr("class","ncard").style("cursor","pointer");
+nodeSel.append("rect").attr("class","card").attr("x",-CW/2).attr("y",-CH/2).attr("width",CW).attr("height",CH).attr("rx",11)
+  .attr("fill","#0a1626").attr("stroke",d=>d.color).attr("stroke-width",1.6).attr("filter","url(#glow)");
+nodeSel.append("text").attr("x",-CW/2+20).attr("y",5).attr("text-anchor","middle").attr("font-size","18px").text(d=>d.icon);
+nodeSel.append("text").attr("x",-CW/2+38).attr("y",-3).attr("font-size","11px").attr("fill","#eaf6ff").text(d=>d.id.replace(/_/g," "));
+nodeSel.append("text").attr("x",-CW/2+38).attr("y",13).attr("font-size","8.5px").attr("fill",d=>d.color).text(d=>d.tier.split(" · ")[0]);
+
+const lw=()=>Math.max(360,W()-CW-40), fx=d=>40+CW/2+d.layer*(lw()/8);
+const sim=d3.forceSimulation(NODES).force("link",d3.forceLink(LINKS).id(d=>d.id).distance(120).strength(.2))
+ .force("charge",d3.forceManyBody().strength(-1100)).force("x",d3.forceX(fx).strength(1))
+ .force("y",d3.forceY(()=>H()/2).strength(.05)).force("collide",d3.forceCollide(CH*1.5)).on("tick",ticked);
+function edgePath(d){const sx=d.source.x+CW/2,sy=d.source.y,tx=d.target.x-CW/2,ty=d.target.y,mx=(sx+tx)/2;
+ return `M${sx},${sy} C ${mx},${sy} ${mx},${ty} ${tx},${ty}`;}
+function ticked(){linkSel.attr("d",edgePath);nodeSel.attr("transform",d=>`translate(${d.x},${d.y})`);}
+addEventListener("resize",()=>{svg.attr("viewBox",`0 0 ${W()} ${H()}`);sim.force("x",d3.forceX(fx).strength(1)).alpha(.4).restart();});
+
+// pan (drag empty canvas) + zoom (wheel)
+let vt={x:0,y:0,k:1};
+function applyVP(){VP.attr("transform",`translate(${vt.x},${vt.y}) scale(${vt.k})`);}
+svg.on("wheel",ev=>{ev.preventDefault();const [mx,my]=d3.pointer(ev,svg.node());const f=ev.deltaY<0?1.12:1/1.12;
+ const nk=Math.max(.45,Math.min(2.4,vt.k*f));vt.x=mx-(mx-vt.x)*(nk/vt.k);vt.y=my-(my-vt.y)*(nk/vt.k);vt.k=nk;applyVP();},{passive:false});
+svg.call(d3.drag().filter(ev=>ev.target.tagName==="svg"||ev.target.id==="vp")
+ .on("drag",ev=>{vt.x+=ev.dx;vt.y+=ev.dy;applyVP();}));
+
+// node drag (pins it where you drop it) + hover tooltip + click → inspect/code
+nodeSel.call(d3.drag()
+ .on("start",(ev,d)=>{d.__moved=false;sim.alphaTarget(.15).restart();})
+ .on("drag",(ev,d)=>{d.__moved=true;const [px,py]=d3.pointer(ev.sourceEvent,svg.node());d.fx=(px-vt.x)/vt.k;d.fy=(py-vt.y)/vt.k;})
+ .on("end",()=>sim.alphaTarget(0)))
+ .on("mousemove",(ev,d)=>{tip.style.opacity=1;tip.style.left=(ev.clientX+16)+"px";tip.style.top=(ev.clientY+12)+"px";
+   tip.innerHTML=`<b style="color:${d.color}">${d.icon} ${d.tier}</b><br><span style="color:#9fb6c8">${d.role}</span><br><span style="color:#6f8aa0">click → its code</span>`;})
+ .on("mouseleave",()=>tip.style.opacity=0)
+ .on("click",(ev,d)=>{ if(d.__moved){d.__moved=false;return;} selectNode(d); });
+
+function clearSel(){linkSel.classed("hot",false).classed("dim",false);nodeSel.select("rect.card").attr("stroke-width",1.6);}
+function selectNode(d){
+ linkSel.classed("hot",l=>l.source.id===d.id||l.target.id===d.id).classed("dim",l=>!(l.source.id===d.id||l.target.id===d.id));
+ nodeSel.select("rect.card").attr("stroke-width",n=>n.id===d.id?3:1.6);
+ $("nc-ic").textContent=d.icon;$("nc-name").textContent=d.id.replace(/_/g," ");
+ $("nc-tier").textContent=d.tier;$("nc-tier").style.color=d.color;$("nc-role").textContent=d.role;
+ const a=$("nc-link");a.href=GH+d.file;a.textContent="‹/›  open "+d.file.split("/").pop()+" on GitHub →";
+ $("nodecard").classList.add("on");
+}
+$("nc-close").onclick=()=>{$("nodecard").classList.remove("on");clearSel();};
+
+// pulse rings + per-node energy (driven by the live stream / trace)
+function spawnPulse(n){const c=pulseG.append("circle").attr("cx",n.x).attr("cy",n.y).attr("r",CW/3).attr("fill","none").attr("stroke",n.color).attr("stroke-width",2).attr("opacity",.85);
+ c.transition().duration(900).ease(d3.easeCubicOut).attr("r",CW*0.9).attr("opacity",0).remove();}
+function pulse(id){const n=NODES.find(x=>x.id===id);if(!n)return;n.energy=1;spawnPulse(n);
+ LINKS.forEach(l=>{if((l.source.id||l.source)===id||(l.target.id||l.target)===id)l.energy=1;});}
+$("btn-restart").onclick=()=>NODES.forEach(n=>{n.energy=1;spawnPulse(n);});
+
+// ▶ TRACE A TRADE — walk one trade from data-in all the way to a CLOSE
+let tracing=false;
+function traceTrade(){ if(tracing)return; tracing=true; clearSel();
+ logLine("system","▶ TRACING ONE TRADE — data in … to a CLOSED position","good");
+ let i=0;(function stepFn(){ if(i>=TRACE.length){tracing=false;return;}
+   const [id,msg]=TRACE[i++]; pulse(id);
+   logLine(id.replace(/_/g," "), msg, id==="challenge_state"?"good":"");
+   setTimeout(stepFn,440); })();
+}
+$("btn-trace").onclick=traceTrade;
+
+// tier legend (built from TIERCOLOR so it can never drift from the nodes)
+const TIERLBL={data:"Data",env:"Env",locked:"Locked 🔴",ftmo:"FTMO",learn:"Learn",diag:"Diagnostics",live:"Live"};
+$("legend").innerHTML=Object.entries(TIERCOLOR).map(([k,c])=>
+ `<span class="lg"><span class="sw" style="background:${c};color:${c}"></span>${TIERLBL[k]||k}</span>`).join("");
+
+// auto-demo: trace a trade on a ~16s loop when idle (skips while the help panel is open)
+setInterval(()=>{ if(!tracing && !$("help").classList.contains("on")) traceTrade(); }, 16000);
+
+// animation loop: comets ride the bezier curves; cards glow with energy
+function frame(){ let ci=0;
+ LINKS.forEach((l,i)=>{ const path=linkSel.nodes()[i]; if(!path){l.comets.forEach(()=>ci++);return;}
+   const len=path.getTotalLength()||1;
+   l.comets.forEach((ph,k)=>{ l.comets[k]=(ph+0.004+l.energy*0.02)%1; const pt=path.getPointAtLength(l.comets[k]*len);
+     cometSel[ci].attr("cx",pt.x).attr("cy",pt.y).attr("r",2.4+l.energy*2.6).attr("opacity",.3+l.energy*.6)
+       .attr("fill",l.energy>.3?"#fff":"#cffcff"); ci++; });
+   l.energy*=0.95; });
+ nodeSel.select("rect.card").attr("stroke-width",d=>1.6+d.energy*2.4)
+   .attr("fill",d=>d.energy>.12?d3.color(d.color).copy({opacity:.16}):"#0a1626");
+ NODES.forEach(n=>n.energy*=0.94);
+ requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ── stats + circular gauges ──────────────────────────────────────────────────────────────
+const C=213.6; // 2πr, r=34
+const S={reward:0,win:52,pnl:0,dd:0},T={reward:0,win:52,pnl:0,dd:0,step:0,ftmo:"BUILDING"};
+const ez=(a,b)=>a+(b-a)*0.1;
+function gauge(el,num,frac,color){el.setAttribute("stroke-dashoffset",C*(1-Math.max(0,Math.min(1,frac))));if(color)el.style.stroke=color;}
+function paint(){
+ S.reward=ez(S.reward,T.reward);S.win=ez(S.win,T.win);S.pnl=ez(S.pnl,T.pnl);S.dd=ez(S.dd,T.dd);
+ $("s-reward").textContent=(S.reward>=0?"+":"")+S.reward.toFixed(2);$("s-reward").style.color=S.reward>=0?"var(--green)":"var(--red)";
+ gauge($("g-win"),null,S.win/100);$("t-win").textContent=S.win.toFixed(0)+"%";
+ gauge($("g-pnl"),null,S.pnl/2.5,S.pnl>=2.5?"var(--green)":"var(--cyan)");$("t-pnl").innerHTML=(S.pnl>=0?"+":"")+S.pnl.toFixed(1)+"%";
+ const ddc=S.dd>=3.5?"var(--red)":(S.dd>=3?"var(--amber)":"var(--green)");gauge($("g-dd"),null,S.dd/4,ddc);
+ $("t-dd").textContent="-"+S.dd.toFixed(1)+"%";$("t-dd").style.color=ddc;
+ $("s-step").textContent=T.step.toLocaleString();
+ const b=$("s-ftmo"),map={PASSING:"--green",BUILDING:"--cyan","AT RISK":"--amber",BREACH:"--red",BOOT:"--cyan"},c=`var(${map[T.ftmo]||"--cyan"})`;
+ b.textContent=T.ftmo;b.style.color=c;b.style.borderColor=c;
+ $("ftmo-dot").style.background=c; const fh=$("ftmo-hdr");fh.style.color=c;fh.textContent=(T.ftmo==="BUILDING"||T.ftmo==="BOOT")?"FTMO PHASE A":T.ftmo;
+ requestAnimationFrame(paint);
+}
+requestAnimationFrame(paint);
+
+// ── log ──────────────────────────────────────────────────────────────────────────────────
+const logwrap=$("logwrap");
+function logLine(tag,msg,lvl){const t=new Date().toTimeString().slice(0,8);const el=document.createElement("div");
+ el.className="ln "+(lvl||"");el.innerHTML=`<span class="ts">${t}</span> <span class="tag">[${tag}]</span> <span class="msg"></span>`;
+ logwrap.prepend(el);const span=el.querySelector(".msg");let i=0;          // typewriter reveal
+ const id=setInterval(()=>{span.textContent=msg.slice(0,++i);if(i>=msg.length)clearInterval(id);},11);
+ while(logwrap.childNodes.length>120)logwrap.removeChild(logwrap.lastChild);}
+
+// ── apply event (WebSocket OR simulator) ───────────────────────────────────────────────────
+function applyEvent(e){
+ if(typeof e.step==="number")T.step=e.step;
+ if(typeof e.reward==="number")T.reward=e.reward;
+ if(typeof e.win_rate==="number")T.win=e.win_rate;
+ if(typeof e.daily_pnl_pct==="number")T.pnl=e.daily_pnl_pct;
+ if(typeof e.drawdown_pct==="number")T.dd=Math.abs(e.drawdown_pct);
+ if(e.ftmo)T.ftmo=e.ftmo; if(e.module)pulse(e.module);
+ if(e.msg||e.action){const lvl=e.ftmo==="BREACH"?"bad":(T.dd>=3.5?"warn":(T.reward>0?"good":""));
+  logLine((e.module||"system").replace(/_/g," "),e.msg||`step ${T.step} | r ${T.reward>=0?"+":""}${T.reward.toFixed(2)} | ${e.action||"HOLD"} | dd ${T.dd.toFixed(1)}%`,lvl);}
+}
+
+// ── simulator ──────────────────────────────────────────────────────────────────────────────
+const MODS=Object.keys(TIER),SYMS=["EURUSD","GBPUSD","XAUUSD","US30"],SIDES=["BUY","SELL","HOLD","CLOSE"];
+let simTimer=null,dp=0,dd=0,step=4800,win=52;
+function simStep(){step++;dp=Math.max(-3,Math.min(4.2,dp+(Math.random()-0.45)*0.18));dd=Math.max(0,Math.min(4.3,dd+(Math.random()-0.55)*0.22));win=Math.max(38,Math.min(72,win+(Math.random()-0.5)*1.4));
+ const reward=+((Math.random()-0.42)*0.9).toFixed(2),ftmo=dd>=4?"BREACH":(dp>=2.5?"PASSING":(dd>=3?"AT RISK":"BUILDING"));
+ applyEvent({step,module:MODS[Math.random()*MODS.length|0],reward,daily_pnl_pct:dp,drawdown_pct:dd,win_rate:win,ftmo,
+  action:`${SIDES[Math.random()*SIDES.length|0]} ${SYMS[Math.random()*SYMS.length|0]} ${(Math.random()*.08+.01).toFixed(2)}`});}
+function setConn(live){$("conn-dot").className="dot"+(live?" live":"");$("conn-text").textContent=live?"LIVE":"SIM";$("conn-text").style.color=live?"var(--green)":"var(--amber)";}
+function startSim(){if(simTimer)return;setConn(false);logLine("system","SIM MODE · ws://localhost:8765 idle — run barbershop/ws_broadcaster.py for live data.","warn");simTimer=setInterval(simStep,900);}
+function stopSim(){clearInterval(simTimer);simTimer=null;}
+function connect(){let ws;try{ws=new WebSocket("ws://localhost:8765");}catch(_){startSim();return;}
+ ws.onopen=()=>{stopSim();setConn(true);logLine("system","LIVE · telemetry stream connected.","good");};
+ ws.onmessage=ev=>{try{applyEvent(JSON.parse(ev.data));}catch(_){}};
+ ws.onclose=()=>{setConn(false);if(!simTimer)startSim();setTimeout(connect,4000);};
+ ws.onerror=()=>{try{ws.close();}catch(_){}};}
+
+// ── cursor reticle + clock ─────────────────────────────────────────────────────────────────
+const ret=$("reticle");addEventListener("mousemove",e=>{ret.style.left=e.clientX+"px";ret.style.top=e.clientY+"px";});
+setInterval(()=>$("clock").textContent=new Date().toTimeString().slice(0,8),1000);$("clock").textContent=new Date().toTimeString().slice(0,8);
+
+// ── HELP overlay (C30): explains the HUD; auto-opens the first visit, reopen via the ? HELP pill ──
+const helpEl=$("help");
+function showHelp(v){ helpEl.classList.toggle("on", v); }
+$("help-btn").onclick=()=>showHelp(true);
+$("help-close").onclick=()=>showHelp(false);
+$("help-got").onclick=()=>showHelp(false);
+helpEl.addEventListener("click",e=>{ if(e.target===helpEl) showHelp(false); });   // click backdrop to close
+addEventListener("keydown",e=>{ if(e.key==="Escape") showHelp(false); });
+function maybeAutoHelp(){ try{ if(!localStorage.getItem("jarvis_help_seen")){ showHelp(true); localStorage.setItem("jarvis_help_seen","1"); } }catch(_){ showHelp(true); } }
+
+// ── BOOT sequence then reveal ───────────────────────────────────────────────────────────────
+const BOOT=["<span class='ttl'>J.A.R.V.I.S. INTERFACE</span>","INITIALIZING QUANTRA SYSTEMS...",
+ "▸ LOADING NEURAL POLICY ........ <span class='ok'>OK</span>","▸ CONNECTING TO MT5 FEED ....... <span class='ok'>OK</span>",
+ "▸ REWARD ENGINE · E8 DOMINANCE . <span class='ok'>OK</span>","▸ LAW MASK · 9 LAWS + 3 GATES .. <span class='ok'>OK</span>",
+ "▸ FTMO AUTOPILOT ............... <span class='ok'>ARMED</span>","ALL SYSTEMS NOMINAL <span class='cur'>▮</span>"];
+let bi=0;const bt=$("boot-text");
+(function boot(){if(bi<BOOT.length){bt.innerHTML=BOOT.slice(0,bi+1).join("\n");bi++;setTimeout(boot,260);}
+ else setTimeout(()=>{$("boot").classList.add("gone");$("hud").classList.add("on");$("sweepwave").classList.add("go");
+   logLine("system","QUANTRA J.A.R.V.I.S. online · awaiting telemetry…","good");connect();
+   setTimeout(()=>{if($("conn-text").textContent!=="LIVE")startSim();},1100);
+   setTimeout(maybeAutoHelp,1000);
+   setTimeout(()=>{if(!tracing)traceTrade();},4500);},700);})();
+</script>
+</body>
+</html>

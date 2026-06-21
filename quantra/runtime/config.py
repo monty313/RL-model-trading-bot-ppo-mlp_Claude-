@@ -33,7 +33,7 @@ provides the *defaults* (SOW-A3) and the immutable infrastructure constants.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Dict, List
 
@@ -52,6 +52,10 @@ ARTIFACT_DIR: Path = REPO_ROOT / "artifacts"
 CHECKPOINT_DIR: Path = ARTIFACT_DIR / "checkpoints"
 TELEMETRY_DIR: Path = ARTIFACT_DIR / "telemetry"
 REPORT_DIR: Path = ARTIFACT_DIR / "reports"
+# COUPLING -> learning_system/policy_registry/registry.py (PolicyCard.save/load, Leaderboard) +
+# artifacts/policy_registry/README.md: one folder per policy lives here (manifest/performance/
+# compatibility). Only the README is committed; the rest is git-ignored (run-specific).
+POLICY_REGISTRY_DIR: Path = ARTIFACT_DIR / "policy_registry"
 DOCS_DIR: Path = REPO_ROOT / "docs"
 
 # The interpretability rulebook the LLM Risk Doctor MUST be able to read
@@ -154,6 +158,50 @@ class RiskConfig:
     min_lot: float = 0.01
     max_lot: float = 50.0
     max_per_trade_risk_frac: float = 0.01  # per-trade cap = 1% of account size
+    # Hard per-trade STOP-LOSS [operator 2026-06-20]: close any single trade once its loss reaches this
+    # fraction of the INITIAL account balance, checked every bar (tick by tick). 0.0 = OFF (no hard stop;
+    # a trade only ends on a discretionary close / daily-wall breach / EOD). Set 0.005 for a 0.5% stop so
+    # one trade can't ride to the 4% wall (5 slots x 0.5% = 2.5% < 4%). COUPLING -> env/trading_env.py
+    # _apply_stop_losses(); barbershop_runner.build_env forwards the OVERRIDES["hard_stop_frac"] value.
+    hard_stop_frac: float = 0.0
+
+
+# COUPLING -> learning_system/reward_engine/reward.py: RewardEngine reads these exact field NAMES
+# to weight the layered reward; env/trading_env.py passes a RewardConfig through to it. The
+# decompose() layer KEYS (L0..L5) are UNCHANGED — this C16 rename touches only the weight
+# NAMES/defaults, never the math/structure. Renaming a field here breaks reward.py's lookups.
+@dataclass(frozen=True)
+class RewardConfig:
+    """Operator-tunable reward weights (C16, 2026-06-19). Plain-English names for the layered
+    reward; the MATH/STRUCTURE is UNCHANGED (E8 Layer-0 dominance preserved — see reward.py + the
+    E8 test). Captured to telemetry/registry so a run's objective is reproducible.
+
+    NAMES vs CURRENT MATH (honest mapping): net_pnl (Layer 0) is the dominant OUTCOME base that E8
+    protects (weight 1.0). The four shaping weights are deliberately tiny 'whispers'. The
+    plain-English C16 names are mapped onto the EXISTING proxy terms in decompose() — today:
+      step_pnl_weight       -> per-bar in-position (momentum-continuation) bonus   [was ALPHA]
+      daily_progress_weight -> anti-stagnation push toward daily progress          [was BETA, raised]
+      drawdown_pain_weight  -> pain-zone penalty approaching the wall              [was DELTA]
+      trade_quality_weight  -> target-progress whisper                            [was EPS]
+    Re-pointing the math so each term literally computes its name is a SEPARATE change (new math ->
+    needs sign-off); this C16 step is names + default values only."""
+
+    net_pnl_weight: float = 1.0            # Layer 0 — dominant per-bar net-PnL outcome (E8-protected; keep 1.0)
+    step_pnl_weight: float = 1e-4          # small per-bar in-position bonus (keep small)
+    daily_progress_weight: float = 1e-3    # the consistency driver — RAISED from 1e-4 (matters most)
+    drawdown_pain_weight: float = 5e-4     # pain-zone penalty near the trailing wall
+    drawdown_pain_steepness: float = 4.0   # exponential steepness of the pain ramp (was PAIN_K)
+    trade_quality_weight: float = 5e-5     # close-quality / target-progress whisper (tiniest)
+    failed_day_penalty: float = 5.0        # C11 — lives at the ENV level (per operator); mirrored here for VISIBILITY
+    # --- [operator 2026-06-20] exit-shaping additions (defaults 0/off -> existing behaviour + E8 proof unchanged) ---
+    profit_hold_weight: float = 0.0        # SMALL +reward per profitable close held >= profit_hold_min_bars
+    profit_hold_min_bars: int = 5          #   bars (1m) a winner must be held to earn the profit-hold bonus
+    #   folded into L4 (decompose: l4 += profit_hold_weight*profit_hold_count) — same layer KEY, resume-safe.
+    # BIG event-level bonus (EXEMPT from per-step E8, like failed_day_penalty): paid ONCE when the day's
+    # +target is hit within fast_pass_hours of the day's open — rewards passing the day FAST and decisively.
+    fast_pass_bonus: float = 0.0           # reward added once/day on a fast pass (0.0 = OFF)
+    fast_pass_hours: float = 12.0          # the window from the day's open within which the pass must land
+
 
 # COUPLING [C5] -> data_loader/loader.py: loader.py resolves each SYMBOL's bars via
 # DRIVE_FILE_IDS[symbol] (gdown) and DRIVE_FILENAMES[symbol] (Drive-mount lookup); a
@@ -185,7 +233,7 @@ DRIVE_FOLDER_ID: str = "1azEnCfwQjxPkBemmv9mxY3GyVAMcjF-3"
 # schema + STATE_DIM follow automatically. Read by feature_builder.schema.
 # ---------------------------------------------------------------------------
 # COUPLING [C1] -> feature_builder/schema.py: schema reads INCLUDE_RAW_INPUTS to add/drop
-# the market_raw block, which sets STATE_DIM (167 on / 149 off). Flipping this changes the
+# the market_raw block, which sets STATE_DIM (207 on / 189 off). Flipping this changes the
 # observation width everywhere; nominal_state_dim below mirrors the same branch.
 INCLUDE_RAW_INPUTS: bool = True
 
@@ -202,6 +250,80 @@ INCLUDE_RAW_INPUTS: bool = True
 # their `training_wheels` arg to this; law_mask_engine.build_direction_mask applies it.
 # ---------------------------------------------------------------------------
 TRAINING_WHEELS: bool = True
+
+
+# ---------------------------------------------------------------------------
+# CCI_REGIME_GATE — EXPERIMENT CONCLUDED, KEEP OFF [operator 2026-06-20].
+# The "trade only in a clean CCI regime" open-gate was tested with all four 1m+4H CCI
+# (CCI30 AND CCI100 on BOTH 1m AND 4H) required to agree. RESULT: FAILED. On real
+# EURUSD the "all four agree" condition is met on <1% of bars — the gate blocked ~99%
+# of opens during training. The policy saw nearly nothing but HOLD, miss_rate collapsed
+# to 0, aggression decayed to its floor, and the net converged to always-HOLD (confirmed:
+# 0 trades/day on every eval scoreboard after the exit-overhaul run). The 4H CCI regime
+# IS in the observation (cci{30,100}_{1m,4H} vs their SMAs) so the policy can learn it
+# as a soft signal — it must not be a hard gate. Default remains False (no behaviour
+# change); the toggle is retained so the experiment can be reproduced. COUPLING ->
+# env/trading_env.py direction_mask(); barbershop_runner.build_env honors the override.
+# ---------------------------------------------------------------------------
+CCI_REGIME_GATE: bool = False
+
+
+# ---------------------------------------------------------------------------
+# MIN_AGGRESSION — exploration FLOOR for the aggression scheduler [operator 2026-06-20].
+# Default 0.0 = LOCKED behaviour unchanged. The G8 miss-rate is diluted toward 0 by bars where a
+# mask/guardrail (CCI gate, training wheels, laws) holds the bot FLAT, and the scheduler's pure-EMA
+# update decays aggression (entropy_coef/LR/epochs) to ~0 before a fresh policy can learn. Raise this
+# (e.g. 0.3–0.4) to keep exploration of the still-available options alive under masks; the scheduler
+# never lets aggression fall below it. COUPLING -> trainer/scheduler.py (AggressionScheduler.min_aggression)
+# + the notebook passes this into AggressionScheduler(min_aggression=...).
+# ---------------------------------------------------------------------------
+MIN_AGGRESSION: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# TRAINING_PHASE — gates the ENFORCEMENT of the market-condition signals
+# (market_volatility_obs / market_stationarity_obs / market_spread_obs). These
+# signals are ALWAYS in the observation; this flag only controls whether they
+# additionally BLOCK new opens (they used to be hard "gates").
+#   PHASE_FREE        (default): signals are OBSERVATION-ONLY — the bot learns the
+#                     conditions itself and is never blocked by them. This is what
+#                     lets the policy actually trade enough to learn to pass FTMO
+#                     (the old hard gates shut ~98.7% of opens on real EURUSD).
+#   PHASE_CONSTRAINED: late-curriculum hardening — the stationarity signal re-enforces
+#                     (blocks new opens when the market is non-stationary). Volatility +
+#                     spread enforcement are deferred (see law_mask_engine/engine.py TODO).
+# COUPLING -> market_pipeline/law_mask_engine/engine.py reads cfg.TRAINING_PHASE /
+# cfg.PHASE_CONSTRAINED in build_direction_mask. Raising the phase RE-narrows the legal
+# space, so only raise it once the policy is disciplined (mirrors the TRAINING_WHEELS idea).
+# ---------------------------------------------------------------------------
+PHASE_FREE: int = 0
+PHASE_CONSTRAINED: int = 1
+TRAINING_PHASE: int = PHASE_FREE
+
+
+# ---------------------------------------------------------------------------
+# EPISODE LENGTH [operator decision 2026-06-19, C10]. An episode is N TRADING DAYS
+# on ONE continuous account (balance carries forward across days; a day's breach
+# locks out the rest of that day and resets at midnight — it does NOT end the
+# episode). The episode ends only when N days are exhausted OR the account is blown
+# (equity <= ACCOUNT_FLOOR_EQUITY). These are operator INPUTS, never hardcoded:
+#   TRAINING_DAYS — a full training run (~6 months of bars).
+#   EVAL_DAYS     — a short Barbershop/evaluation window.
+# COUPLING -> env/trading_env.py: TradingEnv(episode_days=...) enforces the N-day
+# episode; the notebooks pass TRAINING_DAYS / EVAL_DAYS as that argument.
+# ---------------------------------------------------------------------------
+TRAINING_DAYS: int = 180
+EVAL_DAYS: int = 8
+ACCOUNT_FLOOR_EQUITY: float = 0.0   # episode ends if equity reaches/below this ("account hits zero")
+
+# CHALLENGE_TZ — the timezone whose MIDNIGHT defines the FTMO challenge-day reset boundary.
+# FTMO resets the daily target/trailing wall at 00:00 CE(S)T (Europe/Prague), which is UTC+1 (CET,
+# winter) / UTC+2 (CEST, summer). The loader yields tz-naive UTC bars, so env/trading_env.py
+# prepare_symbol_data() localizes UTC -> CHALLENGE_TZ before flooring to local midnight to build the
+# per-bar day-id; the env (_advance_bar) + scripts/emit_real_telemetry.py just diff consecutive ids,
+# so the reset fires at CE(S)T midnight. zoneinfo handles DST automatically (converting FROM UTC is
+# unambiguous). COUPLING -> env/trading_env.py prepare_symbol_data() reads cfg.CHALLENGE_TZ.
+CHALLENGE_TZ: str = "Europe/Prague"
 
 
 # COUPLING [C5] -> ftmo_passing/challenge_state.py + reward_engine/reward.py +
@@ -227,6 +349,19 @@ class ChallengeConfig:
     stop_for_day: bool = False        # OFF-mode toggle: bank + STOP when the target is hit (else run on).
     ftmo_account_size: float = 10_000.0  # reference scaling only; policy is blind
     leverage: float = 100.0          # account leverage (1:100). Margin = notional / leverage. INPUT.
+    # CHANGED: 2026-06-18 | Added permanent_dd_pct (the -10% permanent max-overall-loss wall)
+    # WHY: bot had no awareness of the hard floor that ends the FTMO challenge for good (real
+    #      FTMO has TWO walls; the sim modelled only the daily trailing wall) — a survival blind spot
+    # AFFECTS: challenge_state.account_block() (emits distance_to_permanent_dd), schema._account_names()
+    #          (+acct_dist_to_perm_dd), EXPECTED_WIDTHS["account"] 7->8, STATE_DIM 206->207, snapshot re-pin
+    permanent_dd_pct: float = 10.0   # permanent max-overall-loss wall, % of the STARTING balance (FTMO ~10%)
+    # CHANGED: 2026-06-19 | Added failed_day_penalty (C11 — the multi-day-episode consistency signal)
+    # WHY: in the C10 multi-day episode a bot can "survive" by trading tiny and never failing a day;
+    #      a LARGE end-of-day penalty for missing the daily target makes CONSISTENCY the goal, not just
+    #      survival. Applied at the midnight reset, PROPORTIONAL to how far below target the day finished
+    #      (worst for days that hit the wall and got locked out). Big by design so it isn't averaged away.
+    # AFFECTS: env/trading_env.py (_advance_bar day-boundary event reward), make_challenge() passthrough.
+    failed_day_penalty: float = 5.0  # C11 weight: reward = -failed_day_penalty * shortfall_fraction at EOD
 
 
 # Operator input bounds [decision 2026-06-15]. ftmo_mode ON keeps challenge-safe ranges;
@@ -244,7 +379,9 @@ def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *
                    stop_for_day: bool = False,
                    phase_b_trailing_pct: float = 1.0, account_size: float = 10_000.0,
                    pain_zone_start_pct: float | None = None,
-                   hard_wall_pct: float | None = None) -> "ChallengeConfig":
+                   hard_wall_pct: float | None = None,
+                   permanent_dd_pct: float = 10.0,
+                   failed_day_penalty: float = 5.0) -> "ChallengeConfig":
     """Build a VALIDATED ChallengeConfig — the operator entry point for per-day inputs.
 
     Clamps target/risk into the active mode's bounds, and pins the breach wall + pain
@@ -260,7 +397,54 @@ def make_challenge(daily_target_pct: float = 2.5, daily_risk_pct: float = 4.0, *
         daily_target_pct=t, daily_risk_pct=r, phase_b_trailing_pct=phase_b_trailing_pct,
         pain_zone_start_pct=pz, hard_wall_pct=hw, ftmo_mode=ftmo_mode,
         stop_for_day=stop_for_day, ftmo_account_size=account_size,
-        leverage=max(1.0, float(leverage)))
+        leverage=max(1.0, float(leverage)),
+        permanent_dd_pct=float(permanent_dd_pct),
+        failed_day_penalty=max(0.0, float(failed_day_penalty)))
+
+
+def _dataclass_diff(live, default=None) -> dict:
+    """Return {field: value} for every field of `live` that differs from `default` (a fresh
+    instance of the same type when not given). Generic so it never needs to import the concrete
+    config type — avoids a runtime->learning_system import cycle for TrainConfig."""
+    default = default if default is not None else type(live)()
+    return {f.name: getattr(live, f.name) for f in fields(live)
+            if getattr(live, f.name) != getattr(default, f.name)}
+
+
+def build_overrides_dict(*, challenge: "ChallengeConfig | None" = None,
+                         reward: "RewardConfig | None" = None,
+                         train=None, training_phase: "int | None" = None,
+                         training_wheels: "bool | None" = None) -> dict:
+    """C19 [2026-06-19]: the OVERRIDES dict = ONLY the knobs that DIFFER from the baseline dataclass
+    defaults (ChallengeConfig()/RewardConfig()/TrainConfig() + the TRAINING_* module defaults). This
+    is the ground truth a policy is auto-NAMED from and the exact dict recorded in its manifest, so a
+    run is reproducible and never hand-named. The BASELINE *is* the dataclass defaults — no separate
+    baseline file.
+
+    COUPLING -> quantra/learning_system/policy_registry/registry.py: the KEYS returned here are what
+    auto_name()/build_card() tokenize, so they must match registry._NAME_ORDER / _SHORT (the challenge
+    + reward + train FIELD names, plus 'training_phase' as the 'free'/'constrained' STRING and
+    'training_wheels' as a bool). Add a knob to those dataclasses AND give it a token in registry._SHORT
+    or it will name-collide (slugged) but still be recorded.
+    COUPLING -> colab/Quantra_Train.ipynb + Quantra_Barbershop.ipynb (HYPERPARAMETERS cell): builds the
+    live config objects, calls this, stores OVERRIDES, and passes it to auto_name()/build_card().
+    Note: failed_day_penalty lives in BOTH ChallengeConfig (authoritative — the env reads it) and
+    RewardConfig (a visibility mirror); it is taken from `challenge` only, never double-counted."""
+    out: dict = {}
+    if challenge is not None:
+        out.update(_dataclass_diff(challenge, ChallengeConfig()))
+    if reward is not None:
+        for k, v in _dataclass_diff(reward, RewardConfig()).items():
+            if k == "failed_day_penalty":      # mirror of ChallengeConfig — challenge is authoritative
+                continue
+            out[k] = v
+    if train is not None:
+        out.update(_dataclass_diff(train))     # baseline = type(train)() (generic; no import)
+    if training_phase is not None and training_phase != TRAINING_PHASE:
+        out["training_phase"] = "free" if training_phase == PHASE_FREE else "constrained"
+    if training_wheels is not None and bool(training_wheels) != bool(TRAINING_WHEELS):
+        out["training_wheels"] = bool(training_wheels)
+    return out
 
 
 @dataclass(frozen=True)
@@ -295,12 +479,16 @@ class RuntimeConfig:
     seed: int = 0
 
     # Nominal state-vector width for the *startup* benchmark only. Mirrors
-    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (176 with raw inputs
-    # on; 146 off) without importing it (avoids an import cycle); the master suite
+    # quantra.market_pipeline.feature_builder.schema.STATE_DIM (215 with raw inputs
+    # on; 197 off) without importing it (avoids an import cycle); the master suite
     # asserts they match. We never let this nominal value leak into training shapes.
     # COUPLING: must equal feature_builder.schema.STATE_DIM (asserted by the master
-    # suite). 203 with raw inputs on (raw CCI + raw price-SMA + training wheels), 185 off.
-    nominal_state_dim: int = field(default_factory=lambda: 203 if INCLUDE_RAW_INPUTS else 185)
+    # suite). 215 with raw inputs on (raw CCI + raw price-SMA + training wheels + trade_state), 197 off.
+    # CHANGED: 2026-06-18 | nominal_state_dim 206->207 / 188->189 (C12 account scalar)
+    # CHANGED: 2026-06-21 | nominal_state_dim 207->215 / 189->197 (operator trade_state block, +8)
+    # WHY: env-filled trade_state block (8 account-level discipline scalars); config width must match schema
+    # AFFECTS: schema.STATE_DIM (asserted == this by the master suite), tests/snapshots/state_vector.json
+    nominal_state_dim: int = field(default_factory=lambda: 215 if INCLUDE_RAW_INPUTS else 197)
 
     # COUPLING [C8] -> diagnostics/telemetry_logger/logger.py + llm_risk_doctor/doctor.py:
     # this dict becomes telemetry's run-config block; the Risk Doctor reads target/loss
@@ -319,7 +507,7 @@ def ensure_dirs() -> None:
     parquet cache, checkpoints, and telemetry without manual mkdir.
     """
     for d in (DATA_DIR, RAW_DIR, PARQUET_DIR, FEATURE_CACHE_DIR,
-              ARTIFACT_DIR, CHECKPOINT_DIR, TELEMETRY_DIR, REPORT_DIR):
+              ARTIFACT_DIR, CHECKPOINT_DIR, TELEMETRY_DIR, REPORT_DIR, POLICY_REGISTRY_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -339,6 +527,11 @@ def in_colab() -> bool:
 #   bot pass FTMO MORE CONSISTENTLY, with no bug or inefficiency). The LLM Risk
 #   Doctor reads this log to reconstruct the chronological 'why' when
 #   triangulating a pass-rate regression. Rulebook: docs/MLP_INTERPRETABILITY_LAYER.md
+# STANDING RULE [2026-06-19, operator] — applies to THIS file and EVERY file going forward: keep
+# SHOWING THE WORK. On every edit (1) append a DATED IRAC entry here, and (2) in the code comments
+# DOCUMENT the cross-file RELATIONSHIPS the change depends on (the COUPLING) — name the other file(s)
+# and the exact attr/field/key relied on, in BOTH directions — and date the re-pointed logic, so any
+# future reader/editor can see what connects to what, and what breaks where, and when it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 # [2026-06-13] Runtime config documented + pinned by the master suite.
 #   I: FTMO target/loss defaults, Drive file IDs and paths had no change-log or test pin.
@@ -404,3 +597,46 @@ def in_colab() -> bool:
 #   R: Operator correction 2026-06-15.
 #   A: ChallengeConfig.stop_for_day + make_challenge passthrough.
 #   C: OFF can either run past the target (default) or bank a side-account day on demand.
+# [2026-06-19] C10/C11 inputs — multi-day episode length + the failed-day penalty.
+#   I: The env modelled a single-day episode (breach ended it); there was no operator input for
+#      episode length in DAYS, and no consistency signal that punishes failing a day's target.
+#   R: Operator spec 2026-06-19 (C10 multi-day episode = N days on ONE continuous account; C11
+#      large proportional end-of-day penalty for missing the daily target; C13 dropped).
+#   A: Added TRAINING_DAYS (180) / EVAL_DAYS (8) / ACCOUNT_FLOOR_EQUITY (0.0) module constants
+#      (the episode-length inputs); ChallengeConfig.failed_day_penalty (5.0) + make_challenge
+#      passthrough (also threads permanent_dd_pct through make_challenge).
+#   C: The operator can dial how many days an episode spans and how hard a failed day stings, so
+#      the bot trains on a faithful many-day account and learns CONSISTENCY (hit the target most
+#      days), not just survival — which is exactly what repeatedly passing FTMO requires.
+# [2026-06-19] C16 — RewardConfig: plain-English, operator-tunable reward weights.
+#   I: The reward shaping weights were cryptic globals in reward.py (ALPHA/BETA/DELTA/EPS/PAIN_K) —
+#      not operator-visible, not captured per run, not matching the multi-day consistency philosophy.
+#   R: Operator spec 2026-06-19 (C16: rename to plain English + retune defaults; do NOT change the
+#      reward math/structure; keep the E8 Layer-0 dominance proof valid).
+#   A: Added frozen RewardConfig (net_pnl_weight / step_pnl_weight / daily_progress_weight /
+#      drawdown_pain_weight / drawdown_pain_steepness / trade_quality_weight + a failed_day_penalty
+#      mirror). reward.py reads it; env threads it; defaults preserved except daily_progress_weight
+#      raised 1e-4->1e-3 ("matters most", E8-verified). Names are the C16 taxonomy over the existing
+#      proxy terms — re-pointing the math to literally compute each name is a separate (sign-off) change.
+#   C: The training objective is legible, tunable, and captured per run, with Layer-0 dominance intact —
+#      so the operator shapes HOW the bot passes without editing locked code, and runs stay reproducible.
+# [2026-06-19] C19 — build_overrides_dict(): the OVERRIDES dict that names + reproduces a policy.
+#   I: The Policy Registry (C18) auto-names a policy from its OVERRIDES diff, but nothing PRODUCED that
+#      diff — so every card would get the baseline name and the Leaderboard would be meaningless.
+#   R: Operator spec 2026-06-19 (OVERRIDES = only the knobs differing from the baseline dataclass
+#      defaults: ChallengeConfig + RewardConfig + TrainConfig + TRAINING_* defaults; lives in config.py;
+#      baseline == the dataclass defaults; no separate file).
+#   A: Added _dataclass_diff() (generic: baseline = type(live)(), so no runtime->trainer import cycle for
+#      TrainConfig) + build_overrides_dict() that merges the per-object diffs, emits training_phase as the
+#      'free'/'constrained' STRING, and de-dups failed_day_penalty (challenge is authoritative over the
+#      RewardConfig mirror). COUPLING -> policy_registry/registry.py (keys must match _NAME_ORDER/_SHORT)
+#      + the notebooks' HYPERPARAMETERS cell (builds objects -> this -> auto_name/build_card).
+#   C: A run's exact deviation from baseline is captured once, drives a unique auto-name, and is saved in
+#      the manifest — so policies are distinguishable on the Leaderboard and every run is reproducible.
+# [2026-06-19] Issue-2 — added CHALLENGE_TZ (the FTMO daily-reset timezone).
+#   I: The daily reset rolled at naive UTC midnight; FTMO resets at 00:00 CE(S)T (Europe/Prague), so a
+#      sim "day" was 1–2h off the real challenge day (and DST-naive).
+#   R: Operator decision 2026-06-19 (Issue 2): authoritative reset boundary = 00:00 Europe/Prague.
+#   A: Added CHALLENGE_TZ = "Europe/Prague". COUPLING -> env/trading_env.py challenge_day_ids() reads it
+#      to build the per-bar day-id (localize UTC -> CHALLENGE_TZ -> floor to local midnight).
+#   C: The configurable, DST-safe reset timezone lines the sim's challenge day up with FTMO's real one.

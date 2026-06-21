@@ -38,6 +38,9 @@
 #                            (anti-fabrication), DOCTOR_NO_EVIDENCE +
 #                            DOCTOR_UNVERIFIED_PREFIX, and made
 #                            LIVE_TRADE_TRIGGER_WORDS specific (no false refusals).
+#   [2026-06-19] [C24]    — Added DOCTOR_PROVIDER (ollama|anthropic|perplexity) + per-provider keys/
+#                            models (env-sourced, never hardcoded) + DOCTOR_REPO_READ_MAX_CHARS for the
+#                            /read reader. Default stays ollama (offline-first); risk_doctor reads these.
 # ==========================================================================
 
 from __future__ import annotations
@@ -124,6 +127,21 @@ TRAINING_WALL_REFRESH_MS: int = 60_000   # Screen 1 live refresh = 60 s (spec)
 DOCTOR_API_BASE: str = "http://localhost:11434/v1"   # default = Ollama
 DOCTOR_MODEL: str = "llama3"                          # default model id
 DOCTOR_API_KEY: str = "ollama"                        # placeholder key (local servers ignore it)
+
+# --- Provider selection (C24, 2026-06-19). Default stays the local, offline-first Ollama path, so the
+# existing behaviour + tests are unchanged. COUPLING -> risk_doctor.make_client()/_completion_text():
+# DOCTOR_PROVIDER picks which client/endpoint is built. Keys come from ENV — NEVER hardcoded/committed.
+import os  # noqa: E402  (only for the provider env-var reads below)
+DOCTOR_PROVIDER: str = os.environ.get("DOCTOR_PROVIDER", "ollama")     # ollama | anthropic | perplexity
+# Anthropic (Claude) — uses the `anthropic` SDK directly (messages API), NOT the OpenAI-compat shim.
+DOCTOR_ANTHROPIC_KEY: str = os.environ.get("DOCTOR_ANTHROPIC_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
+DOCTOR_ANTHROPIC_MODEL: str = os.environ.get("DOCTOR_ANTHROPIC_MODEL", "claude-sonnet-4-5")
+# Perplexity — OpenAI-compatible endpoint; `sonar` models have live WEB SEARCH built in (no extra setup).
+DOCTOR_PERPLEXITY_KEY: str = os.environ.get("DOCTOR_PERPLEXITY_KEY", os.environ.get("PERPLEXITY_API_KEY", ""))
+DOCTOR_PERPLEXITY_BASE: str = "https://api.perplexity.ai"
+DOCTOR_PERPLEXITY_MODEL: str = os.environ.get("DOCTOR_PERPLEXITY_MODEL", "sonar")
+# /read <path> repo reader — READ-ONLY, capped, never escapes the repo root (no write path exists).
+DOCTOR_REPO_READ_MAX_CHARS: int = 16000
 DOCTOR_MAX_TOKENS: int = 800                          # keep responses short
 DOCTOR_TEMPERATURE: float = 0.2                       # low — diagnosis, not creativity
 DOCTOR_HISTORY_LIMIT: int = 6                         # last N exchanges in the system prompt

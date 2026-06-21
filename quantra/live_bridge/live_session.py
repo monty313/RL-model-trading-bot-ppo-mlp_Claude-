@@ -3,7 +3,7 @@
 WHAT THIS MODULE DOES
 ---------------------
 The missing live loop (the M14 CLI said "no feed wired"; this wires it). Each time a
-new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 179-dim
+new 1m bar CLOSES it: pulls the trailing bar window per symbol, rebuilds the 215-dim
 observation (M2 features + M3 law states + a LIVE portfolio/account mirror), computes
 the masks, runs the policy DETERMINISTICALLY, sizes via the RiskManager, and executes
 via the ExecutionAdapter — honoring the manual halt + 4% breach auto-flat. Two feeds:
@@ -238,8 +238,12 @@ class LiveSession:
         self.portfolio.mark(sym, price, atr)
         law = compute_law_states(market_row)
         # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py + env/trading_env.py:
-        # assemble_state's block order (market, law, trade, portfolio, account) + account_block() names
-        # must match schema; mismatch => live obs misaligned vs the trained STATE_DIM vector.
+        # assemble_state's block order (market, law, trade, portfolio, account, trade_state) +
+        # account_block() names must match schema; mismatch => live obs misaligned vs trained STATE_DIM.
+        # TODO [2026-06-21]: the env-filled `trade_state` block (8 account-level discipline scalars) is
+        # omitted here -> assemble_state zero-fills it, so live obs is the right WIDTH but those 8 features
+        # read 0 live. Wire a live trade_state mirror (trades_today / streaks / idle timer / realized day
+        # PnL%) before live trading, or the policy sees a train/live mismatch on that block.
         obs = assemble_state(market_row, law_flags=law,
                              trade=self.portfolio.trade_block(sym),
                              portfolio=self.portfolio.portfolio_block(sym),
@@ -330,7 +334,7 @@ class LiveSession:
 #   I: M14 left "no live feed wired"; a trained brain couldn't actually trade on MT5.
 #   R: SOW §2.10/§10 (live determinism + kill switches) + C4 (1m decisions) + no-lookahead.
 #   A: ReplayBarFeed/MT5BarFeed; LivePortfolio mirrors slots+account for obs; LiveSession
-#      rebuilds the 179-dim obs from the trailing CLOSED-bar window, masks, decides
+#      rebuilds the full-width obs from the trailing CLOSED-bar window, masks, decides
 #      deterministically, sizes vs the live buffer, executes, and breach-auto-flats.
 #   C: The learned pass-behaviour reproduces live bar-by-bar with the same obs/masks/slots,
 #      behind hard kill switches - the bridge from a trained brain to a banked live pass.

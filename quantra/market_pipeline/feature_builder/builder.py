@@ -147,8 +147,10 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
             out[f"tw_bb{p}_up_{tf}"] = (c - up) / atr_tf   # >0 => price above upper band
             out[f"tw_bb{p}_lo_{tf}"] = (c - lo) / atr_tf   # <0 => price below lower band
 
-    # --- ATR regime (1m/30m/4H): level, shifted ref, normalized deviation ---
-    if tf in ("1m", "30m", "4H"):
+    # --- ATR regime (1m/5m/30m/4H): level, shifted ref, normalized deviation ---
+    # 5m added [market_volatility_obs reads atr_dev_5m & atr_dev_4H: execution-frame +
+    # macro-regime volatility]. COUPLING -> schema.ATR_TFS + laws.market_volatility_obs.
+    if tf in ("1m", "5m", "30m", "4H"):
         atr_t = ind.atr(h, l, c, ind.ATR_PERIOD)
         baseline = atr_t.rolling(100, min_periods=20).mean().replace(0, np.nan)
         ref = atr_t.rolling(ind.ATR_REF_PERIOD).mean().shift(ind.SHIFT)
@@ -193,7 +195,7 @@ def _compute_tf_features(df: pd.DataFrame, tf: str, point_size: float = 1e-5) ->
         spread_price = df["spread"].astype(float) * point_size
         out["spread_atr_1m"] = spread_price / atr_tf
         out["spread_range_ratio_1m"] = spread_price / (h - l).replace(0, np.nan)
-        out["adf_stat_1m"] = ind.rolling_df_stat(c, 100)
+        out["adf_stat_1m"] = ind.rolling_df_stat(c, 30)   # 30-bar window: faster warmup + more regime-responsive
 
     # --- RAW SMA inputs (operator override, 2026-06-13): UNNORMALIZED price-level
     # SMAs on 5m/30m/4H. SMA period 1 = price, so shifts 0-3 give a 4-tap price
@@ -330,14 +332,18 @@ def assemble_state(
     trade: Optional[np.ndarray] = None,
     portfolio: Optional[np.ndarray] = None,
     account: Optional[np.ndarray] = None,
+    trade_state: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Concatenate blocks into the full STATE_DIM vector in canonical schema order.
 
     ``precomputed_row`` is one row of build_market_matrix (the market + market_raw
     blocks, width PRECOMPUTED_DIM). The env (M4) appends the live law/trade/
-    portfolio/account sub-vectors; any omitted block is zero-filled (M2 tests +
-    warmup). Width is asserted == STATE_DIM so a block-size drift fails loudly
+    portfolio/account/trade_state sub-vectors; any omitted block is zero-filled (M2
+    tests + warmup). Width is asserted == STATE_DIM so a block-size drift fails loudly
     rather than silently feeding the policy a malformed world.
+
+    ``trade_state`` [2026-06-21, operator] is the 8-scalar account-level trading-discipline
+    block (env._trade_state_block); omitted -> zeros (e.g. live_session until wired, warmup).
     """
     pre = np.asarray(precomputed_row, dtype=np.float32).ravel()
     if pre.shape[0] != PRECOMPUTED_DIM:
@@ -362,6 +368,7 @@ def assemble_state(
         _blk("trade", trade),
         _blk("portfolio", portfolio),
         _blk("account", account),
+        _blk("trade_state", trade_state),   # account-level discipline state (operator 2026-06-21)
     ])
     assert state.shape[0] == STATE_DIM, f"assembled {state.shape[0]} != {STATE_DIM}"
     return state.astype(np.float32)

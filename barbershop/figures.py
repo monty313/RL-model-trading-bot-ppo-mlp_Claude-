@@ -282,6 +282,22 @@ def _lookup_cell_color(step_groups: List[Dict[str, Any]], name: str) -> str:
 
 
 # ==========================================================================
+# SCREEN 4 -> SCREEN 3 — clickable indicator overlay (C25).
+# ==========================================================================
+def overlay_feature_trace(fig: go.Figure, times: List[Any], values: List[float],
+                          name: str) -> go.Figure:
+    """C25: overlay ONE SAW feature's per-bar series on a candlestick, on a right-hand y-axis, so
+    clicking a feature in Screen 4's 'what the bot SAW' panel shows the indicator the decision rode on.
+    COUPLING -> dashboard.screen_day_replay (feeds the day_rows obs_vector series) + the Screen-4
+    saw-bars click. Mutates + returns the passed figure."""
+    fig.add_trace(go.Scatter(x=list(times), y=list(values), mode="lines",
+                             name=f"SAW · {name}", yaxis="y2",
+                             line=dict(width=1.8, color="#7F77DD")))
+    fig.update_layout(yaxis2=dict(title=name, overlaying="y", side="right", showgrid=False))
+    return fig
+
+
+# ==========================================================================
 # SCREEN 4 LEFT — "WHAT THE BOT SAW" state bars.
 # ==========================================================================
 def state_bars_figure(groups: List[Dict[str, Any]]) -> go.Figure:

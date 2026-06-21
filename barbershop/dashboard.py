@@ -65,6 +65,15 @@
 #   [2026-06-16] [Claude] — WI-8: memoise the mock bundle (built once, not per render);
 #                            Screen 1 shows an honest 'Demo curve' note + disables the 60s
 #                            'live' tick unless a real pass-rate sidecar is present.
+#   [2026-06-19] [C25]    — Three upgrades: (Feature 2) Screen 0 'How to Use' renders
+#                            barbershop/BARBERSHOP_GUIDE.md via dcc.Markdown; (Feature 4) Screen 6
+#                            'Repo Map' renders repo_graph.to_cytoscape_elements() in a dash-cytoscape
+#                            graph (graceful install-note if the dep is absent), click-node -> docstring
+#                            + COUPLING side panel; (Feature 1) Screen 4's SAW bars are clickable
+#                            (id=saw-bars) -> overlay_from_saw callback (allow_duplicate, navigate()
+#                            untouched) overlays that feature's obs_vector series on Screen 3's chart via
+#                            figures.overlay_feature_trace. COUPLING -> barbershop/repo_graph.py,
+#                            BARBERSHOP_GUIDE.md, figures.overlay_feature_trace, data.MOCK_FEATURE_NAMES.
 # ==========================================================================
 
 from __future__ import annotations
@@ -87,7 +96,7 @@ import numpy as np
 import pandas as pd
 from dash import ALL, MATCH, Dash, Input, Output, State, ctx, dcc, html, no_update
 
-from barbershop import adapter, config, data, doctor_chat, figures, risk_doctor
+from barbershop import adapter, config, data, doctor_chat, figures, repo_graph, risk_doctor
 
 
 # ==========================================================================
@@ -309,7 +318,8 @@ def _scoreboard_card(card: Dict[str, Any]) -> html.Div:
 
 
 def screen_day_replay(bundle: Dict[str, Any], day_id: int, tf: str = "1m",
-                      trade_id: Optional[int] = None) -> html.Div:
+                      trade_id: Optional[int] = None,
+                      overlay_feature: Optional[str] = None) -> html.Div:
     """Screen 3 — candlestick replay for one day/TF, with the 1m-only sub-panels.
 
     Reads: the bundle + selected day/TF. Returns the TF buttons + candlestick
@@ -335,9 +345,26 @@ def screen_day_replay(bundle: Dict[str, Any], day_id: int, tf: str = "1m",
     breach_time = breached_rows["timestamp"].iloc[0] if not breached_rows.empty else None
     candle = figures.candlestick_figure(bundle["prices"][tf], trades, tf, entry,
                                         window=window, dd_breach_time=breach_time)
+    # C25 — clickable-indicator overlay: a feature clicked in Screen 4's SAW panel is overlaid here as
+    # its per-bar series (from obs_vector, aligned to the day's bars). COUPLING -> figures.overlay_feature_trace
+    # + screen_autopsy's "saw-bars" click. Degrades to a note if the name isn't a per-bar feature.
+    overlay_note = None
+    if overlay_feature:
+        names = bundle.get("feature_names") or data.MOCK_FEATURE_NAMES
+        srt = day_rows.sort_values("timestamp")
+        if overlay_feature in names and "obs_vector" in srt:
+            idx = names.index(overlay_feature)
+            vals = [(list(v)[idx] if idx < len(list(v)) else float("nan")) for v in srt["obs_vector"]]
+            figures.overlay_feature_trace(candle, list(srt["timestamp"]), vals, overlay_feature)
+            overlay_note = html.Div(f"📈 Overlaying SAW feature: {overlay_feature}",
+                                    style={"fontSize": "12px", "color": config.COLOR_GOLD})
+        else:
+            overlay_note = html.Div(f"‘{overlay_feature}’ has no per-bar series to overlay.",
+                                    style={"fontSize": "12px", "color": config.COLOR_GREY})
     children = [
         html.H3(f"Screen 3 — Day {day_id} Replay"),
         _tf_buttons(tf),
+    ] + ([overlay_note] if overlay_note else []) + [
         dcc.Graph(id="replay-candles", figure=candle),
     ]
     # Panels 2 + 3 are 1m-only (spec).
@@ -392,7 +419,10 @@ def screen_autopsy(bundle: Dict[str, Any], day_id: int, trade_id: int) -> html.D
 
     left = html.Div([html.H4("What the bot SAW"),
                      html.Small(str(tr["entry_time"])),
-                     dcc.Graph(figure=figures.state_bars_figure(groups))],
+                     html.Div("↧ click any feature to overlay it on the Day-Replay chart (Screen 3)",
+                              style={"fontSize": "11px", "color": config.COLOR_GREY}),
+                     # C25 — id="saw-bars" makes each feature bar clickable -> overlay_from_saw callback.
+                     dcc.Graph(id="saw-bars", figure=figures.state_bars_figure(groups))],
                     style={"flex": "1"})
     middle = html.Div([html.H4("Why it chose this action"),
                        dcc.Graph(figure=figures.action_prob_figure(bars)),
@@ -443,6 +473,62 @@ def _pattern_block(p: Dict[str, Any]) -> html.Div:
                "padding": "10px", "margin": "8px 0"})
 
 
+def screen_guide(bundle: Optional[Dict[str, Any]] = None) -> html.Div:
+    """Screen 0 — 'How to Use' help, rendered from barbershop/BARBERSHOP_GUIDE.md (C25).
+
+    READ-ONLY: just renders the committed guide so the operator has the full workflow in-app
+    (screens, navigation, Risk Doctor limits, data-source modes, the Repo Map + JARVIS HUD,
+    the compatibility guardrail). COUPLING -> barbershop/BARBERSHOP_GUIDE.md (the source of truth)."""
+    guide = Path(config.BARBERSHOP_DIR) / "BARBERSHOP_GUIDE.md"
+    try:
+        md = guide.read_text(encoding="utf-8")
+    except OSError:
+        md = "# How to Use\n\nGuide file not found (barbershop/BARBERSHOP_GUIDE.md)."
+    return html.Div([html.H3("How to Use the Barbershop"),
+                     dcc.Markdown(md, style={"maxWidth": "900px", "lineHeight": "1.55"})],
+                    style={"padding": "4px 8px"})
+
+
+def screen_repo_map(bundle: Optional[Dict[str, Any]] = None) -> html.Div:
+    """Screen 6 — interactive repo IMPORT graph (dash-cytoscape). Click a node -> its docstring +
+    first COUPLING note (C25). COUPLING -> barbershop/repo_graph.py (to_cytoscape_elements; AST-only,
+    never runs code). Degrades gracefully if dash-cytoscape isn't installed."""
+    g = repo_graph.build_graph()
+    head = html.Div(f"{len(g.nodes)} modules · {len(g.edges)} imports · colour = package "
+                    "(🔴 locked_core · 🟠 learning_system · 🟣 market_pipeline · 🟢 ftmo_passing · "
+                    "🩵 diagnostics/barbershop · 🔵 env/live_bridge)",
+                    style={"fontSize": "12px", "color": config.COLOR_GREY, "marginBottom": "6px"})
+    try:
+        import dash_cytoscape as cyto                          # optional: pip install dash-cytoscape
+    except ImportError:
+        return html.Div([
+            html.H3("Screen 6 — Repo Map"), head,
+            html.Div("Interactive graph needs dash-cytoscape:  pip install dash-cytoscape  "
+                     "(meanwhile: `python -m barbershop.repo_graph` writes artifacts/repo_graph.json, "
+                     "and jarvis_hud.html shows the live pipeline view).",
+                     style={"background": "rgba(229,188,36,0.18)", "padding": "8px",
+                            "borderRadius": "6px", "fontSize": "12px"})])
+    stylesheet = [
+        {"selector": "node", "style": {"background-color": "data(color)", "label": "data(label)",
+                                       "font-size": "7px", "color": "#cfe", "width": 18, "height": 18,
+                                       "text-outline-color": "#06121e", "text-outline-width": 1}},
+        {"selector": "edge", "style": {"line-color": "rgba(120,140,170,.35)", "width": 1,
+                                       "curve-style": "bezier", "target-arrow-shape": "triangle",
+                                       "target-arrow-color": "rgba(120,140,170,.5)", "arrow-scale": .7}},
+        {"selector": ":selected", "style": {"background-color": "#2ce6ff", "line-color": "#2ce6ff",
+                                            "width": 22, "height": 22}},
+    ]
+    graph = cyto.Cytoscape(id="repo-cyto", elements=g.to_cytoscape_elements(),
+                           layout={"name": "cose", "animate": False},
+                           style={"width": "70%", "height": "600px", "background": "#0a0f18",
+                                  "borderRadius": "8px"}, stylesheet=stylesheet)
+    detail = html.Div(id="repo-node-detail", children="Click a node to see its docstring + coupling.",
+                      style={"width": "30%", "padding": "10px", "fontSize": "12px",
+                             "background": "rgba(255,255,255,0.03)", "borderRadius": "8px"})
+    return html.Div([html.H3("Screen 6 — Repo Map"), head,
+                     html.Div([graph, detail], style={"display": "flex", "gap": "10px"})])
+
+
 # ==========================================================================
 # THE APP.
 # ==========================================================================
@@ -470,11 +556,13 @@ def make_app(source: Optional[str] = None, use_mock: Optional[bool] = None) -> D
         html.Div(f"Data source: {src_label}", style={"color": config.COLOR_GREY,
                                                       "fontSize": "12px", "marginBottom": "6px"}),
         dcc.Tabs(id="screen-tabs", value="s1", children=[
+            dcc.Tab(label="ℹ️ · How to Use", value="s0"),     # C25 — guide (renders BARBERSHOP_GUIDE.md)
             dcc.Tab(label="1 · Training Wall", value="s1"),
             dcc.Tab(label="2 · Scoreboard", value="s2"),
             dcc.Tab(label="3 · Day Replay", value="s3"),
             dcc.Tab(label="4 · Trade Autopsy", value="s4"),
             dcc.Tab(label="5 · Pattern Finder", value="s5"),
+            dcc.Tab(label="6 · Repo Map", value="s6"),         # C25 — interactive import graph
         ]),
         html.Div(id="screen-content"),
         doctor_chat.chat_panel(init_state),
@@ -507,13 +595,18 @@ def _content_for(state: Dict[str, Any]) -> html.Div:
     except data.MissingDataFile as exc:
         return error_banner(exc)                          # RULE 4 — fail loud
     screen = state.get("screen", 1)
-    if screen == 1:
+    if screen == 0:
+        body = screen_guide(bundle)
+    elif screen == 1:
         body = screen_training_wall(bundle)
     elif screen == 2:
         body = screen_scoreboard(bundle)
     elif screen == 3:
         body = screen_day_replay(bundle, state.get("day_id") or 1,
-                                 state.get("tf", "1m"), state.get("trade_id"))
+                                 state.get("tf", "1m"), state.get("trade_id"),
+                                 overlay_feature=state.get("overlay_feature"))  # C25 SAW-click overlay
+    elif screen == 6:
+        body = screen_repo_map(bundle)
     elif screen == 4:
         if state.get("day_id") is None or state.get("trade_id") is None:
             body = html.Div("Click a trade marker on Screen 3 to open the autopsy.")
@@ -567,6 +660,40 @@ def _register_callbacks(app: Dash) -> None:
         """Rebuild the training-wall figure on each 60s interval tick (Screen 1 live)."""
         tw = _mock_training_wall(seed=int(n or 0) + 1)    # vary by tick so it visibly moves
         return figures.training_wall_figure(tw["iterations"], tw["pass_rate"])
+
+    # --- C25: click a feature in Screen 4's SAW panel -> overlay it on Screen 3's chart. ---
+    # Separate callback with allow_duplicate so navigate()'s signature/tests are untouched.
+    @app.callback(Output("screen-state", "data", allow_duplicate=True),
+                  Output("screen-content", "children", allow_duplicate=True),
+                  Input("saw-bars", "clickData"),
+                  State("screen-state", "data"),
+                  prevent_initial_call=True)
+    def overlay_from_saw(click, state):
+        """Set the clicked SAW feature as the Day-Replay overlay and jump to Screen 3."""
+        if not click:
+            return no_update, no_update
+        pts = click.get("points", [{}])
+        name = pts[0].get("y") or pts[0].get("label")     # horizontal bars -> category on y
+        if not name:
+            return no_update, no_update
+        state = dict(state or {})
+        state.update(screen=3, overlay_feature=name)
+        return state, _content_for(state)
+
+    # --- C25: Screen 6 repo map — click a node -> show its docstring + coupling note. ---
+    @app.callback(Output("repo-node-detail", "children"),
+                  Input("repo-cyto", "tapNodeData"),
+                  prevent_initial_call=True)
+    def repo_node_detail(node):
+        """Render the clicked module's docstring + first COUPLING note in the side panel."""
+        if not node:
+            return no_update
+        return html.Div([
+            html.H4(node.get("id", "")),
+            html.Div(node.get("doc") or "(no docstring)"),
+            html.Div(node.get("coupling") or "", style={"color": config.COLOR_GREY,
+                                                         "fontSize": "11px", "marginTop": "8px"}),
+        ])
 
     # --- Doctor: expand/collapse the chat panel. ---
     @app.callback(Output("doctor-body", "style"),

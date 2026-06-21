@@ -343,7 +343,7 @@ def test_group_indicators_uses_real_feature_names():
                      "cci10_5m", "cci30_30m", "cci100_4H", "tw_cci_block",
                      "atr_level_1m", "atr_dev_30m", "z10_1m", "adx5_1m"]
     row = pd.Series({"obs_vector": [0.5, -0.3, 0.0, 1.2, -0.4, 0.1, 1.0, 0.6, -0.2, 0.3, 0.7],
-                     "law_state": {"gate_atr_liquidity": "ACTIVE"}, "dd_buffer": 0.8,
+                     "law_state": {"market_volatility_obs": "ACTIVE"}, "dd_buffer": 0.8,
                      "pnl_cumulative": 1.0, "trade_pnl": 0.0})
     groups = data.group_indicators(row, feature_names)
     by_key = {g["key"]: [c["name"] for c in g["cells"]] for g in groups}

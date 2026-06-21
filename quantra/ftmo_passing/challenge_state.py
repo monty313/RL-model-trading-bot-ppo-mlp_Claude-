@@ -5,7 +5,7 @@ WHAT THIS MODULE DOES
 Tracks the ONE shared account every symbol's decision reads (SOW B5): balance,
 equity (realized + unrealized), the trailing high-water peak, the day's start equity,
 the remaining daily-risk buffer (distance to the wall), and day PnL vs target. It
-exposes the 7-scalar account observation block and flags the hard-wall breach.
+exposes the 8-scalar account observation block (incl. C12 dist_to_perm_dd) and flags the breach.
 
 This is Phase-A only for M4 (4% trailing wall + buffer + breach). The two-phase rule
 (at +2.5% auto-flat all -> fresh 1% trailing, Phase B) is M7; the hooks (`phase`,
@@ -58,6 +58,12 @@ class ChallengeState:
     breached: bool = field(init=False, default=False)
     locked_out: bool = field(init=False, default=False)
     target_hit: bool = field(init=False, default=False)
+    # C14 [2026-06-19]: back-to-back failed-day streak. Finalized once per calendar-day boundary in
+    # reset_day() (the day-END event the env calls) — never intraday. Surfaced onto the Policy Card
+    # manifest (learning_system/policy_registry/registry.py) so the operator can see consistency at a
+    # glance. COUPLING -> registry.PolicyCard.manifest()/build_card() read this value (live-run
+    # population wired in a later step).
+    consecutive_loss_days: int = field(init=False, default=0)
 
     def __post_init__(self):
         self.balance = self.account_size
@@ -103,11 +109,34 @@ class ChallengeState:
 
     @property
     def daily_target_equity(self) -> float:
-        return self.day_start_equity + (self.challenge.daily_target_pct / 100.0) * self.account_size
+        # CHANGED: 2026-06-19 (C11) | base is THAT DAY'S OPENING balance (day_start_equity), not the
+        # fixed account_size. WHY: in the C10 multi-day compounding account each day must aim for the
+        # SAME daily_target_pct of what it actually started the day with (operator spec: "daily_target_pct
+        # of that day's opening balance"). On day 1 (day_start == account_size) this equals the old value.
+        # AFFECTS: target_hit (mark_to_market), should_autoflat, day_progress, day_shortfall_fraction.
+        return self.day_start_equity * (1.0 + self.challenge.daily_target_pct / 100.0)
 
     @property
     def day_pnl(self) -> float:
         return self.equity - self.day_start_equity
+
+    @property
+    def day_passed(self) -> bool:
+        """C11 [2026-06-19]: did the day END at/above its target? IDENTICAL math to the target_hit
+        latch in mark_to_market — both threshold on `self.equity >= self.daily_target_equity` (the
+        SAME property, no rounding, no separate base). day_passed is the END-OF-DAY snapshot the
+        failed-day penalty grades (day_shortfall_fraction == 0.0 exactly when this is True);
+        target_hit additionally LATCHES the moment the target is first touched (for the ftmo auto-flat)."""
+        return self.equity >= self.daily_target_equity
+
+    @property
+    def day_shortfall_fraction(self) -> float:
+        """C11 [2026-06-19]: how far BELOW the day's target the account is, as a fraction of the
+        day's target GAIN. 0.0 if the target is reached; 1.0 if the day ended flat; >1 if it LOST
+        money on the day. The env multiplies this by challenge.failed_day_penalty at the midnight
+        boundary, so a day that hit the wall (largest shortfall) is punished the hardest."""
+        gain_target = max(1e-9, (self.challenge.daily_target_pct / 100.0) * self.day_start_equity)
+        return max(0.0, (self.daily_target_equity - self.equity) / gain_target)
 
     # --- updates ---
     def mark_to_market(self, total_unrealized: float) -> None:
@@ -116,7 +145,7 @@ class ChallengeState:
         self.equity = self.balance + total_unrealized
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
-        if self.equity >= self.daily_target_equity:
+        if self.equity >= self.daily_target_equity:   # SAME threshold as day_passed (C11) — no skew
             self.target_hit = True
         if self.equity <= self.wall_equity and not self.breached:
             self.breached = True
@@ -135,18 +164,36 @@ class ChallengeState:
         the trailing peak to current equity, clears target_hit, and returns to Phase A, so each
         new calendar day begins with its own 2.5% target and the wide Phase-A wall instead of
         being stuck in a post-day-1 Phase B [2026-06-15 fix: reset_day was dead code + left phase
-        in B]. COUPLING -> env/trading_env.py _advance_bar() calls this on a calendar-day change."""
+        in B]. COUPLING -> env/trading_env.py _advance_bar() calls this on a calendar-day change.
+
+        CHANGED: 2026-06-19 (C10) | also CLEARS breached + locked_out. WHY: a daily-wall breach now
+        locks out the rest of THAT day instead of ending the episode (multi-day episode = one
+        continuous account); midnight must lift the lockout so the bot trades the fresh day. The
+        account balance/equity is NOT reset — losses/gains carry forward across days."""
+        # C14 [2026-06-19]: finalize the back-to-back failed-day streak for the day that just ENDED,
+        # BEFORE re-anchoring day_start_equity (so day_passed still reads the finished day's target).
+        # day_passed (equity >= daily_target_equity) is the SAME end-of-day pass/fail the failed-day
+        # penalty grades, so the two never disagree. This runs only here (the midnight boundary) — never
+        # intraday, so drawdown noise can't bump it.
+        if self.day_passed:
+            self.consecutive_loss_days = 0
+        else:
+            self.consecutive_loss_days += 1
         self.day_start_equity = self.equity
         self.peak_equity = self.equity
         self.target_hit = False
         self.phase = "A"
+        self.breached = False     # C10: a daily breach is a DAY event, not an episode end
+        self.locked_out = False   # C10: lift the day-lockout so the fresh day can trade
 
     def account_block(self) -> np.ndarray:
-        """The 7-scalar `account` observation block (schema order), normalized.
+        """The 8-scalar `account` observation block (schema order), normalized.
 
         Order matches schema _account_names(): equity_norm, equity_dev, equity_slope,
-        trailing_buffer, daily_buffer, day_progress, overall_progress. equity_slope is
-        a per-step hook (env fills it); here it's 0 (filled by the env's equity SMA).
+        trailing_buffer, daily_buffer, day_progress, overall_progress, dist_to_perm_dd.
+        equity_slope is a per-step hook (env fills it); here it's 0 (filled by the env's
+        equity SMA). dist_to_perm_dd is the C12 survival-runway scalar (added at the END so
+        every pre-existing index — incl. env's [5]=day_progress — is unchanged).
         """
         eq_norm = self.equity / self.account_size
         eq_dev = (self.equity - self.peak_equity) / self.account_size
@@ -154,14 +201,23 @@ class ChallengeState:
         daily_buf = (self.equity - self.wall_equity) / self.account_size  # NOTE: same single wall
         #     in EVERY phase, so pre-breach this == trailing_buf (audit). A genuine separate daily-
         #     loss wall lands with the scale-invariant-obs rework (task #23); kept now for obs width.
-        day_progress = self.day_pnl / ((self.challenge.daily_target_pct / 100.0) * self.account_size)
+        day_progress = self.day_pnl / max(1e-9, (self.challenge.daily_target_pct / 100.0) * self.day_start_equity)
         overall_progress = (self.equity - self.account_size) / self.account_size
-        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 7-scalar
+        # CHANGED: 2026-06-18 | Added distance_to_permanent_dd (C12 — 8th account scalar, appended)
+        # WHY: give the bot a "survival instinct" — how much runway remains before the PERMANENT
+        #      max-overall-loss wall (the hard floor that ends the FTMO challenge for good)
+        # AFFECTS: schema._account_names (+acct_dist_to_perm_dd), EXPECTED_WIDTHS["account"] 7->8,
+        #          STATE_DIM 206->207, config.permanent_dd_pct, tests/snapshots/state_vector.json
+        # 1.0 at the starting balance, 0.0 AT the permanent floor, <0 once breached (FTMO ~ -10%).
+        perm_band = max(1e-9, (self.challenge.permanent_dd_pct / 100.0) * self.account_size)
+        perm_floor = self.account_size - perm_band
+        dist_to_perm_dd = (self.equity - perm_floor) / perm_band
+        # COUPLING [C1] -> quantra/market_pipeline/feature_builder/schema.py: this 8-scalar
         # order MUST equal schema._account_names() (equity_norm, equity_dev, equity_slope,
-        # trailing_buffer, daily_buffer, day_progress, overall_progress); also consumed via
-        # env/trading_env.py _obs()/_reward() (reads index [5]=day_progress). Reorder -> breaks both.
+        # trailing_buffer, daily_buffer, day_progress, overall_progress, dist_to_perm_dd); also
+        # consumed via env/trading_env.py _obs()/_reward() (reads index [5]=day_progress). Reorder -> breaks both.
         return np.array([
-            eq_norm, eq_dev, 0.0, trailing_buf, daily_buf, day_progress, overall_progress
+            eq_norm, eq_dev, 0.0, trailing_buf, daily_buf, day_progress, overall_progress, dist_to_perm_dd
         ], dtype=np.float32)
 
 
@@ -209,3 +265,39 @@ class ChallengeState:
 #      wall deferred to the scale-invariant-obs rework).
 #   C: Each calendar day is a fresh Phase-A 2.5%/4% challenge instead of a stuck post-day-1 Phase
 #      B - faithful multi-day simulation, which is what an honest pass-rate metric requires.
+# [2026-06-18] C12 — distance_to_permanent_dd added to the account observation block.
+#   I: The bot saw the daily trailing wall but had NO awareness of the permanent max-overall-loss
+#      wall (the hard floor that ends the FTMO challenge for good) — a survival blind spot, and a
+#      step toward closing the "one wall vs FTMO's two" sim gap.
+#   R: Operator decision 2026-06-18 (C12). Add ONE normalized scalar; no two-wall ENFORCEMENT
+#      changes this session (that is the deferred C10 work).
+#   A: account_block() now emits an 8th scalar dist_to_perm_dd = (equity - perm_floor)/perm_band,
+#      where perm_floor = account_size*(1 - permanent_dd_pct/100); 1.0 at start, 0.0 at the floor,
+#      <0 once breached. Appended at index [7] so every pre-existing index (incl. env's [5]) is
+#      unchanged. config.permanent_dd_pct (default 10%) added; STATE_DIM 206->207; snapshot re-pinned.
+#   C: The policy can now SEE how much permanent runway it has left and learn a survival instinct,
+#      which is what keeps a streak of passes from ending in a single account-killing drawdown.
+# [2026-06-19] C10/C11 — multi-day account: day-relative target, reset clears breach, shortfall metric.
+#   I: A breach left the account flagged breached/locked_out forever (the env ended the episode);
+#      the daily target was a fixed % of account_size (not the day's opening balance); and there was
+#      no metric for "how badly did this day miss its target" to drive a consistency penalty.
+#   R: Operator spec 2026-06-19 (C10 multi-day episode on ONE continuous account; C11 proportional
+#      failed-day penalty anchored to "daily_target_pct of that day's opening balance").
+#   A: daily_target_equity is now day_start_equity*(1+target/100) (day-relative; day_progress too);
+#      added day_shortfall_fraction (0 at target, 1 if flat, >1 if the day lost money); reset_day now
+#      also clears breached + locked_out (a daily wall is a DAY event, balance carries forward).
+#   C: Each day of a many-day account is graded against what it actually started with, a breached
+#      day reopens fresh at midnight, and the env has the exact shortfall it needs to punish missed
+#      days — so the bot learns to pass MOST days, which is what repeatedly passing FTMO demands.
+# [2026-06-19] C14 — consecutive_loss_days streak counter (audit Fix 4).
+#   I: The Policy Card had no "back-to-back loss count" — nothing tracked how many days IN A ROW a
+#      policy missed its target, the clearest consistency-failure signal for a repeated-FTMO bot.
+#   R: Operator audit Fix 4 (keep scope minimal): add a counter HERE, increment only when a day fully
+#      ENDS failed, reset to 0 when a day ends passing, never on intraday drawdown, never mid-day.
+#   A: Added the consecutive_loss_days field (default 0) and finalize it at the TOP of reset_day()
+#      (the once-per-day midnight boundary the env calls) BEFORE re-anchoring day_start_equity, keyed
+#      off day_passed (the same end-of-day pass/fail threshold the failed-day penalty grades). No other
+#      logic touched. COUPLING -> learning_system/policy_registry/registry.py surfaces it on the manifest;
+#      live-run population (Barbershop loop) is wired in a later step.
+#   C: The operator can now see a policy's worst back-to-back miss streak on its card — the at-a-glance
+#      consistency check that separates a policy that passes MOST days from one that strings losses.

@@ -258,16 +258,25 @@ def test_as_of_merge_has_no_lookahead(make_1m):
 # tell breach-risk from safe trading (Term 1). Drift, leakage, or NaN here is a top
 # root cause of inconsistent passing — these guards make all three impossible.
 # =============================================================================
-def test_schema_total_is_203_with_raw_bollinger_and_training_wheels():
-    # market 128 (RAW CCI value+SMA + RAW Bollinger + 18 training-wheel feats) + 18 raw
-    # price-SMA + 12 law + 35 trade + 3 portfolio + 7 account = 203
-    assert STATE_DIM == 203
+def test_schema_total_is_215_with_raw_bollinger_training_wheels_and_trade_state():
+    # market 131 (prev 128 + 3 new 5m-ATR feats for market_volatility_obs) + 18 raw price-SMA
+    # + 12 law + 35 trade + 3 portfolio + 8 account (C12 +acct_dist_to_perm_dd)
+    # + 8 trade_state (operator 2026-06-21) = 215
+    assert STATE_DIM == 215
     for name, width in EXPECTED_WIDTHS.items():
         s, e = SCHEMA.block_spans[name]
         assert e - s == width, f"block {name} width drifted"
-    assert EXPECTED_WIDTHS["market"] == 128 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["market"] == 131 and EXPECTED_WIDTHS["market_raw"] == 18
+    assert EXPECTED_WIDTHS["trade_state"] == 8
     # the two training-wheel block flags exist (the operator's enforced "acts")
     assert "tw_cci_block" in SCHEMA.feature_names and "tw_bb_block" in SCHEMA.feature_names
+    # the 8 operator-requested trade_state scalars exist, appended after `account` (no index shift)
+    for n in ("daily_realized_pnl_pct", "daily_drawdown_pct", "trades_today",
+              "consecutive_losses", "consecutive_wins", "position_open",
+              "risk_budget_remaining", "time_since_last_trade"):
+        assert n in SCHEMA.feature_names
+    assert SCHEMA.block_spans["trade_state"][1] == STATE_DIM   # it is the LAST block
+    assert SCHEMA.block_spans["account"][1] == SCHEMA.block_spans["trade_state"][0]
     assert len(SCHEMA.feature_names) == STATE_DIM
     assert len(set(SCHEMA.feature_names)) == STATE_DIM  # names unique
 
@@ -466,20 +475,21 @@ def test_pullback_cci_desync():
     assert _law(buy, "law_pullback_cci") == 1
 
 
-def test_gates_atr_spread_stationarity():
-    g = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
-    assert _law(g, "gate_atr_liquidity") == 1
-    assert _law(g, "gate_spread") == 1
-    assert _law(g, "gate_stationarity") == 1            # adf below -2.86 -> stationary
-    closed = _feat_row(atr_dev_1m=-0.1, spread_range_ratio_1m=2.0, adf_stat_1m=0.0)
-    assert _law(closed, "gate_atr_liquidity") == 0
-    assert _law(closed, "gate_spread") == 0
-    assert _law(closed, "gate_stationarity") == 0
+def test_market_condition_signals_volatility_spread_stationarity():
+    # Renamed gates -> observation signals (2026-06-18). Volatility now reads 5m + 4H ATR.
+    g = _feat_row(atr_dev_5m=0.1, atr_dev_4H=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    assert _law(g, "market_volatility_obs") == 1
+    assert _law(g, "market_spread_obs") == 1
+    assert _law(g, "market_stationarity_obs") == 1      # adf below -2.86 -> stationary
+    closed = _feat_row(atr_dev_5m=-0.1, atr_dev_4H=-0.1, spread_range_ratio_1m=2.0, adf_stat_1m=0.0)
+    assert _law(closed, "market_volatility_obs") == 0
+    assert _law(closed, "market_spread_obs") == 0
+    assert _law(closed, "market_stationarity_obs") == 0
 
 
 def _gates_open():
     s = np.zeros(12, dtype=np.float32)
-    s[9] = s[10] = s[11] = 1  # atr, spread, stationarity open; no directional law
+    s[9] = s[10] = s[11] = 1  # volatility, spread, stationarity favorable; no directional law
     return s
 
 
@@ -505,10 +515,22 @@ def test_mask_live_buy_law_bans_shorts():
     assert m[OPEN_SHORT] < -1e8 and m[OPEN_LONG] == 0 and m[HOLD] == 0
 
 
-def test_mask_closed_gate_bans_new_opens():
-    s = _gates_open(); s[9] = 0  # ATR gate closed
-    m = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
-    assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+def test_phase_gated_stationarity_blocks_opens_only_when_constrained():
+    # 2026-06-18: the 3 market-condition signals are observation-only by default (PHASE_FREE);
+    # only stationarity re-enforces, and only in PHASE_CONSTRAINED.
+    import quantra.runtime.config as _cfg
+    s = _gates_open(); s[11] = 0  # market_stationarity_obs = 0 (non-stationary)
+    # PHASE_FREE (default): observation-only -> the signal does NOT block opens.
+    m_free = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
+    assert m_free[OPEN_LONG] == 0 and m_free[OPEN_SHORT] == 0 and m_free[HOLD] == 0
+    # PHASE_CONSTRAINED: stationarity re-enforces -> opens blocked when non-stationary.
+    _orig = _cfg.TRAINING_PHASE
+    try:
+        _cfg.TRAINING_PHASE = _cfg.PHASE_CONSTRAINED
+        m_con = build_direction_mask(s, position=0, n_open=0, mode=MODE_LIVE)
+        assert m_con[OPEN_LONG] < -1e8 and m_con[OPEN_SHORT] < -1e8 and m_con[HOLD] == 0
+    finally:
+        _cfg.TRAINING_PHASE = _orig
 
 
 def test_mask_school_permits_only_required_direction():
@@ -533,7 +555,7 @@ def test_lawmask_wrapper_end_to_end():
                     boll_bb20_up_5m=0.5, boll_bb200_up_5m=0.5,
                     boll_bb20_up_30m=0.5, boll_bb200_up_30m=0.5)
     res = LawMask(mode=MODE_LIVE).step(row, position=0, occupied=[0, 0, 0, 0, 0])
-    assert res.opens_allowed_by_gates is True
+    assert res.opens_allowed is True
     assert res.direction_mask[OPEN_SHORT] < -1e8           # buy super-trend bans shorts
     assert res.direction_mask[OPEN_LONG] == 0
 
@@ -625,6 +647,183 @@ def test_env_direction_mask_applies_wheels_when_enabled():
     assert on.direction_mask("EURUSD")[OPEN_LONG] == 0
     off = TradingEnv({"EURUSD": sd}, training_wheels=False)
     assert off.direction_mask("EURUSD")[OPEN_SHORT] == 0    # wheels off -> short legal
+
+
+def _cci_regime_env(**cci):
+    """An env on a single bar with gates OPEN (opens legal absent any gate) + the given CCI
+    features set, training wheels OFF, so ONLY the CCI-regime gate decides the open mask."""
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3,
+                    adf_stat_1m=-3.5, **cci)
+    mat = np.tile(row, (3, 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.full(3, 100.0), atr=np.full(3, 1.0),
+                    spread=np.full(3, 10.0), valid_from=0)
+    return sd
+
+
+# CCI30+CCI100 on 1m+4H, each vs its existing period-2/shift-4 SMA. All four above -> bull.
+_CCI_BULL = dict(cci30_1m=50, cci30_sma_1m=10, cci100_1m=40, cci100_sma_1m=10,
+                 cci30_4H=50, cci30_sma_4H=10, cci100_4H=40, cci100_sma_4H=10)
+_CCI_BEAR = dict(cci30_1m=-50, cci30_sma_1m=-10, cci100_1m=-40, cci100_sma_1m=-10,
+                 cci30_4H=-50, cci30_sma_4H=-10, cci100_4H=-40, cci100_sma_4H=-10)
+# Bull on 1m but CCI100 is BELOW its SMA on 4H -> not a clean regime (mixed).
+_CCI_MIXED = dict(_CCI_BULL, cci100_4H=-40, cci100_sma_4H=-10)
+
+
+def test_cci_regime_gate_off_is_a_noop():
+    """Default (cfg.CCI_REGIME_GATE False): the gate never fires, both opens stay legal even in a
+    mixed regime — the repo behaves identically when the experiment is off."""
+    sd = _cci_regime_env(**_CCI_MIXED)
+    off = TradingEnv({"EURUSD": sd})                              # default: gate off
+    m = off.direction_mask("EURUSD")
+    assert m[OPEN_LONG] == 0 and m[OPEN_SHORT] == 0 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_bull_allows_longs_only():
+    sd = _cci_regime_env(**_CCI_BULL)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_LONG] == 0 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_bear_allows_shorts_only():
+    sd = _cci_regime_env(**_CCI_BEAR)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_SHORT] == 0 and m[OPEN_LONG] < -1e8 and m[HOLD] == 0
+
+
+def test_cci_regime_gate_mixed_blocks_all_new_opens():
+    """No clean multi-timeframe regime -> NO new opens (both blocked), but HOLD/CLOSE stay legal."""
+    sd = _cci_regime_env(**_CCI_MIXED)
+    m = TradingEnv({"EURUSD": sd}, cci_regime_gate=True).direction_mask("EURUSD")
+    assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8 and m[HOLD] == 0
+
+
+def _rule_env(close, dates=None, target=2.5):
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    mat = np.tile(row, (len(close), 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.asarray(close, float), atr=np.full(len(close), 1e-3),
+                    spread=np.full(len(close), 2e-5), valid_from=0, dates=dates)
+    return TradingEnv({"EURUSD": sd}, challenge=cfg.make_challenge(daily_target_pct=target, daily_risk_pct=4.0),
+                      episode_days=2 if dates is not None else 1)
+
+
+def test_rule1_target_flattens_all_and_enters_1pct_phase_b():
+    """RULE 1 (already implemented — pinned): hitting +2.5% auto-flats ALL trades and switches to the
+    tighter 1% Phase-B trailing wall, then keeps trading."""
+    env = _rule_env(np.linspace(1.20, 1.50, 40))           # rises hard so a long clears +2.5%
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    for _ in range(15):
+        env.step((0, 0.0, 0))
+        if env.account.phase == "B":
+            break
+    assert env.account.phase == "B" and env._n_open("EURUSD") == 0     # flattened all at the flip
+    gap = (env.account.peak_equity - env.account.wall_equity) / env.account.account_size * 100.0
+    assert abs(gap - 1.0) < 1e-6                                       # fresh 1% trailing wall
+
+
+def test_rule3_breach_stops_trading_for_the_day_each_bar():
+    """RULE 3 (already implemented — pinned): touching the 4% wall force-flattens and BLOCKS new opens
+    for the rest of that day, checked every bar."""
+    env = _rule_env(np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.10, 37)]))   # drop -> breach
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    breached = False
+    for _ in range(25):
+        _, _, _, info = env.step((0, 0.0, 0))
+        if info["breached"]:
+            breached = True
+            assert env._n_open("EURUSD") == 0                          # force-flattened at the wall
+            m = env.direction_mask("EURUSD")
+            assert m[OPEN_LONG] < -1e8 and m[OPEN_SHORT] < -1e8        # opens blocked the rest of the day
+            break
+    assert breached
+
+
+def test_rule2_end_of_day_flatten_closes_all_and_counts_the_trade():
+    """RULE 2 (new): a trade left open at midnight is flattened at the day's LAST bar (no cross-day
+    positions), and that realized close is counted in info n_closed/n_wins so it feeds the win rate."""
+    bpd = 20; T = 2 * bpd + 1
+    dates = (np.arange(T) // bpd).astype(np.int64)         # day id changes at bar bpd
+    env = _rule_env(np.linspace(1.20, 1.26, T), dates=dates, target=99.0)   # rising; target never hit
+    env.reset(); env.step((OPEN_LONG, 0.5, 0))             # open on day 1, never close it manually
+    saw_eod = False
+    for _ in range(bpd + 2):
+        _, _, _, info = env.step((0, 0.0, 0))
+        if info["n_closed"] > 0:                           # the EOD flatten realized the carried trade
+            saw_eod = True
+            assert info["n_wins"] >= 1                     # it was a winner (price rose)
+            assert env._n_open("EURUSD") == 0              # flat after the boundary -> no cross-day position
+            break
+    assert saw_eod
+
+
+def _stop_env(close, *, hard_stop=0.0, reward_cfg=None, target=99.0):
+    row = _feat_row(atr_dev_1m=0.1, atr_dev_30m=0.1, spread_range_ratio_1m=0.3, adf_stat_1m=-3.5)
+    mat = np.tile(row, (len(close), 1)).astype(np.float32)
+    sd = SymbolData(mat, close=np.asarray(close, float), atr=np.full(len(close), 1e-3),
+                    spread=np.full(len(close), 2e-5), valid_from=0)
+    return TradingEnv({"EURUSD": sd}, challenge=cfg.make_challenge(daily_target_pct=target, daily_risk_pct=4.0),
+                      episode_days=1, risk_cfg=cfg.RiskConfig(hard_stop_frac=hard_stop), reward_cfg=reward_cfg)
+
+
+def test_hard_stop_caps_per_trade_loss_below_the_wall():
+    """A hard per-trade stop (0.5% of the initial balance) closes a losing trade EARLY, every bar — so a
+    single trade can't ride to the -4% wall. With the stop OFF the same trade rides far deeper."""
+    T = 60; entry = 1.20
+    close = np.concatenate([[entry], entry - np.linspace(0, 0.02, T - 1)])    # steady decline
+
+    def loss_pct(frac):
+        env = _stop_env(close, hard_stop=frac)
+        env.reset(); env.step((OPEN_LONG, 1.0, 0)); a0 = env.account.account_size
+        for _ in range(T - 5):
+            env.step((0, 0.0, 0))
+            if env._n_open("EURUSD") == 0:
+                break
+        return (env.account.equity - a0) / a0 * 100.0
+    on, off = loss_pct(0.005), loss_pct(0.0)
+    assert -1.5 < on < 0.0          # the stop bounds the per-trade loss well short of the 4% wall
+    assert off < on - 2.0           # without the stop, the same trade rides much deeper (toward the wall)
+
+
+def test_profit_hold_bonus_rewards_a_held_winner_only():
+    """A small EXTRA reward for closing in profit ONLY after holding >= profit_hold_min_bars bars; an
+    instant scalp earns nothing extra."""
+    T = 40
+    close = np.concatenate([[1.20], np.linspace(1.20, 1.24, T - 1)])          # rising -> a long wins
+
+    def close_reward(weight, hold):
+        env = _stop_env(close, reward_cfg=cfg.RewardConfig(profit_hold_weight=weight, profit_hold_min_bars=5))
+        env.reset(); env.step((OPEN_LONG, 0.5, 0))
+        for _ in range(hold):
+            env.step((0, 0.0, 0))
+        _, r, _, _ = env.step((CLOSE, 0.0, 0))
+        return r
+    assert close_reward(0.01, 7) > close_reward(0.0, 7)            # held >=5 bars -> earns the bonus
+    assert abs(close_reward(0.01, 1) - close_reward(0.0, 1)) < 1e-9  # held <5 bars -> NO bonus
+
+
+def test_profit_hold_folds_into_l4_without_a_new_layer():
+    """The profit-hold bonus lands in the EXISTING L4 key (resume-safe — no new reward layer)."""
+    from quantra.learning_system.reward_engine.reward import RewardEngine, RewardContext
+    eng = RewardEngine(reward_cfg=cfg.RewardConfig(profit_hold_weight=1e-3))
+    base = eng.decompose(RewardContext(net_pnl_delta=0.0))
+    boost = eng.decompose(RewardContext(net_pnl_delta=0.0, profit_hold_count=2.0))
+    assert set(base) == set(boost)                                # identical layer KEYS (compat sig intact)
+    assert boost["L4"] > base["L4"] and abs((boost["L4"] - base["L4"]) - 2e-3) < 1e-9   # = weight*count in L4
+
+
+def test_fast_pass_bonus_pays_once_when_target_banked_fast():
+    """The BIG fast-pass bonus fires EXACTLY once — when the day's +target is hit AND all trades are
+    closed (flat) within fast_pass_hours of the open."""
+    T = 120
+    close = np.concatenate([[1.20], np.linspace(1.20, 1.40, T - 1)])          # clears +2.5% early
+    env = _stop_env(close, reward_cfg=cfg.RewardConfig(fast_pass_bonus=5.0, fast_pass_hours=12.0), target=2.5)
+    env.reset(); env.step((OPEN_LONG, 0.8, 0))
+    bonus_steps = 0
+    for _ in range(40):
+        _, r, _, _ = env.step((0, 0.0, 0))
+        if r >= 4.0:                                              # the +5 event bonus landed on this step
+            bonus_steps += 1
+            assert env.account.phase == "B" and env._n_open("EURUSD") == 0   # target banked + flat
+    assert bonus_steps == 1                                       # paid once, not every bar after target
 
 
 # =============================================================================
@@ -743,21 +942,29 @@ def test_round_trip_costs_reduce_equity():
 
 
 # ---- hard wall ----
-def test_hard_wall_force_flattens_and_ends_episode():
-    # price crashes after entry -> equity hits the 4% wall -> breach + flatten + done
+def test_hard_wall_force_flattens_and_locks_out_day():
+    # C10: price crashes after entry -> equity hits the 4% wall -> breach FORCE-FLATTENS all +
+    # LOCKS OUT the rest of the day. The breach no longer ENDS the episode (without a calendar-day
+    # boundary the account just stays flat + locked until end-of-data).
     T = 12
     close = np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.10, T - 3)]).astype(float)
     data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
                                  np.full(T, 2e-5), valid_from=0)}
     env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
     env.step((OPEN_LONG, 1.0, 0))
+    breached_at = None
     done = False
-    for _ in range(T):
+    for i in range(T):
         if done:
             break
-        _, _, done, info = env.step((HOLD, 0.0, 0))
-    assert env.account.breached and done
-    assert env._n_open("EURUSD") == 0            # force-flattened
+        _, _, done, _info = env.step((HOLD, 0.0, 0))
+        if env.account.breached and breached_at is None:
+            breached_at = i
+            assert env.account.locked_out            # the DAY is locked out...
+            assert not done                          # ...but the breach did NOT end the episode (C10)
+            assert env._n_open("EURUSD") == 0        # force-flattened on breach
+    assert breached_at is not None                   # the wall was hit
+    assert env.account.breached                      # no day boundary here -> stays breached
 
 
 # ---- observation shape + law/mask visibility ----
@@ -932,21 +1139,35 @@ from quantra.learning_system.reward_engine import (  # noqa: E402
 
 
 def test_e8_layer0_dominates_over_1000_rollouts():
-    """Over 1000 random rollouts, cumulative |L0| exceeds every shaping layer's."""
+    """Over 1000 random rollouts, cumulative |L0| exceeds every shaping layer's — RE-VERIFIED at the
+    C17 math (L2 daily-progress over a realistic intraday equity walk; L4 trade-quality on ~12% of
+    steps as a signed, account-normalized close)."""
     eng = RewardEngine()
+    acct = eng.challenge.ftmo_account_size
     rng = np.random.default_rng(7)
     fails = 0
     for _ in range(1000):
         sums = {k: 0.0 for k in ("L0", "L1", "L2", "L3", "L4")}
+        equity = day_start = acct
+        day_target = day_start * (1.0 + eng.challenge.daily_target_pct / 100.0)
         for _ in range(256):                       # a rollout of 256 steps
+            step_pnl = float(rng.normal(0, 2e-3)) * acct      # realistic per-step PnL (USD)
+            equity += step_pnl                                # intraday equity walk -> day_pnl
+            tq = 0.0
+            if rng.random() < 0.12:                           # a trade closed this step
+                realized = float(rng.normal(0, 3e-3)) * acct
+                ever = realized > 0 or rng.random() < 0.5
+                if realized > 0:   tq = realized / acct
+                elif ever:         tq = -abs(realized) / acct
             ctx = RewardContext(
-                net_pnl_delta=float(rng.normal(0, 2e-3)),   # realistic per-step PnL
+                net_pnl_delta=step_pnl / acct,
                 in_position=bool(rng.random() < 0.6),
                 momentum_aligned=bool(rng.random() < 0.5),
-                stagnation=bool(rng.random() < 0.3),
                 drawdown_pct=float(rng.uniform(0, 4.0)),
-                day_progress=float(rng.uniform(-1, 1)),
                 breach_risk=bool(rng.random() < 0.2),
+                day_pnl=equity - day_start,
+                day_target_equity=day_target,
+                trade_close_quality=tq,
             )
             d = eng.decompose(ctx)
             for k in sums:
@@ -967,9 +1188,10 @@ def test_pain_zone_is_zero_below_threshold_and_monotonic():
 
 def test_reward_layer0_passthrough_dominates_a_single_step():
     eng = RewardEngine()
-    # a meaningful L0 with all shaping on -> total is dominated by L0's sign/scale
-    d = eng.decompose(RewardContext(net_pnl_delta=0.01, in_position=True,
-                                    momentum_aligned=True, day_progress=1.0))
+    # a meaningful L0 with all shaping on (at target + a winning close) -> total is dominated by L0
+    d = eng.decompose(RewardContext(net_pnl_delta=0.01, in_position=True, momentum_aligned=True,
+                                    day_pnl=2500.0, day_target_equity=102500.0,
+                                    trade_close_quality=5e-3))
     assert d["L0"] == 0.01
     assert abs(d["shaped"]) < abs(d["L0"])          # shaping is a whisper
 
@@ -999,6 +1221,73 @@ def test_env_uses_layered_reward_engine():
     assert isinstance(env.reward_engine, RewardEngine)
     _, reward, _, _ = env.step((HOLD, 0.0, 0))
     assert isinstance(reward, float)                 # layered reward returned, no crash
+
+
+def test_c16_reward_config_named_weights_keys_unchanged():
+    """C16: shaping weights live in a plain-English RewardConfig; RewardEngine reads them, the
+    decompose() layer KEYS are unchanged (E8 proof intact), and a custom config changes the weights."""
+    rc = cfg.RewardConfig()
+    # the rename preserved the original defaults except daily_progress_weight (raised 1e-4 -> 1e-3)
+    assert rc.net_pnl_weight == 1.0 and rc.step_pnl_weight == 1e-4
+    assert rc.daily_progress_weight == 1e-3 and rc.drawdown_pain_weight == 5e-4
+    assert rc.drawdown_pain_steepness == 4.0 and rc.trade_quality_weight == 5e-5
+    assert rc.failed_day_penalty == 5.0
+    d = RewardEngine().decompose(RewardContext(
+        net_pnl_delta=0.01, in_position=True, momentum_aligned=True,
+        drawdown_pct=3.8, day_pnl=1025.0, day_target_equity=102500.0,
+        trade_close_quality=0.02, breach_risk=False))
+    assert set(d) == {"L0", "L1", "L2", "L3", "L4", "L5_mult", "shaped", "total"}  # keys UNCHANGED
+    assert d["L0"] == 0.01 and d["L1"] == 1e-4
+    assert d["L2"] == 1e-3 * (1025.0 / 102500.0)        # C17 daily-progress whisper
+    assert d["L4"] == 5e-5 * 0.02                         # C17 trade-quality passthrough
+    d2 = RewardEngine(reward_cfg=cfg.RewardConfig(step_pnl_weight=0.0, daily_progress_weight=0.0)
+                      ).decompose(RewardContext(net_pnl_delta=0.01, in_position=True,
+                                                momentum_aligned=True, day_pnl=5000.0,
+                                                day_target_equity=102500.0))
+    assert d2["L1"] == 0.0 and d2["L2"] == 0.0                                      # custom config wins
+
+
+def test_c17_daily_progress_grows_toward_target_and_off_when_negative():
+    """C17: L2 = daily_progress_weight * max(0, day_pnl)/day_target_equity — a positive whisper that
+    GROWS toward target and is exactly 0 once the day is flat or negative."""
+    eng = RewardEngine(); w = eng.reward_cfg.daily_progress_weight
+    base = dict(net_pnl_delta=0.0, day_target_equity=102500.0)
+    assert eng.decompose(RewardContext(day_pnl=-500.0, **base))["L2"] == 0.0   # day negative -> off
+    assert eng.decompose(RewardContext(day_pnl=0.0, **base))["L2"] == 0.0      # flat -> off
+    near = eng.decompose(RewardContext(day_pnl=500.0, **base))["L2"]
+    far = eng.decompose(RewardContext(day_pnl=2000.0, **base))["L2"]
+    assert 0.0 < near < far                                                     # grows toward target
+    assert far == w * (2000.0 / 102500.0)                                       # exact formula
+
+
+def test_c17_trade_quality_fires_only_on_close_and_keeps_sign():
+    """C17: L4 = trade_quality_weight * trade_close_quality — 0 with no close, sign preserved."""
+    eng = RewardEngine(); w = eng.reward_cfg.trade_quality_weight
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=0.0))["L4"] == 0.0
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=0.01))["L4"] == w * 0.01
+    assert eng.decompose(RewardContext(net_pnl_delta=0.0, trade_close_quality=-0.01))["L4"] == w * -0.01
+
+
+def test_c17_env_close_quality_sign_rules_and_normalization():
+    """C17: the env accumulator applies the operator's sign rules (+winner, -gave-back-a-winner,
+    0 for a never-profitable loser) and account-normalizes; _consume resets it for the next step."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    acct = env.account.account_size
+    env._pending_trade_quality = 0.0
+    env._record_close_quality(200.0, ever_in_profit=False)    # winner -> +200
+    env._record_close_quality(-150.0, ever_in_profit=True)    # gave back a winner -> -150
+    env._record_close_quality(-100.0, ever_in_profit=False)   # clean loss, never in profit -> 0
+    assert abs(env._consume_trade_quality() - (200.0 - 150.0) / acct) < 1e-12
+    assert env._pending_trade_quality == 0.0                    # consumed + reset
+
+
+def test_c16_env_threads_reward_config():
+    """C16: TradingEnv accepts a reward_cfg and threads it into its RewardEngine (kept on reset)."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)},
+                     reward_cfg=cfg.RewardConfig(daily_progress_weight=2e-3))
+    assert env.reward_engine.reward_cfg.daily_progress_weight == 2e-3
+    env.reset(challenge=cfg.make_challenge(daily_target_pct=3))
+    assert env.reward_engine.reward_cfg.daily_progress_weight == 2e-3   # rebuild keeps reward_cfg
 
 
 # =============================================================================
@@ -1126,6 +1415,26 @@ def test_aggression_cools_as_misses_fall():
     assert sch.aggression < 0.1                        # aggression cools toward low end
 
 
+def test_aggression_floor_keeps_exploration_alive_under_masks():
+    """Operator exploration floor (min_aggression): with a diluted miss-rate (masks hold the bot flat),
+    aggression must NOT collapse to ~0 — it stays at/above the floor so entropy/LR/epochs keep exploring.
+    Default 0.0 is unchanged (the cool-down test above still holds)."""
+    floor = 0.35
+    sch = AggressionScheduler(start=1.0, min_aggression=floor)
+    for _ in range(200):
+        sch.update(miss_rate=0.0)                      # mask-diluted signal -> EMA wants to go to 0
+    assert sch.aggression >= floor - 1e-9              # but the floor holds exploration up
+    v = sch.values()                                   # dials sit ABOVE the cold floor, still in-range
+    rng = sch.ranges
+    assert v.entropy_coef > rng.entropy[0] and v.lr > rng.lr[0] and v.epochs > rng.epochs[0]
+    assert rng.entropy[0] <= v.entropy_coef <= rng.entropy[1] and rng.lr[0] <= v.lr <= rng.lr[1]
+    # the default scheduler (no floor) still collapses — the floor is strictly opt-in
+    cold = AggressionScheduler(start=1.0)
+    for _ in range(200):
+        cold.update(miss_rate=0.0)
+    assert cold.aggression < floor
+
+
 def test_g8_missed_opportunity_requires_multi_tf_agreement_flat_and_move():
     row = _feat_row(ssma_align_5m=1, ssma_align_30m=1, ssma_align_4H=1)
     assert missed_opportunity(row, was_flat=True, realized_move_atr=2.0) is True   # all align + ran 2 ATR
@@ -1149,6 +1458,38 @@ def test_trainer_runs_and_checkpoints():
     assert changed
     path = trainer.checkpoint("test_brain")
     assert path.exists()
+
+
+def test_running_mean_std_matches_numpy():
+    """RunningMeanStd (the reward normalizer's scale tracker) matches numpy mean/std on a chunked stream."""
+    from quantra.learning_system.trainer.trainer import RunningMeanStd
+    rng = np.random.default_rng(0)
+    data = rng.normal(50.0, 17.0, 4000)
+    rms = RunningMeanStd()
+    for i in range(0, len(data), 131):                 # fed in uneven chunks
+        rms.update(data[i:i + 131])
+    assert abs(rms.mean - data.mean()) < 0.1
+    assert abs(rms.std - data.std()) < 0.1
+
+
+def test_reward_normalization_keeps_value_loss_bounded():
+    """A large net_pnl_weight blows up the (unnormalized) value loss; return normalization
+    (TrainConfig.normalize_rewards) keeps it ~O(1) and finite — the stability fix that lets the
+    operator scale the reward freely. Default OFF is unchanged (the integration test above runs off)."""
+    data = {"EURUSD": _sym(T=600, atr=1e-4, drift=1e-5)}
+    big = cfg.RewardConfig(net_pnl_weight=10000.0)
+
+    def _max_vloss(normalize: bool) -> float:
+        env = TradingEnv(data, reward_cfg=big, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.2))
+        tr = Trainer(env, train_cfg=TrainConfig(rollout_size=128, minibatch=32, seed=0,
+                                                normalize_rewards=normalize))
+        return max(h["value_loss"] for h in tr.train(n_updates=6))
+
+    off = _max_vloss(False)
+    on = _max_vloss(True)
+    assert np.isfinite(on)            # never NaN/inf with normalization
+    assert on < off                   # normalization shrinks the blowup
+    assert on < 10.0                  # ...to an O(1)-ish scale (off is orders larger)
 
 
 # =============================================================================
@@ -1207,8 +1548,10 @@ def test_telemetry_header_carries_block_names_for_the_llm():
     log = TelemetryLogger("run_hdr")
     recs = log._buf
     blocks = recs[0]["blocks"]
-    assert set(blocks) == {"market", "market_raw", "law", "trade", "portfolio", "account"}
+    assert set(blocks) == {"market", "market_raw", "law", "trade", "portfolio",
+                           "account", "trade_state"}   # +trade_state (operator 2026-06-21)
     assert "law_super_trend_bb" in blocks["law"]
+    assert "daily_drawdown_pct" in blocks["trade_state"]
 
 
 # =============================================================================
@@ -1661,7 +2004,9 @@ def test_ftmo_off_has_target_and_stop_for_day_toggle():
     assert stop.target_hit is True and stop.should_autoflat is True  # bank + stop
 
 
-def test_env_off_stop_for_day_ends_at_target():
+def test_env_off_stop_for_day_locks_out_day_at_target():
+    # C10: OFF + stop_for_day banks the day at target and LOCKS OUT the rest of that day — it no
+    # longer ENDS the episode (the multi-day account continues; midnight reopens it).
     T = 40
     close = np.linspace(1.20, 1.26, T).astype(float)         # climbs -> a long hits the target
     data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
@@ -1671,10 +2016,12 @@ def test_env_off_stop_for_day_ends_at_target():
                      risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
     env.step((OPEN_LONG, 1.0, 0))
     for _ in range(T - 2):
-        if env.done:
+        if env.account.locked_out:
             break
         env.step((HOLD, 0.0, 0))
-    assert env.account.target_hit and env.done               # banked + stopped for the day
+    assert env.account.target_hit and env.account.locked_out  # banked + DAY locked out (not done)
+    assert env._n_open("EURUSD") == 0                          # auto-flatted at target
+    assert not env.done                                       # C10: the EPISODE is not ended
 
 
 import math  # noqa: E402  (used by Section T margin math)
@@ -1733,6 +2080,227 @@ def test_daily_reset_fires_on_calendar_day_change():
     assert env.account.phase == "A" and env.account.target_hit is False
 
 
+# ---- Issue 2: the challenge-day reset boundary is 00:00 CE(S)T (Europe/Prague), not naive UTC ----
+def test_challenge_day_id_rolls_at_cest_midnight_not_utc():
+    """challenge_day_ids() builds the per-bar day-id at 00:00 Europe/Prague. Winter (CET = UTC+1):
+    Prague midnight is 23:00 UTC. So crossing UTC midnight (but not Prague midnight) must NOT roll
+    the day, and crossing Prague midnight (even with no UTC crossing) MUST roll it exactly once."""
+    import pandas as pd
+    from quantra.env.trading_env import challenge_day_ids
+    # (a) 23:30 -> 00:00 -> 00:30 UTC on Jan 4/5 = Prague 00:30/01:00/01:30 Jan 5 (one Prague day).
+    a = challenge_day_ids(pd.date_range("2021-01-04 23:30", periods=3, freq="30min"))
+    assert int((np.diff(a) != 0).sum()) == 0          # crossed UTC midnight, NOT Prague -> no roll
+    # (b) 22:30 -> 23:00 -> 23:30 UTC Jan 4 = Prague 23:30 Jan4 -> 00:00/00:30 Jan5 (one Prague roll).
+    b = challenge_day_ids(pd.date_range("2021-01-04 22:30", periods=3, freq="30min"))
+    assert int((np.diff(b) != 0).sum()) == 1          # crossed Prague midnight (no UTC cross) -> 1 roll
+
+
+def test_challenge_day_id_one_reset_across_dst_transition():
+    """DST spring-forward in Europe/Prague (2021-03-28, 02:00->03:00 local): the local day is still a
+    single calendar date, so a span crossing exactly one Prague midnight rolls the id exactly once —
+    zoneinfo handles CET<->CEST and converting FROM UTC is unambiguous (no gap/duplicate-hour error)."""
+    import pandas as pd
+    from quantra.env.trading_env import challenge_day_ids
+    idx = pd.date_range("2021-03-27 22:00", periods=10, freq="1h")   # UTC; crosses Prague midnight once
+    d = challenge_day_ids(idx)
+    assert d is not None and int((np.diff(d) != 0).sum()) == 1
+
+
+def test_challenge_day_ids_none_for_non_datetime_index():
+    """A non-datetime index (synthetic tests) -> None, preserving single-episode semantics."""
+    from quantra.env.trading_env import challenge_day_ids
+    assert challenge_day_ids(np.arange(10)) is None
+
+
+# =============================================================================
+# SECTION W — C10/C11 MULTI-DAY EPISODE + FAILED-DAY PENALTY (2026-06-19)
+# FTMO link: an episode is N TRADING DAYS on ONE continuous account. A daily-wall breach LOCKS OUT
+# the rest of that day (it does NOT end the episode); midnight resets the day and the account carries
+# forward. A LARGE proportional penalty for missing a day's target makes CONSISTENCY the objective,
+# not mere survival — which is what repeatedly passing FTMO requires.
+# =============================================================================
+def test_daily_target_is_relative_to_day_opening_balance():
+    """C11: the day's target is daily_target_pct of THAT DAY'S opening balance (compounding), not a
+    fixed % of account_size — so after a winning day the next day aims higher."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    assert abs(cs.daily_target_equity - 10_250.0) < 1e-9        # day 1: +2.5% of 10_000
+    cs.mark_to_market(600.0)                                    # +6% day
+    cs.reset_day()                                             # day 2 opens at 10_600 (carried forward)
+    assert abs(cs.day_start_equity - 10_600.0) < 1e-9
+    assert abs(cs.daily_target_equity - 10_600.0 * 1.025) < 1e-6   # +2.5% of the DAY'S opening
+
+
+def test_target_hit_and_day_passed_share_identical_threshold():
+    """C11 verification: 'target hit' (the latch) and 'day passed' (EOD pass / zero shortfall) must
+    threshold on the SAME value — equity >= daily_target_equity — with no rounding or base skew."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    tgt = cs.daily_target_equity                       # day_start_equity * (1 + 2.5%)
+    cs.mark_to_market(tgt - cs.account_size - 0.01)    # equity one cent BELOW target
+    assert not cs.target_hit and not cs.day_passed and cs.day_shortfall_fraction > 0.0
+    cs.mark_to_market(tgt - cs.account_size)           # equity EXACTLY at target
+    assert cs.target_hit and cs.day_passed and cs.day_shortfall_fraction == 0.0
+
+
+def test_day_shortfall_fraction_zero_at_target_one_when_flat():
+    """C11 shortfall: 0 at/above target, 1.0 if the day ended flat, >1 if it lost money (the wall-hit
+    day is punished hardest because its shortfall is largest)."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    cs.mark_to_market(0.0)                                      # flat day (0% of +2.5%)
+    assert abs(cs.day_shortfall_fraction - 1.0) < 1e-9
+    cs.mark_to_market(250.0)                                    # exactly at target
+    assert cs.day_shortfall_fraction == 0.0
+    cs.mark_to_market(-400.0)                                   # -4% day (hit the wall)
+    assert cs.day_shortfall_fraction > 1.0
+
+
+def test_reset_day_clears_breach_and_lockout_account_carries():
+    """C10: reset_day lifts breached + locked_out and re-anchors the day to current equity (the
+    LOSS carries forward), so a breached day reopens fresh next morning."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    cs.mark_to_market(-450.0)                                   # -4.5% -> breach the 4% wall
+    assert cs.breached and cs.locked_out
+    cs.reset_day()
+    assert not cs.breached and not cs.locked_out               # fresh day
+    assert abs(cs.day_start_equity - 9_550.0) < 1e-9           # the -450 carried forward
+
+
+def test_consecutive_loss_days_counts_failed_days():
+    """C14 (audit Fix 4): the back-to-back failed-day streak increments only when a day ENDS below
+    target, resets to 0 when a day ends at/above target, and never moves on intraday drawdown."""
+    cs = ChallengeState(10_000, cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0))
+    assert cs.consecutive_loss_days == 0
+    # Day 1 ends flat (equity 10_000 < the +2.5% target 10_250) -> a failed day.
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 1
+    # Intraday drawdown must NOT move the counter (only reset_day, the day-END event, can).
+    cs.mark_to_market(-300.0)                                  # equity 9_700, still mid-day
+    assert cs.consecutive_loss_days == 1
+    # Day 2 also ends below its target -> the streak grows to 2.
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 2
+    # Day 3 ends ABOVE its target -> the streak resets to 0.
+    cs.mark_to_market(+600.0)                                  # equity 10_600 >= day-3 target (~9_942)
+    assert cs.day_passed
+    cs.reset_day()
+    assert cs.consecutive_loss_days == 0
+
+
+def test_policy_card_manifest_carries_consecutive_loss_days(tmp_path):
+    """C14 (audit Fix 4): the back-to-back loss streak is written to + read back from the Policy Card
+    manifest (build_card param -> manifest() -> save()/load() round-trip)."""
+    from quantra.learning_system.policy_registry import PolicyCard, build_card  # noqa: E402
+
+    card = build_card(overrides={}, state_dim=STATE_DIM,
+                      data_window={"start": "2023-01-01", "n_days": 5}, consecutive_loss_days=3)
+    assert card.consecutive_loss_days == 3
+    assert card.manifest()["consecutive_loss_days"] == 3
+    card.save(root=tmp_path)
+    reloaded = PolicyCard.load(card.policy_name, root=tmp_path)
+    assert reloaded.consecutive_loss_days == 3
+
+
+def test_no_new_opens_while_day_locked_out():
+    """C10: while locked out, direction_mask forbids new opens and the env coerces a forbidden
+    OPEN to HOLD (CLOSE/HOLD stay legal)."""
+    env = TradingEnv({"EURUSD": _sym(T=20, atr=1e-4)})
+    env.reset()
+    env.account.locked_out = True
+    m = env.direction_mask("EURUSD")
+    assert m[OPEN_LONG] <= -1e8 and m[OPEN_SHORT] <= -1e8
+    _, _, _, info = env.step((OPEN_LONG, 1.0, 0))
+    assert info["coerced"] is True and info["executed"] == "HOLD"
+
+
+def test_breach_locks_out_day_then_resets_next_day():
+    """C10 end-to-end: a day-1 crash breaches the wall -> locked out (NOT done); at the calendar-day
+    boundary the lockout lifts, the breach clears, and the day-1 loss carries into day 2."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    close = np.concatenate([np.full(3, 1.20), np.linspace(1.20, 1.08, 9),
+                            np.full(12, 1.08)]).astype(float)
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))
+    saw_lockout = saw_reset = False
+    day1_equity = None
+    for _ in range(T):
+        if env.done:
+            break
+        env.step((HOLD, 0.0, 0))
+        if env.account.locked_out and not saw_lockout:
+            saw_lockout = True
+            day1_equity = env.account.equity
+            assert not env.done                               # breach did NOT end the episode
+        if saw_lockout and not env.account.locked_out:        # crossed midnight
+            saw_reset = True
+            assert not env.account.breached                   # fresh day
+            break
+    assert saw_lockout and saw_reset
+    assert day1_equity < 10_000.0                             # the breach loss is real
+    assert env.account.day_start_equity < 10_000.0           # ...and carried into day 2
+
+
+def test_episode_ends_after_configured_days():
+    """C10: with episode_days=2 over 3 calendar days, the episode ends at the 2nd midnight boundary
+    (not at a breach, not at end-of-data)."""
+    T = 36
+    dates = np.array([0] * 12 + [1] * 12 + [2] * 12, dtype=np.int64)
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), np.full(T, 1.20), np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, episode_days=2)
+    steps = 0
+    while not env.done and steps < T + 5:
+        env.step((HOLD, 0.0, 0)); steps += 1
+    assert env.done and env._days_elapsed == 2                # exactly 2 trading days
+
+
+def test_failed_day_penalty_fires_proportionally_on_a_missed_day():
+    """C11: a day that HOLDs flat (0% < +2.5% target) takes a LARGE failed-day penalty at the
+    midnight boundary == -failed_day_penalty * shortfall (shortfall==1.0 for a flat day)."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    fdp = 5.0
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), np.full(T, 1.20), np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, challenge=cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=4.0,
+                                                        failed_day_penalty=fdp))
+    boundary_penalty = boundary_reward = None
+    for _ in range(T):
+        if env.done:
+            break
+        _, reward, _, info = env.step((HOLD, 0.0, 0))
+        if info["day_penalty"] != 0.0:
+            boundary_penalty, boundary_reward = info["day_penalty"], reward
+            break
+    assert boundary_penalty is not None
+    assert abs(boundary_penalty - (-fdp)) < 1e-6              # flat day -> shortfall 1.0 -> -fdp
+    assert boundary_reward < -1.0                             # the penalty dominates the step reward
+
+
+def test_failed_day_penalty_zero_when_target_reached():
+    """C11: a day that REACHES its target incurs NO failed-day penalty at the boundary."""
+    T = 24
+    dates = np.array([0] * 12 + [1] * 12, dtype=np.int64)
+    close = np.concatenate([np.linspace(1.20, 1.30, 12), np.full(12, 1.30)]).astype(float)  # day 0 climbs
+    data = {"EURUSD": SymbolData(_open_gate_matrix(T), close, np.full(T, 1e-3),
+                                 np.full(T, 2e-5), valid_from=0, dates=dates)}
+    env = TradingEnv(data, challenge=cfg.make_challenge(daily_target_pct=2.5, daily_risk_pct=8.0,
+                                                        failed_day_penalty=5.0),
+                     risk_cfg=RiskConfig(max_per_trade_risk_frac=0.5))
+    env.step((OPEN_LONG, 1.0, 0))                            # ride the day-0 climb past +2.5%
+    crossed = False
+    for _ in range(T):
+        if env.done:
+            break
+        _, _, _, info = env.step((HOLD, 0.0, 0))
+        if info["days_elapsed"] >= 1:                        # the day-0 boundary has been crossed
+            crossed = True
+            assert info["day_penalty"] == 0.0                # target was reached -> no penalty
+            break
+    assert crossed
+
+
 # =============================================================================
 # SECTION V — REAL-DATA BACKTEST (2026-06-15). NO synthetic pass-claims.
 # FTMO link: the ONLY performance proof is on REAL MT5 bars via scripts/real_backtest.py.
@@ -1768,7 +2336,11 @@ def test_real_backtest_runs_on_real_bars_when_enabled():
         pytest.skip("set QUANTRA_REAL_BACKTEST=1 with data/raw/EURUSD_recent.csv present")
     import subprocess
     import sys as _sys
-    r = subprocess.run([_sys.executable, "scripts/real_backtest.py", "--updates", "0"],
+    # Pass --path explicitly: real_backtest.py's --path now defaults to None (omitting it
+    # triggers the loader's gdown auto-download fallback). This gated test guards on the
+    # local CSV existing, so it must point at exactly that file to stay deterministic.
+    r = subprocess.run([_sys.executable, "scripts/real_backtest.py", "--updates", "0",
+                        "--path", "data/raw/EURUSD_recent.csv"],
                        capture_output=True, text=True, timeout=600)
     assert "QUANTRA BACKTEST" in r.stdout and "GROUND TRUTH" in r.stdout
 
@@ -1950,3 +2522,14 @@ if __name__ == "__main__":  # pragma: no cover
 #      real backtest (runs only with the real CSV + QUANTRA_REAL_BACKTEST=1).
 #   C: The suite no longer claims a pass it can't honestly back; performance is measured on
 #      REAL bars, so what we report about passing FTMO is true - not a fitted illusion.
+# [2026-06-18] Section V gated backtest now passes --path explicitly (real_backtest --path fix).
+#   I: scripts/real_backtest.py's --path now defaults to None so an OMITTED --path triggers the
+#      loader's Parquet/Drive/gdown fallback (operator brief Section 9). This gated test ran the
+#      script with NO --path, relying on the old hardcoded default; after the fix that would
+#      resolve via the fallback instead of the local CSV the test guards on.
+#   R: The test only runs when data/raw/EURUSD_recent.csv exists AND QUANTRA_REAL_BACKTEST=1, so
+#      it must point the harness at exactly that file to stay deterministic.
+#   A: Added "--path data/raw/EURUSD_recent.csv" to the subprocess invocation; compute_stats
+#      import and assertions unchanged.
+#   C: The real-bar proof still measures the exact CSV it guards on, while the shipped script
+#      gains the clean-checkout auto-download path - the gateway to a real FTMO pass.

@@ -127,7 +127,7 @@ MOCK_LAW_NAMES: List[str] = [
     "law_super_trend_bb", "law_super_trend_cci", "law_super_trend_ssma",
     "law_trend_bb", "law_trend_cci", "law_trend_ssma",
     "law_pullback_bb", "law_pullback_cci", "law_pullback_ssma",
-    "gate_atr_liquidity", "gate_spread", "gate_stationarity",
+    "market_volatility_obs", "market_spread_obs", "market_stationarity_obs",
 ]
 
 

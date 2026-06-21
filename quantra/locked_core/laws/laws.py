@@ -1,17 +1,21 @@
-"""The 9 directional laws + 3 gates — computed from the M2 feature matrix. 🔴
+"""The 9 directional laws + 3 market-condition observation signals — from the M2 matrix. 🔴
 
 WHAT THIS MODULE DOES
 ---------------------
-Computes the 12 law/gate STATES (the schema `law` block) from the normalized market
+Computes the 12 law/signal STATES (the schema `law` block) from the normalized market
 features, exactly per THE_TRADING_CODE.md / SOW-D4. Directional laws emit -1 (sell
-context) / 0 (inactive) / +1 (buy context); gates emit 0 (closed) / 1 (open).
-Vectorized over the whole matrix (offline precompute) and per-row (live).
+context) / 0 (inactive) / +1 (buy context); the 3 market-condition signals emit
+0 / 1. Vectorized over the whole matrix (offline precompute) and per-row (live).
 
 The 9 directional laws (3 families x 3):
   Super Trend: Bollinger / CCI / Shifted-SMA   (strongest expansion; continuation only)
   Trend:       Bollinger / CCI / Shifted-SMA   (directional structure; one side legal)
   Pull Back:   Bollinger / CCI / Shifted-SMA   (retrace inside HTF direction; that side only)
-The 3 gates (non-directional): ATR Liquidity · Spread Filter · Stationarity Regime.
+The 3 market-condition signals (formerly "gates"): Volatility (ATR 5m+4H) · Spread ·
+Stationarity (30-bar DF). These are OBSERVATION-ONLY by default (config.TRAINING_PHASE ==
+PHASE_FREE) — the bot SEES them and learns to use them rather than being hard-blocked. Only
+market_stationarity_obs re-enforces, and only in PHASE_CONSTRAINED (see engine.py). This is
+the fix for the ~98.7% open-lockout that stopped the policy ever learning to pass.
 
 HOW IT SERVES REPEATED FTMO-STYLE PASSING
 -----------------------------------------
@@ -20,8 +24,11 @@ mask (mask_engine) then forbids the wrong direction with logit -1e9. A clean law
 state saves the bot from directional stupidity that would breach the 4% wall — the
 single biggest source of avoidable breaches. Laws are NEVER reward terms (SOW R5).
 
-4H OBSERVATION RULE 🔴: no law reads 4H to activate. 4H is context only. Every law
-binds exactly the timeframes written in THE_TRADING_CODE.md (1m/5m/30m as specified).
+4H OBSERVATION RULE 🔴: no DIRECTIONAL law reads 4H to activate. 4H is context only.
+Every directional law binds exactly the timeframes in THE_TRADING_CODE.md (1m/5m/30m).
+Carve-out: market_volatility_obs reads atr_dev_4H as an OBSERVATION INGREDIENT (paired
+with 5m) — it never solo-triggers the mask, and it is observation-only in PHASE_FREE, so
+4H still never gatekeeps a trade by itself. (Training wheels are the other 4H carve-out.)
 
 LLM RISK DOCTOR — HOW TO THINK ABOUT THIS FILE
 ----------------------------------------------
@@ -45,14 +52,21 @@ from quantra.market_pipeline.feature_builder.indicators import ADF_CRIT_5PCT
 # precomputed features or law names there must change _IDX/LAW_NAMES usage here in lockstep.
 from quantra.market_pipeline.feature_builder.schema import PRECOMPUTED_NAMES, SCHEMA
 
-# The 12 law/gate names, in schema `law` block order. compute_law_states returns
+# The 12 law/signal names, in schema `law` block order. compute_law_states returns
 # columns in exactly this order so they drop straight into the observation.
-# COUPLING [C4 in COUPLINGS.md]: this ORDER (9 directional then 3 gates) is sliced by
-# position in law_mask_engine (_GATE_IDX, law_states[:9]/[9:]) and mirrored in
+# COUPLING [C4 in COUPLINGS.md]: this ORDER (9 directional then 3 market-condition signals)
+# is sliced by position in law_mask_engine (_OBS_IDX, law_states[:9]/[9:]) and mirrored in
 # schema._law_names. Reorder here => update schema._law_names + the mask engine.
+# ⚠️ COMPATIBILITY [C18+] -> quantra/learning_system/policy_registry/registry.py
+# (default_law_fingerprint -> compatibility_signature): LAW_NAMES is the THIRD input to a policy's
+# compatibility hash. Adding/removing/renaming a law changes EVERY saved policy's signature, so the
+# registry will force a fresh start on RESUME (old law-fingerprint no longer matches). Reordering only
+# (same names) does NOT change the hash here, but DOES break the positional slices above — fix those too.
+# ✅ SAFE TO CHANGE without a fresh start: everything OUTSIDE the law set — training_phase,
+#    training_wheels, the challenge numbers, and the reward weights/math — none of those touch LAW_NAMES.
 LAW_NAMES = list(SCHEMA.blocks["law"])
 DIRECTIONAL_LAWS = LAW_NAMES[:9]   # -1/0/+1
-GATES = LAW_NAMES[9:]              # 0/1
+MARKET_SIGNALS = LAW_NAMES[9:]     # 0/1 (volatility, spread, stationarity) — observation-only by default
 
 # Column index of each precomputed feature name. COUPLING [C1]: this index map depends
 # on schema.PRECOMPUTED_NAMES ORDER; env._COL + scheduler._COL build the same map.
@@ -152,24 +166,29 @@ def compute_law_states(matrix: np.ndarray) -> np.ndarray:
     pb3_sell = (_c(mat, "ssma_align_5m") == -1) & (_c(mat, "ssma_align_30m") == -1) \
         & (_c(mat, "ssma_align_1m") == 1)
 
-    # ---- GATES (0/1) ----
-    # ATR Liquidity: ATR above its shifted reference on BOTH 1m and 30m.
-    atr_gate = ((_c(mat, "atr_dev_1m") > 0) & (_c(mat, "atr_dev_30m") > 0)).astype(np.float32)
-    # Spread Filter: current spread < last 1m candle range (ratio < 1).
-    spread_gate = (_c(mat, "spread_range_ratio_1m") < 1.0).astype(np.float32)
-    # Stationarity: DF stat below the 5% critical value => stationary (1). The mask
-    # engine applies Mode A/B; the observed flag is the raw stationary indicator.
-    stat_gate = (_c(mat, "adf_stat_1m") < ADF_CRIT_5PCT).astype(np.float32)
+    # ---- MARKET-CONDITION OBSERVATION SIGNALS (0/1) — formerly "gates" ----
+    # These are OBSERVATION-ONLY by default (config.TRAINING_PHASE == PHASE_FREE): the bot
+    # SEES the condition and learns to use it instead of being hard-blocked. Only
+    # market_stationarity_obs re-enforces, and only in PHASE_CONSTRAINED (engine.py).
+    # Volatility: ATR expanding on BOTH the 5m execution frame AND the 4H macro regime.
+    # (4H is an OBSERVATION INGREDIENT here, never a solo mask trigger — see the 4H rule.)
+    # Companion raw magnitudes atr_level_5m / atr_level_4H are in the market block.
+    market_volatility_obs = ((_c(mat, "atr_dev_5m") > 0) & (_c(mat, "atr_dev_4H") > 0)).astype(np.float32)
+    # Spread: current spread < last 1m candle range (ratio < 1). Raw ATR-cost = spread_atr_1m.
+    market_spread_obs = (_c(mat, "spread_range_ratio_1m") < 1.0).astype(np.float32)
+    # Stationarity: 30-bar DF stat below the 5% critical value => stationary (1). Raw stat =
+    # adf_stat_1m (in the market block). The ONLY signal that re-enforces in PHASE_CONSTRAINED.
+    market_stationarity_obs = (_c(mat, "adf_stat_1m") < ADF_CRIT_5PCT).astype(np.float32)
 
     # COUPLING [C4] -> market_pipeline/law_mask_engine/engine.py + feature_builder/builder.py:
-    # this stack ORDER (9 directional then atr/spread/stat gates) IS the law block; the mask
-    # engine slices law_states[:9]/[9:] + _GATE_IDX by position and the builder drops these 12
-    # columns into the schema "law" block. Reordering rows here desyncs both — keep == LAW_NAMES.
+    # this stack ORDER (9 directional then volatility/spread/stationarity) IS the law block;
+    # the mask engine slices law_states[:9]/[9:] + _OBS_IDX by position and the builder drops
+    # these 12 columns into the schema "law" block. Reorder => desyncs both; keep == LAW_NAMES.
     states = np.stack([
         _state(st1_buy, st1_sell), _state(st2_buy, st2_sell), _state(st3_buy, st3_sell),
         _state(t1_buy, t1_sell), _state(t2_buy, t2_sell), _state(t3_buy, t3_sell),
         _state(pb1_buy, pb1_sell), _state(pb2_buy, pb2_sell), _state(pb3_buy, pb3_sell),
-        atr_gate, spread_gate, stat_gate,
+        market_volatility_obs, market_spread_obs, market_stationarity_obs,
     ], axis=1).astype(np.float32)
 
     return states[0] if matrix.ndim == 1 else states
@@ -204,3 +223,16 @@ def law_states_dict(row_states: np.ndarray) -> dict:
 #      (was cci_norm>±1; _CCI_HI/_CCI_LO 1.0->100.0); PB2 likewise. Same comparisons.
 #   C: The masks forbid exactly the same directions as before (Section F tests verify),
 #      so the breach protection is unchanged while CCI is exposed raw.
+# [2026-06-18] Gates -> market-condition OBSERVATION signals (operator/Perplexity redesign).
+#   I: The 3 hard gates (ATR-liquidity, spread, stationarity) shut ~98.7% of opens on real
+#      EURUSD, so the policy never traded enough to learn to pass — a calibration failure of
+#      treating market context as a hard blocker instead of something the bot should LEARN.
+#   R: Operator decision 2026-06-18 (Option 1 / phase-gated): the 3 signals become
+#      observation-only; volatility re-reads 5m+4H (execution frame + macro regime); the DF
+#      window shrinks 100->30 (faster, more responsive); enforcement is phase-gated and, this
+#      session, only stationarity re-enforces in PHASE_CONSTRAINED (engine.py).
+#   A: Renamed gate_* -> market_volatility_obs/market_spread_obs/market_stationarity_obs (same
+#      law-block slots, 12-wide); volatility now (atr_dev_5m>0 & atr_dev_4H>0); GATES export
+#      -> MARKET_SIGNALS; the directional laws + their masks are UNCHANGED.
+#   C: In PHASE_FREE the bot can finally trade and learn which conditions help it pass FTMO,
+#      while the stationarity guard can be re-armed late (PHASE_CONSTRAINED) once disciplined.

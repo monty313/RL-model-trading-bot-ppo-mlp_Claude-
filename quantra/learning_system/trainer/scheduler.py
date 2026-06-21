@@ -90,13 +90,26 @@ class DialValues:
 class AggressionScheduler:
     """Maps a smoothed miss-rate (0..1) to dial values inside the locked ranges."""
 
-    def __init__(self, ranges: AggressionRanges | None = None, start: float = 1.0):
+    def __init__(self, ranges: AggressionRanges | None = None, start: float = 1.0,
+                 min_aggression: float = 0.0):
         self.ranges = ranges or AggressionRanges()
-        self.aggression = float(np.clip(start, 0.0, 1.0))  # 1 = max aggression
+        # min_aggression [operator override 2026-06-20, default 0.0 = LOCKED behaviour unchanged]:
+        # an EXPLORATION FLOOR. The miss-rate can be diluted toward 0 by bars where the bot is held
+        # FLAT by a mask/guardrail (CCI gate, training wheels, laws) — being masked into HOLD is NOT
+        # the same as "captured everything", but the pure-EMA update() reads it that way and decays
+        # aggression to ~0, freezing a brand-new policy before it learns. The floor keeps aggression
+        # (hence entropy_coef/LR/epochs) from collapsing below this, so exploration of the STILL-
+        # available options survives the masks. 0.0 reproduces the locked schedule exactly. COUPLING
+        # -> trainer/trainer.py constructs the scheduler; the notebook passes cfg.MIN_AGGRESSION.
+        self.min_aggression = float(np.clip(min_aggression, 0.0, 1.0))
+        self.aggression = max(float(np.clip(start, 0.0, 1.0)), self.min_aggression)  # 1 = max aggression
 
     def update(self, miss_rate: float, momentum: float = 0.2) -> None:
-        """Move aggression toward the observed miss-rate (more misses -> stay hot)."""
+        """Move aggression toward the observed miss-rate (more misses -> stay hot), but never let it
+        decay below the operator's exploration floor (min_aggression; 0.0 = locked behaviour)."""
         self.aggression = (1 - momentum) * self.aggression + momentum * float(np.clip(miss_rate, 0, 1))
+        if self.aggression < self.min_aggression:
+            self.aggression = self.min_aggression
 
     def _lerp(self, lo_hi: tuple) -> float:
         lo, hi = lo_hi
@@ -124,3 +137,17 @@ class AggressionScheduler:
 #      mapping a smoothed miss-rate to entropy/clip/LR/epochs within the ranges.
 #   C: Exploration stays high while money is left on the table and cools as the bot
 #      captures setups - reaching a disciplined, capturing policy (high pass rate) faster.
+# [2026-06-20] Operator override — exploration FLOOR (min_aggression, default 0.0 = unchanged).
+#   I: With the CCI-regime gate (and any mask) on, the bot is held FLAT through chop, so flat bars
+#      flood the G8 denominator and miss_rate is diluted toward 0. update() is a pure EMA toward that
+#      rate, so aggression decayed 0.34->0.02 by ~25 updates and entropy/LR/epochs bottomed out — a
+#      brand-new policy stopped exploring before it learned anything. "Masks don't mean other options
+#      aren't available": being masked into HOLD is not the same as capturing every setup.
+#   R: Operator directive 2026-06-20 — keep exploration alive under masks WITHOUT touching the locked
+#      ranges or the scheduler's EMA logic: add an opt-in lower bound only. Default 0.0 reproduces the
+#      locked schedule exactly (master-suite cool-down test still holds), so nothing changes when off.
+#   A: AggressionScheduler gained min_aggression; __init__ floors the start value and update() clamps the
+#      post-EMA aggression up to the floor. config.MIN_AGGRESSION (default 0.0) + the notebook knob feed
+#      it. COUPLING -> runtime/config.MIN_AGGRESSION + trainer/trainer.py (scheduler construction).
+#   C: A fresh policy keeps exploring the still-legal option space under the gate/wheels/laws instead of
+#      freezing at near-zero aggression, so it can actually search for an edge while the guardrails hold.

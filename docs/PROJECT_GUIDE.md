@@ -4,7 +4,7 @@
 > project, written so an assistant (e.g. a Perplexity Space) can answer *"how do I use
 > this project?"* — covering the Barbershop diagnostics dashboard, training, backtesting,
 > live trading, and every feature, with exact file names, locations, and commands.
-> Last updated 2026-06-16.
+> Last updated 2026-06-19.
 
 ---
 
@@ -16,26 +16,80 @@ ever touching a **trailing drawdown wall (default −4%)**, on real MT5 forex/me
 
 - **Algorithm:** PPO (Proximal Policy Optimization) — an actor-critic with a clipped
   objective and GAE advantages.
-- **Policy I/O:** the agent sees a fixed observation vector (**STATE_DIM = 203**) and emits
+- **Policy I/O:** the agent sees a fixed observation vector (**STATE_DIM = 207**) and emits
   4 heads — direction `{HOLD, OPEN_LONG, OPEN_SHORT, CLOSE}`, a Beta-distributed size, a
   slot pointer (for closing), and a value estimate.
-- **Safety spine:** 9 "laws" + 3 "gates" + operator "training-wheel" masks forbid illegal/
-  counter-trend/illiquid trades **before** the policy acts (logit −1e9), in both training
-  and live. A RiskManager guarantees total open risk never exceeds the remaining buffer.
+- **Safety spine:** 9 "laws" + operator "training-wheel" masks forbid illegal/counter-trend
+  trades **before** the policy acts (logit −1e9), in both training and live. A RiskManager
+  guarantees total open risk never exceeds the remaining buffer.
+  - **The 3 market-condition signals (formerly "gates"):** volatility (ATR 5m+4H), spread,
+    and stationarity (30-bar ADF) are now **OBSERVATION-ONLY by default** — the bot SEES them
+    in the state and learns to use them instead of being hard-blocked. Enforcement is
+    **phase-gated** (`config.TRAINING_PHASE`): in `PHASE_FREE` (default) they never block; in
+    `PHASE_CONSTRAINED` only the stationarity signal re-enforces. This turns the old
+    "stationary AND non-stationary" goal from a hard gate into a *learned* skill, and fixes the
+    ~98.7% open-lockout that stopped the policy ever training (2026-06-18 redesign).
+- **Episode (C10/C11):** training runs as **N trading days on ONE continuous account** (default
+  `TRAINING_DAYS=180`; `EVAL_DAYS=8` for a Barbershop window). The balance **carries forward** day
+  to day; a day that hits the trailing wall is force-flattened and **locked out for the rest of that
+  day** (it does NOT end the episode) and resets at midnight; the episode ends only at N days or a
+  **blown account** (equity ≤ 0). A **large end-of-day penalty** (`failed_day_penalty`, proportional
+  to how far a day finished below its target — worst for wall-hit days) makes **consistency** the
+  objective, not mere survival. The daily target is **day-opening-relative** (+2.5% of that day's
+  opening balance).
 - **Barbershop:** a separate, **read-only** Dash dashboard (+ an LLM "Risk Doctor") used
   **after** training to understand *why* the bot did what it did and to write better
   reward/penalty rules.
 
-**Two repos hold the identical project** (kept in sync):
-`https://github.com/monty313/final-rl-model-6_13` and
-`https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`.
+**Two operating modes (entered freely, NOT sequential):**
+- **Barbershop mode** — *"get the haircut before going to school."* Fast, operator-driven
+  diagnose-and-shape: pick a small window of challenge days, run the policy fast, watch
+  what breaks (which days fail and why), make one educated `OVERRIDES` edit,
+  repeat. Can happen **before, during, or after** full training (§4.10).
+- **Full Training mode** — long walk-forward runs + curriculum phases (Law School → Setup
+  Recognition → Full Market) that *generalize* the shaped policy across regimes (§4.6,
+  `colab/Quantra_Train.ipynb`). Uses the Barbershop-shaped policy as starting weights.
+
+**One active repo (full protocol in §4.13):**
+- **ACTIVE REPO** (the only working source of truth; all edits + commits happen here):
+  `https://github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-`
+- **FROZEN ARCHIVE** (a historical snapshot only — never edited, never read from, NOT a fallback
+  or restore target): `https://github.com/monty313/final-rl-model-6_13`
+
+**Known gaps (honest — stated in every overview; full detail in §7):** (1) **no real trained
+model yet** — the policy is synthetic-trained and hasn't run on real bars; this is the **#1
+active item** now that the gate-lockout blocker is fixed (the 3 gates became phase-gated
+observations, so `PHASE_FREE` trades freely — but that fix is **unproven on real EURUSD** until
+a real Barbershop run confirms it); (2) training now runs a **multi-day** episode (one continuous
+account; the daily wall re-anchors at midnight; a large failed-day penalty for missing target —
+C10/C11), but the −10% **permanent** max-overall wall is still an *observation* only (C12), not
+enforced — so a sim pass is not yet a guaranteed live-legal pass; (3) Barbershop Screen 1 is a
+labelled demo curve until a real pass-rate series is logged; (4) trade-autopsy attribution is
+input×gradient, not true SHAP.
+
+> **Standing rule — when logic changes, the docs change with it (everywhere it applies).** The
+> honesty contract is *docs == code*. Any change to a subsystem's LOGIC must be mirrored in EVERY
+> doc that describes it, in the SAME change — not just the code comment. Use this map:
+>
+> | If you change… (file) | Also update… |
+> |---|---|
+> | `STATE_DIM` / schema (`market_pipeline/feature_builder/schema.py`) | this guide §1/§4.11/§6, `tests/snapshots/state_vector.json` (re-pin), the JARVIS/Barbershop guides if they cite the width, the Perplexity Space instructions |
+> | reward weights/layers (`runtime/config.py` `RewardConfig`, `reward_engine/reward.py`) | the REWARD REFERENCE BLOCK at the bottom of `reward.py`, this guide §4.12, `barbershop/BARBERSHOP_GUIDE.md`, the Perplexity Space instructions |
+> | gate↔observation / `TRAINING_PHASE` (`law_mask_engine/engine.py`, `runtime/config.py`) | this guide §1/§4.12/§6/§7, `barbershop/BARBERSHOP_GUIDE.md`, the Perplexity Space instructions |
+> | Policy Registry / card / leaderboard (`policy_registry/registry.py`, `ftmo_passing/challenge_state.py`) | this guide §4.11, `artifacts/policy_registry/README.md` + `LEADERBOARD.md`, the Perplexity Space instructions |
+> | Barbershop loop / notebooks (`learning_system/barbershop_runner.py`, `colab/*.ipynb`) | this guide §4.10/§5, `barbershop/BARBERSHOP_GUIDE.md`, `HOW_TO_RUN.md` |
+> | JARVIS HUD / telemetry bridge (`jarvis_hud.html`, `barbershop/ws_broadcaster.py`) | `JARVIS_HUD_GUIDE.md`, `HOW_TO_RUN.md`, this guide §5 |
+>
+> Reverse applies too: if a doc statement no longer matches code, fix the doc — **preserve dated
+> IRAC history; correct only present-tense claims**. This rule is permanent and covers all current
+> AND future files.
 
 ---
 
 ## 2. Directory tree (the real layout)
 
 ```
-final rl model 6_13/
+RL-model-trading-bot-ppo-mlp_Claude-/      # the ACTIVE repo root
 ├── README.md                      # repo intro
 ├── REPO_MAP.md                    # high-level module map
 ├── INSTRUCTIONS.md                # live work queue (pending/agreed work)
@@ -50,7 +104,7 @@ final rl model 6_13/
 │   ├── 00_START_HERE.md
 │   ├── SCOPE_OF_WORK.md           # SOW (the spec)
 │   ├── SOW_2_BUILD_SPEC.md        # binding build spec
-│   ├── THE_TRADING_CODE.md        # the 9 laws + 3 gates (exact params/TFs)
+│   ├── THE_TRADING_CODE.md        # the 9 laws + 3 market-condition signals (exact params/TFs)
 │   ├── STATE_VECTOR.md            # every observation feature + group
 │   ├── REWARD_DESIGN.md           # the layered reward (L0–L6 + QUAD)
 │   ├── PPO_ENGINE.md              # actor/critic architecture + locked dials
@@ -72,12 +126,12 @@ final rl model 6_13/
 │   │   ├── resampler/resampler.py          # 1m → 5m/30m/4H, lookahead-safe as-of merge
 │   │   ├── feature_builder/
 │   │   │   ├── indicators.py               # BB, CCI, ATR, shifted-SMA, ADX, ADF, training-wheel params
-│   │   │   ├── schema.py                   # StateVectorSchema (STATE_DIM=203, block layout)
+│   │   │   ├── schema.py                   # StateVectorSchema (STATE_DIM=207, block layout)
 │   │   │   ├── builder.py                   # FeatureBuilder + offline precompute (memmap cache)
 │   │   │   └── RAW_INPUTS.md                # note on the raw-input block
 │   │   └── law_mask_engine/engine.py       # law states → action mask (incl. training wheels)
 │   ├── locked_core/               # 🔴 locked physics/laws (change needs sign-off)
-│   │   ├── laws/laws.py                     # the 9 directional laws + 3 gates
+│   │   ├── laws/laws.py                     # the 9 directional laws + 3 market-condition signals
 │   │   ├── risk_manager/risk.py             # raw_size→lots, no-overshoot (B5), margin ceiling
 │   │   ├── cost_layer/costs.py              # spread + slippage + $5 RT/lot (forex) costs
 │   │   └── platform_adapter/adapters.py     # MT5 / sim broker adapter interface
@@ -86,7 +140,7 @@ final rl model 6_13/
 │   │   └── validation/
 │   │       ├── walk_forward.py              # 7-seed walk-forward harness
 │   │       └── scoreboard.py                # pass-rate scoreboard
-│   ├── env/trading_env.py          # the RL env (sequential multi-symbol, PnL, breach, masks)
+│   ├── env/trading_env.py          # the RL env (multi-day episode, one account, breach=day-lockout, masks)
 │   ├── learning_system/            # the PPO trainer + reward
 │   │   ├── ppo_agent/
 │   │   │   ├── agent.py                     # ActorCritic (3×256) + PPOAgent (act / evaluate)
@@ -113,7 +167,7 @@ final rl model 6_13/
 │   └── acceptance.py               # acceptance gate
 │
 ├── barbershop/                    # 💈 the read-only diagnostics dashboard + Risk Doctor
-│   ├── dashboard.py               # the Dash app (5 screens) — `python barbershop/dashboard.py`
+│   ├── dashboard.py               # the Dash app (6 screens 0–6) — `python run_dashboard.py`
 │   ├── data.py                    # pure data layer (mock gen, loaders, transforms)
 │   ├── figures.py                 # Plotly figure builders
 │   ├── adapter.py                 # REAL telemetry (artifacts/telemetry/*.jsonl) → dashboard contract
@@ -138,10 +192,14 @@ final rl model 6_13/
 │   ├── snapshot.py                # state-vector snapshot guard (--check / --update)
 │   └── impact.py                  # change-impact graph
 │
-├── colab/Quantra_Train.ipynb      # Colab training notebook (walk-forward)
+├── colab/
+│   ├── Quantra_Train.ipynb        # FULL TRAINING mode notebook (7-seed walk-forward)
+│   └── Quantra_Barbershop.ipynb   # BARBERSHOP mode fast loop (8 cells; §4.10 / §4.14)
 │
 ├── data/        (gitignored)      # raw MT5 CSVs (data/raw/EURUSD_M1.csv, EURUSD_recent.csv, …)
-├── artifacts/   (gitignored)      # checkpoints + telemetry (artifacts/checkpoints, artifacts/telemetry)
+├── artifacts/   (gitignored*)     # checkpoints + telemetry (artifacts/checkpoints, artifacts/telemetry)
+│   └── policy_registry/           # one folder per policy (manifest/performance/compat — §4.11)
+│       └── README.md              # *the ONLY committed file under artifacts/ (registry guide)
 └── logs/        (gitignored)      # Barbershop runtime exports (suggested_rules.json, doctor_diagnoses.jsonl)
 ```
 
@@ -152,9 +210,9 @@ final rl model 6_13/
 ```
  1. DATA      data/raw/EURUSD_M1.csv  (real MT5 1m bars)
                   │  market_pipeline.data_loader.load_symbol
- 2. FEATURES  resampler → feature_builder → 203-feature observation (cached memmap)
+ 2. FEATURES  resampler → feature_builder → 207-feature observation (cached memmap)
                   │  market_pipeline.feature_builder
- 3. LAWS/MASK laws.py → law_mask_engine → legal action set (laws+gates+training wheels)
+ 3. LAWS/MASK laws.py → law_mask_engine → legal action set (laws + training wheels; market signals are observations)
                   │
  4. ENV       env/trading_env.py  (PnL, costs, margin, breach wall, daily reset)
                   │
@@ -164,7 +222,7 @@ final rl model 6_13/
                   │
  7. TELEMETRY diagnostics.telemetry_logger  → artifacts/telemetry/<run>.jsonl
                   │  (scripts/emit_real_telemetry.py is the producer)
- 8. BARBERSHOP barbershop/dashboard.py  → diagnose WHY (5 screens + Risk Doctor)
+ 8. BARBERSHOP barbershop/dashboard.py  → diagnose WHY (6 screens + Risk Doctor)
                   │  → logs/suggested_rules.json  (rules YOU approve to feed back into training)
  9. LIVE/DEMO live_bridge.live_runner  (DEMO first; same masks as training)
 ```
@@ -190,15 +248,42 @@ python tools/snapshot.py --check  # verify the observation layout hasn't drifted
 ```
 
 ### 4.2 Honest backtest on real bars (train on a slice, test on held-out)
-`scripts/real_backtest.py` loads real MT5 bars, trains the PPO brain on the first 70%,
-then runs the **deterministic** policy on the held-out tail and prints an
-MT5-Strategy-Tester-style report (ground-truth net = real account change).
+`scripts/real_backtest.py` is the **current SINGLE-SPLIT out-of-sample tool** (one train/test split):
+it loads real MT5 bars, trains the PPO brain on the first 70%, then runs the **deterministic** policy
+on the held-out tail and prints an MT5-Strategy-Tester-style report (ground-truth net = real account
+change). It is **operational today**; the full *rolling* walk-forward is §4.2a.
 ```
 python scripts/real_backtest.py --symbol EURUSD --path data/raw/EURUSD_recent.csv \
     --updates 40 --target 2.5 --risk 4.0
 ```
 Flags: `--updates` (PPO updates; 0 = untrained baseline), `--train_frac` (default 0.7),
 `--target` / `--risk` (daily % target / trailing %). Writes an equity-curve PNG to `data/`.
+
+> **`--path` now defaults to `None` (fix, 2026-06-18).** Omitting `--path` makes
+> `load_symbol` resolve the bars itself — Parquet cache → Drive mount → `gdown`
+> auto-download by registered Drive file ID — instead of raising `FileNotFoundError` on a
+> clean checkout. So on a fresh machine with no local CSV you can just run
+> `python scripts/real_backtest.py --symbol EURUSD --updates 40`. (Previously `--path`
+> defaulted to a hardcoded CSV and was always wrapped in `Path(...)`, which blocked the
+> very first real run — the gateway to a real FTMO pass. See the IRAC in the script header.)
+
+### 4.2a Rolling walk-forward / out-of-sample validation (the locked protocol, operational)
+`scripts/walk_forward_eval.py` runs the **locked walk-forward protocol** — 12-month train / 2-month
+test / 1-month step, N seeds (default 7) — on real bars. It is **additive glue**: it supplies the
+real `eval_fn` that `quantra/ftmo_passing/validation/walk_forward.py` always required (the protocol +
+`PromotionGate` + `Scoreboard` are unchanged). Per (window, seed) it slices the cached features to the
+window's train/test spans (no feature rebuild), trains a **fresh seeded** brain on the train span,
+deterministic-evaluates on the held-out test span (via `barbershop_runner.run_pass`), and returns a
+`RunResult`; then it prints the `Scoreboard` summary + the `PromotionGate` decision.
+```
+python scripts/walk_forward_eval.py --symbol EURUSD --updates 200            # default 7 seeds
+python scripts/walk_forward_eval.py --symbol EURUSD --seeds 3 --updates 400  # fewer seeds, more updates
+```
+Flags: `--updates` (PPO updates per window×seed), `--seeds` (default 7), `--target`/`--risk`.
+**Needs ~14+ months of bars** to produce even one 12/2/1 window (a multi-year history to be
+meaningful); for a quick check use the single-split §4.2. *(Known gap: `real_backtest.py`'s report
+still uses a crude "hit target at least once" pass flag; real per-day pass counting there is deferred
+— the rolling harness above uses real per-day rows via `run_pass`.)*
 
 ### 4.3 Produce real telemetry for the Barbershop (the PRODUCER)
 `scripts/emit_real_telemetry.py` runs the deterministic policy over a held-out slice of
@@ -262,13 +347,194 @@ Inject per day with `env.reset(challenge=make_challenge(...))`.
 laws/gates/training-wheel masks as training (discipline transfers). A one-command demo
 launcher is on the queue (see `INSTRUCTIONS.md`).
 
+### 4.10 The Barbershop Fast Loop (`colab/Quantra_Barbershop.ipynb`)
+
+> **Status:** 🟡 new system — the notebook is a runnable **skeleton**. Loop plumbing (live
+> output, checkpoint-on-interrupt, Policy Registry write with auto-naming, ngrok dashboard)
+> is real; the one integration point — `barbershop_run_day()` — ships as a clearly-labelled
+> `DEMO_MODE` stub (placeholder metrics) until it is wired to `TradingEnv`.
+
+**What it is.** Barbershop *mode* (§1) made operational: *"get the haircut before going to
+school."* You pick a small window of FTMO challenge days, run the policy fast, watch what
+breaks, make **one** educated edit (via `OVERRIDES`, §4.12), and repeat. It can run
+**before, during, or after** Full Training (§4.6) — the two modes are not sequential.
+
+**Inputs (top of the notebook, Cell 3):**
+- `POLICY_NAME` — operator label for the save (the *final* name is auto-generated, §4.11).
+- `START_DATE` — where in the data the challenge window starts (e.g. `"2023-03-01"`).
+- `N_DAYS` — consecutive FTMO challenge days to train on (e.g. `8`).
+- `N_PASSES` — how many times the loop repeats over those `N_DAYS`.
+- `CHECKPOINT_INTERVAL` — save weights + telemetry + registry every N passes.
+- `RESUME_FROM` — checkpoint path to continue from, or `None` to start fresh.
+
+**Live output (printed during training, after every pass — not at the end):**
+```
+Pass 3/20
+  Day 1: PASS   | +2.3% | DD -1.1% | 5 trades
+  Day 2: FAIL   | -1.8% | DD -4.0% BREACHED | 2 trades
+  Day 3: PASS   | +2.6% | DD -0.8% | 7 trades
+  ...
+  Summary: 5/8 passed | Avg P&L: +0.9% | Avg DD: -1.9% | Avg trades/day: 4.8
+```
+The **#1 diagnostics** are the per-day PASS/FAIL, the DD path (and any **BREACHED**), and the
+**trade count**. In `PHASE_FREE` the bot is no longer blocked, so a low trade count now means
+the **policy itself** is choosing not to trade (an actor/reward signal to shape), not a gate
+lockout. (In `PHASE_CONSTRAINED`, a "stat-blocked %" column shows how often the stationarity
+signal blocked opens.)
+
+**Stop / resume.** Hit Colab's stop button any time: the loop **catches the interrupt and
+saves a clean checkpoint before dying** — you never lose weights on stop. Setting
+`RESUME_FROM` to a checkpoint continues from that exact point; the Policy Registry (§4.11)
+tracks what was already done.
+
+**Visualization (dual mode).** (1) **Inline** charts in the notebook (Cell 7) — Screen 1
+wall + Screen 3 day replay rendered via `barbershop/figures.py`
+(`training_wall_figure`, `candlestick_figure`). (2) **ngrok tunnel** (Cell 8) auto-starts
+the full Dash app (`barbershop.dashboard.make_app`) in a background thread so you can open
+all **6 screens + the Risk Doctor** in your browser. Telemetry is auto-emitted to
+`artifacts/telemetry/<run>.jsonl` after every checkpoint so the Barbershop always has fresh
+data (canonical real-bar producer: `scripts/emit_real_telemetry.py`).
+
+**Market-condition signals reminder.** The 3 former gates (volatility, spread, stationarity)
+are now **observation-only** in `PHASE_FREE` (default) — the bot SEES them and learns to trade
+both **stationary AND non-stationary** regimes itself, rather than being hard-blocked. Set
+`training_phase = "constrained"` only when you want the stationarity signal to re-enforce as a
+late hardening step (§4.12, §7). There is no `adf_p_value_threshold` to tune anymore.
+
+### 4.11 The Policy Registry (`artifacts/policy_registry/<policy_name>/`)
+
+Every policy gets a saved **identity** so you can answer: *"What is this policy's
+perspective on how to pass the FTMO challenge?"* — what config produced it, what it saw, and
+how well it passed. Written by the Barbershop notebook (Cell 6); read by you, the dashboard,
+and the Risk Doctor. **Three files per policy** (full reader's guide:
+`artifacts/policy_registry/README.md`):
+
+1. **`manifest.json`** — auto-generated at save time, **never hand-written**: `policy_name`
+   (auto, see below), `auto_name_basis` (the diff in plain tokens), `created`, `base_policy`
+   (what it resumed from, or `null`), `data_window` (`start` + `n_days`),
+   `n_passes_completed`, `state_dim`, `training_wheels`, `overrides_applied` (the full
+   `OVERRIDES` dict), `consecutive_loss_days` (the current end-of-run back-to-back failed-day
+   streak from `ChallengeState`, C14), `compatibility_signature`.
+2. **`performance.json`** — updated after every pass: `pass_history` (per pass:
+   `days_passed`/`days_failed`/`avg_pnl`/`avg_dd`/`breach_count`/`avg_gate_block_rate`),
+   `best_pass`, `overall_pass_rate`.
+3. **`compatibility.sig`** — a hash of **state_dim + reward-layer shape + law-parameter
+   fingerprint**, checked on `RESUME_FROM` (§4.12).
+
+**Auto-name generation (NEVER hardcoded).** The folder name is **derived from the
+`OVERRIDES` diff vs the baseline config** — never typed by hand or invented by an assistant.
+Each meaningful change becomes a short token; tokens join with `-` behind a `v<N>` that
+increments from `base_policy`. *Example:* set `training_phase = "constrained"` **and** turn
+`training_wheels` off, resumed from `v1-baseline` → **`v2-constrained-wheelsoff`**. The tokens
+come straight from the `OVERRIDES` diff vs the baseline config — never typed by hand.
+Monty may rename a policy afterward, but the auto-name is always generated first and recorded.
+
+Registry contents are **git-ignored** (large + run-specific); the committed files are
+`README.md` and **`LEADERBOARD.md`** (a static, manually-maintained leaderboard). **Checkpoint
+I/O is wired notebook-side** (Barbershop Cell 4 loads a saved brain after a compatibility check;
+Cell 5 saves weights every `CHECKPOINT_INTERVAL` and on a clean interrupt — payload
+`{state_dict, state_dim, compatibility_signature}`). Persist real checkpoints/manifests to
+**Google Drive** (the repo is not your backup — see §4.13).
+
+### 4.12 Runtime Override System (the `OVERRIDES` dict)
+
+After a Barbershop run you decide what to change — and you make that change **inside the
+notebook**, not by editing source files and not by asking an LLM to patch code every time. A
+runtime `OVERRIDES` dict (Cell 3) is **injected into the env/training loop at launch without
+touching `quantra/runtime/config.py` or `laws.py`.** The exact dict used is saved to the
+Policy Registry (§4.11) for every run, so you always know which configuration produced which
+result. Tuneable knobs:
+
+| Knob | Default | What it does (relative to passing) |
+|---|---|---|
+| `training_phase` | `"free"` | `"free"` = the 3 market-condition signals are **observation-only** (the bot trades freely and learns them); `"constrained"` = the stationarity signal re-enforces (blocks new opens when non-stationary). |
+| `training_wheels` | `True` | Enforce (`True`) / remove (`False`) the counter-trend OPEN masks (CCI/BB on 30m+4H). |
+| `daily_target_pct` | `2.5` | Your daily profit goal (passed to `make_challenge`). |
+| `daily_risk_pct` | `4.0` | The trailing-wall risk allowed to make it (passed to `make_challenge`). |
+| `permanent_dd_pct` | `10.0` | The −10% permanent max-overall-loss wall — an **observation** (the C12 `dist_to_perm_dd` scalar), NOT enforced in training. |
+| reward weights (6) | see `RewardConfig` | `net_pnl_weight` (1.0, keep) · `step_pnl_weight` (1e-4) · `daily_progress_weight` (1e-3) · `drawdown_pain_weight` (5e-4) · `drawdown_pain_steepness` (4.0) · `trade_quality_weight` (5e-5). Shape *how* the bot passes; resume-safe (signature unchanged). `failed_day_penalty` (5.0) is a challenge value, mirrored in `RewardConfig`. |
+
+**The 3 market-condition signals are no longer tunable thresholds.** They became phase-gated
+observations (the old `adf_p_value_threshold` / `atr_min_multiplier` / `spread_max_pips` knobs
+were **removed**, 2026-06-18): the bot now *learns* both stationary AND non-stationary trading
+from seeing the signals, rather than being hard-blocked. The only enforcement knob is
+`training_phase`.
+
+> **Reward weights are LIVE and operator-tunable (C16/C17).** Six plain-English weights in
+> `quantra/runtime/config.py` `RewardConfig` — `net_pnl_weight` (Layer-0, dominant; keep 1.0),
+> `step_pnl_weight`, `daily_progress_weight`, `drawdown_pain_weight`, `drawdown_pain_steepness`,
+> `trade_quality_weight` — are consumed by `quantra/learning_system/reward_engine/reward.py`
+> (`decompose()`/`_pain()`); `failed_day_penalty` is a challenge-level value mirrored in
+> `RewardConfig` for visibility. They **are** part of `OVERRIDES` (diffed vs baseline → the
+> auto-name). Tuning a weight value, or the math INSIDE an existing layer, is **resume-safe** — the
+> compatibility signature tracks the reward LAYER arrangement (the `decompose()` L-keys), not the
+> weights. The canonical table is the **REWARD REFERENCE BLOCK** at the bottom of `reward.py`.
+> *(The older "9-weight redesign" was superseded — it is not the live design.)*
+
+**What triggers a `CompatibilityError`.** If an override changes **`STATE_DIM`** or the reward
+shape in a way that breaks an existing checkpoint's assumptions, resuming raises a
+**`CompatibilityError`** with a plain-English reason for *why* the policy must start fresh — and
+it **saves the old checkpoint first**. Old policies are **never deleted automatically**. Safe to
+resume across: toggling `training_phase` / `training_wheels`, changing the challenge numbers.
+
+> 🔴 **Locked-parameter guard.** γ/λ, Layer-0 dominance, the 9 laws params, the action-mask
+> logic, and `STATE_DIM` are locked: changing them is a **proposed amendment requiring Monty's
+> sign-off**, not a routine override.
+
+### 4.13 Repo Safety Protocol (one active repo)
+
+There is **one active repo**. The old repo is a frozen historical archive, not a live target:
+
+| Role | Repo | Rule |
+|---|---|---|
+| **ACTIVE REPO** | `github.com/monty313/RL-model-trading-bot-ppo-mlp_Claude-` | The only working source of truth. All code changes, new files, and commits happen here. |
+| **FROZEN ARCHIVE** | `github.com/monty313/final-rl-model-6_13` | A historical snapshot only. **Never edited, never read from, never pushed to, and NOT a fallback / restore / sync target.** Do not treat it as current. |
+
+**Protocol.**
+1. Do all work in the **active** repo (this one); never reference the archive as current state.
+2. **Push your work regularly** (and before any major change) — your real safety net is the git
+   history of the active repo plus checkpoints on Google Drive, NOT the archive.
+3. Recover from a bad change via the active repo's own git history (revert/reset to a known-good
+   commit) — never by cloning the archive.
+4. **Never read from, edit, or sync the archive repo.** It exists only as a frozen record.
+
+### 4.14 Colab GPU Setup (80% target · cache-once · cell order)
+
+Monty runs **Colab Pro**; training should use **~80% of whatever GPU/CPU instance is
+assigned**. The hardware auto-optimizer (`quantra/runtime/optimizer.py`, `plan()` /
+`print_report()`) already does this — the Barbershop notebook **calls it at startup**
+(Cell 1, via `from quantra.runtime import plan, print_report, UtilizationMonitor`). It races
+CPU vs GPU on the real four-head workload, picks the faster device (preferring CPU on a
+near-tie to save GPU hours), and sizes parallelism to ~80%.
+
+**Critical performance rule — cache once, then live on GPU.** The data pipeline (CSV parse →
+feature build → memmap cache) runs **once at startup** and the cache is reused forever; every
+second of CPU setup is a second you're not seeing results. The notebook's **8-cell order**
+enforces this:
+
+| Cell | Does | Skips if… |
+|---|---|---|
+| 1 | Clone active repo · mount Drive · install deps · race hardware (~80%) | deps sentinel exists |
+| 2 | Load data + build features → memmap cache | cache exists |
+| 3 | Set `INPUTS` + `OVERRIDES` (**operator edits here**) | — |
+| 4 | Load or init policy (resume or fresh) + compatibility check | — |
+| 5 | **Training loop** (GPU-bound · live output · clean stop-on-interrupt) | — |
+| 6 | Auto-emit telemetry → write Policy Registry entry (auto-named) | — |
+| 7 | Inline Barbershop charts (`figures.py`) | — |
+| 8 | Start ngrok tunnel → full dashboard | — |
+
+Checkpoints auto-save to **Drive** every `CHECKPOINT_INTERVAL` passes, so a Colab disconnect
+resumes from the last Drive checkpoint (not from zero).
+
 ---
 
-## 5. The Barbershop — 5 screens + Risk Doctor
+## 5. The Barbershop — 6 screens (0–6) + Risk Doctor
 
 A read-only post-training diagnostic tool. It **never** writes outside `logs/` and never
-changes training, rewards, or the policy.
+changes training, rewards, or the policy. The systematic flow is the **Haircut Procedure**
+(`barbershop/BARBERSHOP_GUIDE.md`): **Mirror → Diagnose → Approve → Retrain → Recheck**.
 
+0. **Screen 0 — How to Use.** Renders `barbershop/BARBERSHOP_GUIDE.md` inside the dashboard.
 1. **Screen 1 — Training Wall.** Pass-rate over training iterations; green rising / yellow
    flat / red falling; an 80% "Consistent Pass Zone" line; a plateau banner. *(On a real
    run with no logged pass-rate series, it shows an honest "Demo curve" label.)*
@@ -282,9 +548,14 @@ changes training, rewards, or the policy.
    MIDDLE = action probabilities (chosen = gold border) + masked/legal label, RIGHT =
    **input×gradient attribution** (real, labelled *not Shapley*). Panels grey out honestly
    if a run lacks the data.
-5. **Screen 5 — Pattern Finder.** Auto-scans losing trades, surfaces the top patterns in
-   plain English, with **APPLY** (export to `logs/suggested_rules.json`) / IGNORE / MODIFY.
-6. **Risk Doctor (chat box, all screens).** A local LLM grounded in
+5. **Screen 5 — Pattern Finder.** Auto-scans losing trades, surfaces the top patterns in plain
+   English, with **APPLY** / MODIFY / IGNORE. APPLY only **exports a suggested rule** (into the
+   next run's `OVERRIDES` / `logs/suggested_rules.json`) — it does **not** edit code or place a
+   trade; you still launch the run.
+6. **Screen 6 — Repo Map.** A live import-dependency graph of the whole repo
+   (`barbershop/repo_graph.py`, built from `ast`); click a node to read that file's docstring +
+   its first `COUPLING` note. *(Needs `dash-cytoscape`; shows a friendly note if missing.)*
+7. **Risk Doctor (chat box, all screens).** A local LLM grounded in
    `docs/MLP_INTERPRETABILITY_LAYER.md` (loaded every call, condensed to fit context). It
    answers in 6 sections (📍 looking at / 🔍 see / 🎯 means for passing / ✅ do next /
    ❌ don't / 📊 confidence), refuses live-trade questions, never fabricates (says
@@ -300,7 +571,8 @@ changes training, rewards, or the policy.
 - `SYMBOLS` = EURUSD, XAUUSD, GBPUSD, US30; per-symbol `POINT_SIZE`, `CONTRACT_SIZE`,
   `SLIPPAGE_POINTS`, `ASSET_CLASS`, Drive file IDs.
 - `ChallengeConfig` defaults + `make_challenge(...)`; `FTMO_ON_BOUNDS` / `FTMO_OFF_BOUNDS`.
-- `TRAINING_WHEELS` (default True), `INCLUDE_RAW_INPUTS` (default True; STATE_DIM 203/185).
+- `TRAINING_WHEELS` (default True), `TRAINING_PHASE` (default `PHASE_FREE`), `permanent_dd_pct`
+  (default 10%), `INCLUDE_RAW_INPUTS` (default True; STATE_DIM 207/189).
 - `RiskConfig` (stop_atr_mult, lot_step, min/max lot, per-trade risk frac),
   `CostConfig` ($5 RT/lot forex), `HardwareConfig` (≈80% util, CPU-first).
 - Paths: `DATA_DIR`, `ARTIFACT_DIR`, `CHECKPOINT_DIR`, `TELEMETRY_DIR`, `REPORT_DIR`.
@@ -308,10 +580,11 @@ changes training, rewards, or the policy.
 `barbershop/config.py`: dashboard paths, `DOCTOR_API_BASE/MODEL/KEY/MAX_TOKENS`,
 `DOCTOR_MANUAL_MAX_CHARS`, thresholds (target/wall/DD-buffer colours), timeframe windows.
 
-🔴 **Locked (need sign-off to change):** γ/λ in `gae.py`; the 9 laws/3 gates params in
+🔴 **Locked (need sign-off to change):** γ/λ in `gae.py`; the 9 laws params in
 `indicators.py`/`laws.py`; Layer-0 dominance + pain ramp + QUAD ceiling in `reward.py`;
 the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
-`tools/snapshot.py --update`).
+`tools/snapshot.py --update`). *(The 3 market-condition signals are now observation-only +
+phase-gated via `TRAINING_PHASE` — see §4.12.)*
 
 ---
 
@@ -325,17 +598,24 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
   no-overshoot sizing, margin, PnL decomposition — is arithmetically correct.
 - The Barbershop: 37 tests pass; real telemetry flows end-to-end; honesty guards in place.
 
-**Known gaps / honest caveats (the things to fix next):**
-1. **The bot barely trades on real EURUSD** — the gates (chiefly the *stationarity* gate,
-   open ~5.6%, + ATR-liquidity) shut the trade window ~98.7% of the time. This is the
-   binding blocker to passing; it's a calibration issue, not an arithmetic bug.
-2. **No real trained model yet** — the brain has only been trained on synthetic data; it
-   doesn't transfer to real bars (≈9 trades / 5,565 bars). A real walk-forward run is needed.
-3. **One wall, not two** — the sim models a single daily-re-anchored trailing wall; real
-   FTMO has TWO limits (max daily loss from day-start AND a permanent max-overall loss).
-   A sim pass does not yet guarantee a live-legal pass.
-4. **Barbershop Screen 1 (training wall)** is a labelled demo curve until the trainer logs
-   a real pass-rate series; the autopsy's attribution is input×gradient, not true SHAP.
+**Known gaps / honest caveats (state these in every overview):**
+1. **No real trained model yet — the #1 active item.** The policy has only been trained on
+   **synthetic data**; it does not transfer to real bars (≈9 trades / 5,565 bars on the old
+   gated build). A real **Barbershop run on real EURUSD is the first step** (then Full Training
+   walk-forward). *(The former #1 — the ~98.7% gate lockout — is now architecturally **fixed**:
+   the 3 gates became phase-gated market-condition **observations** (2026-06-18), so in
+   `PHASE_FREE` the policy trades freely. But that fix is **unproven on real bars** until a real
+   run confirms the policy actually trades sensibly and passes — so it folds into this gap.)*
+2. **Permanent wall not enforced (one enforced wall, not two).** Training now runs a faithful
+   **multi-day** episode (C10): one continuous account, the daily trailing wall **re-anchored each
+   midnight**, a day's breach locks out that day (not the episode), and a large **failed-day
+   penalty** (C11) punishes missing a day's target. But the second FTMO limit — the **−10% permanent
+   max-overall** wall — is still an **observation only** (the C12 `dist_to_perm_dd` scalar), **not
+   enforced** in training. So a sim pass does **not** yet guarantee a live-legal pass.
+3. **Screen 1 demo curve.** Barbershop **Screen 1** shows a labelled **demo curve** until the
+   trainer logs a real pass-rate series.
+4. **input×gradient, not SHAP.** The trade-autopsy attribution (Screen 4) is
+   **input×gradient**, honestly labelled — not true Shapley values.
 
 ---
 
@@ -350,11 +630,36 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
 - **GAE:** Generalized Advantage Estimation (λ=0.97) — smooths the advantage.
 - **Probability ratio r = π_new/π_old; PPO clip (ε):** caps each update to a small,
   stable step.
-- **Laws (9) / Gates (3):** the legal-action spine — directional laws ban the wrong
-  direction; gates (ATR-liquidity, spread, stationarity) ban new opens in bad conditions.
+- **Laws (9):** the directional legal-action spine — directional laws ban the wrong direction
+  (logit −1e9) before the policy acts. (The former "3 gates" are now market-condition
+  observation signals — see below.)
+- **Market-condition signals (3):** volatility (ATR 5m+4H), spread, stationarity (30-bar ADF) —
+  formerly "gates". Now **observation-only by default**: the bot sees them in the state and
+  learns both stationary AND non-stationary trading. Enforcement is **phase-gated**
+  (`config.TRAINING_PHASE`): `PHASE_FREE` = never block; `PHASE_CONSTRAINED` = only stationarity
+  re-enforces (§4.12, §7).
 - **Training wheels:** operator counter-trend OPEN blocks (CCI/BB on 30m+4H).
-- **The wall / breach:** the trailing drawdown limit; touching it = breach = challenge failed.
-- **Target:** the daily profit goal (+2.5%).
+- **`OVERRIDES`:** the runtime override dict (§4.12) injected at launch — tune `training_phase`,
+  `training_wheels`, and the challenge numbers without editing `config.py` or `laws.py`; saved
+  per run to the Policy Registry.
+- **Policy Registry:** `artifacts/policy_registry/<name>/` — a policy's saved identity
+  (auto-named manifest + performance + compatibility signature, §4.11).
+- **Barbershop mode / Full Training mode:** the two operating modes (§1) — fast
+  diagnose-and-shape vs long walk-forward generalization; entered freely, not sequential.
+- **`TRAINING_PHASE`:** the enforcement switch — `PHASE_FREE` (default, the 3 market-condition
+  signals are observation-only) vs `PHASE_CONSTRAINED` (the stationarity signal re-enforces).
+- **`distance_to_permanent_dd`:** the C12 account-block observation — runway (1.0 → 0.0) to the
+  −10% permanent max-overall-loss wall (observation only, not enforced in training).
+- **Episode / `episode_days` (C10):** an episode is N trading days on ONE continuous account
+  (`TRAINING_DAYS=180` / `EVAL_DAYS=8`); the balance carries forward, a breach locks out the day
+  (not the episode), and it ends at N days or a blown account (equity ≤ `ACCOUNT_FLOOR_EQUITY`).
+- **`failed_day_penalty` (C11):** the large end-of-day reward penalty for missing a day's target,
+  `-failed_day_penalty × day_shortfall_fraction` (0 at target, 1.0 if flat, >1 for wall-hit days) —
+  applied at the midnight boundary to drive consistency.
+- **Day lockout:** after a daily breach (or an OFF-mode stop-for-day), new opens are masked for the
+  rest of that day; `reset_day()` lifts it at midnight.
+- **The wall / breach:** the trailing drawdown limit; touching it = breach = day locked out (C10).
+- **Target:** the daily profit goal (+2.5% of that day's opening balance).
 - **Barbershop:** the read-only diagnostics dashboard. **Risk Doctor:** the LLM that
   explains the telemetry, grounded in `docs/MLP_INTERPRETABILITY_LAYER.md`.
 - **Telemetry:** the per-decision JSONL log (`artifacts/telemetry/<run>.jsonl`) the
@@ -365,3 +670,93 @@ the action-mask logic in `engine.py`; `STATE_DIM`/schema (re-pin snapshot via
 *For deeper specs see `docs/` (THE_TRADING_CODE, STATE_VECTOR, REWARD_DESIGN, PPO_ENGINE,
 MLP_INTERPRETABILITY_LAYER). For the Barbershop fixes log see `barbershop/REMEDIATION_PLAN.md`.
 For cross-file couplings before any refactor see `COUPLINGS.md`.*
+
+---
+
+## Update Log (IRAC)
+
+- **[2026-06-18]** Added the Barbershop fast-loop system to the guide (§4.10–§4.14), rewrote
+  §1/§7 for the two-modes + repo-safety + five-known-gaps model, and applied the
+  `real_backtest.py --path` fix note (§4.2).
+  - **I:** The operator needed a fast, in-notebook diagnose-and-shape loop (Barbershop mode)
+    with a saved policy identity, a no-code-edit override system, an unambiguous primary/
+    fallback repo rule, and an honest Colab-performance pattern — none of which were
+    documented, and the repo roles in the brief contradicted the operator's correction.
+  - **R:** Operator brief Sections 1–11 + the corrected repo roles (ACTIVE =
+    `RL-model-trading-bot-ppo-mlp_Claude-`, FALLBACK = `final-rl-model-6_13`) + standing
+    rules (FTMO framing, ADF-purpose note everywhere, 5 gaps in every overview, auto-names
+    from the `OVERRIDES` diff, no invented files).
+  - **A:** Wrote §4.10 (Fast Loop), §4.11 (Policy Registry + auto-naming), §4.12 (Runtime
+    Override System + `CompatibilityError`), §4.13 (Repo Safety Protocol), §4.14 (Colab GPU
+    Setup); split §7 into 5 gaps with gate-lockout as #1; added the ADF stationary/
+    non-stationary note wherever the gate appears; created
+    `colab/Quantra_Barbershop.ipynb` (8-cell skeleton) and
+    `artifacts/policy_registry/README.md`; fixed `scripts/real_backtest.py` `--path`.
+  - **C:** Monty and any LLM can now run, save, resume, and reason about a Barbershop policy
+    against the single mission — repeatedly passing the FTMO challenge — and always know
+    which repo is safe to edit. New systems are clearly marked as a runnable skeleton, not
+    claimed as finished, preserving the project's honesty contract.
+
+- **[2026-06-18]** Synced the guide to the gates→observations redesign + C12 (STATE_DIM 203→207).
+  - **I:** The guide described the 3 "gates" as hard blockers, the `OVERRIDES` as gate-threshold
+    knobs, STATE_DIM=203, and "gate lockout" as the #1 gap — all now contradicted by the code
+    (gates are phase-gated observations; STATE_DIM=207; the lockout is architecturally fixed).
+  - **R:** Operator/Perplexity redesign (2026-06-18) + the honesty rule (docs must match code).
+  - **A:** Rewrote §1 (safety spine → 9 laws + 3 phase-gated market-condition observation
+    signals; STATE_DIM 207), §4.10 (live output drops "gate blocks"; the #1 diagnostic is now
+    PASS/FAIL + DD + trade count), §4.12 (`OVERRIDES` now `training_phase`/`training_wheels`/
+    challenge numbers; reward weights flagged as planned), §6/§7 (gate-lockout reframed as
+    fixed-but-unproven; "no real model" is the new #1; −10% is a C12 observation, not enforced),
+    the glossary, and all STATE_DIM/gate references.
+  - **C:** The guide and Perplexity mentor now tell the true story — the bot LEARNS market
+    conditions in PHASE_FREE instead of being locked out — so operators reason about the real
+    system, and the honesty contract (docs == code) is restored.
+
+- **[2026-06-19]** Synced the guide to C10 (multi-day episode) + C11 (failed-day penalty).
+  - **I:** The guide described a single-window episode that ended on the first breach, and a daily
+    target fixed to account_size — both now superseded by the multi-day continuous-account model.
+  - **R:** Operator spec 2026-06-19 (C10/C11; C13 dropped) + the honesty rule (docs == code).
+  - **A:** Added the §1 Episode bullet (N days on one account; breach = day lockout; blown-account
+    end; large failed-day penalty; day-opening-relative target), reframed §7 gap #2 (multi-day is
+    in; the −10% permanent wall is still observation-only, not enforced), updated the env one-liner,
+    and added glossary entries (episode/episode_days, failed_day_penalty, day lockout).
+  - **C:** The guide now describes the real training contract — a faithful many-day account where a
+    bad day costs carried-forward equity AND a big reward hit — so operators and the Perplexity
+    mentor reason about consistency-passing, which is the actual mission.
+
+- **[2026-06-19]** Docs-sync rewrite (audit Fix 6 + Perplexity-Space alignment) + a standing
+  docs-track-code rule.
+  - **I:** The guide still said reward weights were "PLANNED, not yet wired" (false since C16/C17),
+    framed `final-rl-model-6_13` as a live FALLBACK/restore target (the operator froze it as an
+    archive), listed "5 screens" (now 6 + Repo Map), and omitted that `LEADERBOARD.md` is committed,
+    that policy cards carry `consecutive_loss_days`, and that Barbershop checkpoint I/O is wired.
+  - **R:** Operator brief (rewrite Perplexity Space + RAG docs to current truth; reflect locked
+    decisions) + the honesty rule (docs == code) + the operator's meta-instruction: *when logic
+    changes in related files, update there too where it applies.*
+  - **A:** §1 reworded to ONE active repo + a FROZEN ARCHIVE; added a standing **docs-track-code**
+    rule with a subsystem→docs map; §4.11 (LEADERBOARD committed, `consecutive_loss_days` on the
+    manifest, checkpoint I/O wired); §4.12 reward block rewritten to the live 6-weight C16/C17 design
+    + a reward-weights `OVERRIDES` row; §4.13 reframed (active repo only; archive never read/edited);
+    §5 → 6 screens (0–6) incl. Repo Map, Pattern Finder APPLY clarified as export-only; §2 tree root
+    relabeled. Dated IRAC history left intact (present-tense claims only). Companion: appended **The
+    Haircut Procedure** to `barbershop/BARBERSHOP_GUIDE.md`; the Perplexity Space instruction text is
+    delivered separately for the operator to paste.
+  - **C:** The guide, the Barbershop guide, and the Perplexity mentor now tell the same true story —
+    one active repo, a live tunable reward, a complete 6-screen Barbershop, and a wired registry — and
+    the new standing rule keeps every doc in lock-step with the code on future changes, protecting the
+    docs == code honesty contract the whole project relies on.
+
+- **[2026-06-19]** Issue-3 (Phase C) — documented OOS validation: single-split + operational rolling
+  walk-forward.
+  - **I:** The only runnable OOS tool was the single-split `scripts/real_backtest.py`; the locked
+    walk-forward harness existed but had no eval_fn ("e2e wiring lands in M15"), so a real rolling
+    walk-forward couldn't be run, and the guide didn't distinguish the two.
+  - **R:** Operator Phase C (make walk-forward operational; ADD glue, don't touch the locked protocol)
+    + the standing docs-track-code rule (§1).
+  - **A:** Reframed §4.2 as the SINGLE-SPLIT OOS tool; added §4.2a for `scripts/walk_forward_eval.py`
+    (wires the locked 12/2/1-month, 7-seed protocol to a real eval_fn — train fresh per window×seed,
+    deterministic-eval via `run_pass`, Scoreboard + PromotionGate), with run commands and the honest
+    "needs ~14+ months of bars" + the deferred `real_backtest` per-day pass-rate note.
+  - **C:** Operators now know exactly which OOS tool to run today (single-split) vs the rolling
+    walk-forward, so a brain can be judged on rolling out-of-sample windows before promotion — the real
+    test of repeatable passing — with the docs matching the code.

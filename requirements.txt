@@ -25,6 +25,12 @@ seaborn>=0.12              # correlation heatmap + atlases   [colab-extra]
 dash>=2.14                # Barbershop dashboard UI            [colab-extra]
 openai>=1.0               # Risk Doctor local-LLM client       [colab-extra]
 
+# --- live HUD + repo map (C22, 2026-06-19). All OPTIONAL/dep-light: the repo-graph CORE + the ws
+# event-mapping are pure stdlib; these only power the LIVE rendering. ---
+websockets>=12.0          # jarvis_hud.html live stream (barbershop/ws_broadcaster.py)  [colab-extra]
+networkx>=3.1             # OPTIONAL repo_graph.to_networkx() export                     [colab-extra]
+dash-cytoscape>=0.3.0     # Barbershop Screen 6 (Repo Map) interactive graph            [colab-extra]
+
 # --- data IO ---
 pyarrow>=14.0              # Parquet cache                    [colab-extra]
 gdown>=5.1                 # pull price CSVs from Drive by ID [colab-extra]

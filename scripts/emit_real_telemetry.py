@@ -207,7 +207,9 @@ def main():
         total_steps += 1
         step_in_day += 1
 
-        # Day rollover (real calendar day change) -> close the day, start the next.
+        # Day rollover (real calendar day change) -> close the day, start the next. The day-id basis
+        # is test.dates, built by prepare_symbol_data at 00:00 CE(S)T (cfg.CHALLENGE_TZ, Europe/Prague)
+        # [2026-06-19], so this rollover fires at the SAME CE(S)T boundary as the env's daily reset.
         if not done:
             obs = obs2
             new_date = test.dates[env.t] if test.dates is not None else 0

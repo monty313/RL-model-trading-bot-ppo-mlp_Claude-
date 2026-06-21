@@ -7,6 +7,32 @@ REAL metrics of whatever was trained — no synthetic data, no cherry-picking.
 Usage:
     python scripts/real_backtest.py --symbol EURUSD --path data/raw/EURUSD_recent.csv \
         --updates 40 --target 2.5 --risk 4.0
+    # ...or omit --path to let load_symbol resolve the bars itself (Parquet cache ->
+    # Drive mount -> gdown auto-download by registered Drive file ID):
+    python scripts/real_backtest.py --symbol EURUSD --updates 40
+
+Rulebook (for the Risk Doctor / any LLM reading this): docs/MLP_INTERPRETABILITY_LAYER.md.
+This script only MEASURES a policy on real held-out bars; it is not in the
+State -> Law -> Hidden -> Heads -> Risk -> Reward -> Outcome causal chain.
+
+Update Log (IRAC):
+- [2026-06-18] Fix: --path now defaults to None and is passed through as
+  ``Path(a.path) if a.path else None``.
+  - I: With --path defaulting to a hardcoded CSV ("data/raw/EURUSD_recent.csv")
+       and always wrapped in Path(...), omitting --path on a clean checkout (no
+       local CSV) raised FileNotFoundError instead of using load_symbol's
+       Parquet-cache / Drive / gdown auto-download fallback (loader.py treats
+       path=None as "resolve the bars for me"). That blocks the very first real
+       Barbershop/backtest run, which is the gateway to a real FTMO pass.
+  - R: load_symbol(symbol, path: Optional[Path] = None) only triggers the
+       cache/Drive/gdown resolution chain when path IS None. Operator brief
+       Section 9 mandates the guard so omitting --path triggers the fallback.
+  - A: Set default=None on --path and pass ``Path(a.path) if a.path else None``
+       so an explicit path still works and an omitted path triggers the loader's
+       auto-download.
+  - C: A clean checkout can now run the real backtest with no local data file,
+       which is the first step toward training a policy that actually passes the
+       FTMO challenge on real bars.
 """
 from __future__ import annotations
 
@@ -124,7 +150,12 @@ def render_png(equity, out_path, title):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="EURUSD")
-    ap.add_argument("--path", default="data/raw/EURUSD_recent.csv")
+    # default=None so an OMITTED --path triggers load_symbol's cache/Drive/gdown
+    # fallback instead of FileNotFoundError on a clean checkout. See IRAC in the
+    # module docstring (operator brief Section 9).
+    ap.add_argument("--path", default=None,
+                    help="explicit CSV path; omit to use the Parquet cache / Drive "
+                         "mount / gdown auto-download fallback in load_symbol")
     ap.add_argument("--updates", type=int, default=40)
     ap.add_argument("--train_frac", type=float, default=0.7)
     ap.add_argument("--target", type=float, default=2.5)
@@ -132,7 +163,7 @@ def main():
     a = ap.parse_args()
 
     t0 = time.time()
-    df, rep = load_symbol(a.symbol, path=Path(a.path))
+    df, rep = load_symbol(a.symbol, path=Path(a.path) if a.path else None)
     print(f"[load] {len(df):,} bars  {df.index.min()} -> {df.index.max()}  "
           f"spread={rep.had_spread}  ({time.time()-t0:.1f}s)")
     sd = prepare_symbol_data(df, symbol=a.symbol)
