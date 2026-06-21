@@ -170,3 +170,53 @@ def test_trades_today_resets_at_midnight():
     assert env._days_elapsed > start_days, "no day boundary crossed"
     assert env._trades_today == 0                            # reset at midnight
     assert env._day_start_balance == env.account.balance
+
+
+def test_midnight_reset_on_real_prepare_symbol_data_path(make_1m):
+    """Verification #1: the REAL data path (prepare_symbol_data -> challenge_day_ids) actually SETS
+    SymbolData.dates from a datetime index, so the midnight reset of trades_today / day_start_balance
+    fires on the Colab path — not just on hand-built synthetic dates. (make_1m is synthetic in VALUES
+    but exercises the identical date plumbing the real EURUSD bars use.)"""
+    from quantra.env.trading_env import prepare_symbol_data, challenge_day_ids
+
+    df = make_1m(n_bars=9000, seed=4)                        # multi-day, real DatetimeIndex
+    assert challenge_day_ids(df.index) is not None           # the real index yields day ids
+    sd = prepare_symbol_data(df, symbol="EURUSD")
+    assert sd.dates is not None and len(np.unique(sd.dates)) > 1   # day boundaries exist
+    env = TradingEnv({"EURUSD": sd})
+    env.reset()
+    env._trades_today = 7
+    start_days = env._days_elapsed
+    while env.t + 1 < env.T and env._days_elapsed == start_days:
+        env._advance_bar()
+    assert env._days_elapsed > start_days, "no day boundary crossed on the real path"
+    assert env._trades_today == 0
+    assert env._day_start_balance == env.account.balance
+
+
+def test_risk_manager_caps_single_trade_to_buffer():
+    """Verification #2: a single open's committed risk-to-stop is bounded by min(per-trade cap,
+    remaining buffer) REGARDLESS of raw_size — so `consecutive_wins` cannot drive one oversized trade
+    through the wall. Mirrors trading_env._apply_action's size() call (locked no-overshoot invariant)."""
+    import quantra.runtime.config as cfg
+    from quantra.locked_core.risk_manager.risk import RiskManager
+
+    rcfg = cfg.RiskConfig()
+    rm = RiskManager(10_000.0, rcfg)
+    available = 400.0                                        # ~4% daily buffer
+    per_trade_cap = rcfg.max_per_trade_risk_frac * 10_000.0
+    # max-confidence request under the ftmo per-trade cap
+    sr = rm.size("EURUSD", raw_size=1.0, atr_price=0.001, available_budget=available,
+                 apply_per_trade_cap=True, price=1.2, contract=100_000.0,
+                 leverage=100.0, free_margin=10_000.0)
+    assert sr.feasible
+    committed = sr.lots * sr.risk_per_lot
+    assert committed <= per_trade_cap + 1e-6                 # the 1% per-trade cap holds
+    assert committed <= available + 1e-6                     # never exceeds the buffer
+    # even with the per-trade cap OFF (ftmo OFF), the buffer ceiling still bounds a single trade
+    sr2 = rm.size("EURUSD", raw_size=1.0, atr_price=0.001, available_budget=available,
+                  apply_per_trade_cap=False, price=1.2, contract=100_000.0,
+                  leverage=100.0, free_margin=10_000.0)
+    if sr2.feasible:
+        assert sr2.lots * sr2.risk_per_lot <= available + 1e-6
+
