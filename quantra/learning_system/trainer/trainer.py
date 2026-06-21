@@ -37,7 +37,9 @@ from quantra.learning_system.curriculum_manager.curriculum import CurriculumMana
 from quantra.learning_system.ppo_agent.agent import PPOAgent
 from quantra.learning_system.ppo_agent.loss import ppo_loss
 from quantra.learning_system.rollout_buffer.buffer import RolloutBuffer
-from quantra.learning_system.trainer.gae import compute_gae
+# GAMMA is imported alongside compute_gae for the reward-normalizer's discounted-return accumulator
+# (it must use the SAME locked discount the GAE backup uses, or the running scale would be inconsistent).
+from quantra.learning_system.trainer.gae import compute_gae, GAMMA
 from quantra.learning_system.trainer.scheduler import AggressionScheduler, missed_opportunity
 # COUPLING [C1] -> market_pipeline/feature_builder/schema.py: STATE_DIM sizes the agent
 # input, the buffer rows, and the zero next_obs / checkpoint metadata below.
@@ -55,6 +57,47 @@ class TrainConfig:
     value_coef: float = 0.5
     g8_lookahead: int = 30         # bars ahead to score a missed opportunity
     seed: int = 0
+    # [2026-06-21] VecNormalize-style RETURN normalization. Default False = current behaviour (the
+    # baseline + tests are byte-identical when off). When True, the Trainer divides rewards by a running
+    # std of the discounted return before GAE, so returns stay ~O(1) and the (unnormalized) value loss
+    # is stable regardless of the operator's reward weights — required to run a large net_pnl_weight (or
+    # any far-from-1 weight) without the value head blowing up. Preserves all RELATIVE term ratios (it is
+    # a single positive scalar division of the TOTAL reward), so E8 Layer-0 dominance is untouched.
+    # COUPLING -> registry._NAME_ORDER/_SHORT ("normalize_rewards"/"rewnorm") + colab notebook TRAIN_CFG.
+    normalize_rewards: bool = False
+
+
+class RunningMeanStd:
+    """Chan/parallel running mean+variance for a scalar stream (the discounted RETURN).
+
+    Used only by the optional reward normalizer (TrainConfig.normalize_rewards). It tracks the std of
+    the discounted return so rewards can be scaled to ~O(1) no matter how large the operator's reward
+    weights make them — which is what keeps GAE + the (unnormalized) value loss numerically stable.
+    Pure numpy; carries no torch/graph state. var starts at 1.0 so the very first (pre-warmup) division
+    is a no-op-ish ~/1 rather than /0."""
+
+    def __init__(self, eps: float = 1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = float(eps)
+
+    def update(self, x) -> None:
+        x = np.asarray(x, dtype=np.float64).ravel()
+        if x.size == 0:
+            return
+        b_mean = float(x.mean()); b_var = float(x.var()); b_count = float(x.size)
+        delta = b_mean - self.mean
+        tot = self.count + b_count
+        self.mean += delta * b_count / tot
+        m_a = self.var * self.count
+        m_b = b_var * b_count
+        m2 = m_a + m_b + delta * delta * self.count * b_count / tot
+        self.var = m2 / tot
+        self.count = tot
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(self.var)) + 1e-8
 
 
 class Trainer:
@@ -77,6 +120,11 @@ class Trainer:
         self.buffer = RolloutBuffer(self.cfg.rollout_size, STATE_DIM, device=device)
         self._feature_mask = torch.as_tensor(self.curriculum.feature_mask())
         self.history: List[Dict[str, float]] = []
+        # Reward-normalizer state (used only when cfg.normalize_rewards): running std of the discounted
+        # return + the cross-rollout discounted accumulator. Persist across updates so the scale estimate
+        # keeps improving over the run (reset of the accumulator happens only on episode `done`).
+        self._ret_rms = RunningMeanStd()
+        self._ret_acc = 0.0
         self._obs = self._apply_mask(self.env.reset())
 
     # ----- helpers -----
@@ -135,6 +183,28 @@ class Trainer:
         miss_rate = misses / max(1, flats)
         return {"miss_rate": miss_rate, "flat_steps": flats}
 
+    # ----- reward normalization (optional) -----
+    def _normalize_rewards(self, reward: torch.Tensor, done: torch.Tensor) -> torch.Tensor:
+        """VecNormalize-style: divide rewards by the running std of the DISCOUNTED RETURN (no mean
+        shift, so reward signs/structure AND the E8 inter-layer ratios are preserved — it is one
+        positive scalar division of the TOTAL reward). The running std is updated with THIS rollout's
+        discounted returns BEFORE it scales them, so even the first rollout is normalized by its own
+        scale (no cold-start spike). Result is clamped to +/-10 (standard) against rare outliers.
+        Keeps returns ~O(1) so compute_gae + the unnormalized value loss stay stable at any reward
+        weight. COUPLING -> trainer.gae.GAMMA (same locked discount) + compute_gae (consumes this)."""
+        r = reward.detach().cpu().numpy().astype(np.float64)
+        d = done.detach().cpu().numpy()
+        disc = np.empty_like(r)
+        acc = self._ret_acc
+        for i in range(r.size):                 # discounted-return accumulator, reset on episode done
+            acc = acc * GAMMA + r[i]
+            disc[i] = acc
+            if d[i] > 0.5:
+                acc = 0.0
+        self._ret_acc = acc
+        self._ret_rms.update(disc)              # update the scale estimate with this rollout first...
+        return torch.clamp(reward / self._ret_rms.std, -10.0, 10.0)   # ...then scale by it
+
     # ----- update -----
     def update(self, dials) -> Dict[str, float]:
         b = self.buffer.get()
@@ -142,9 +212,12 @@ class Trainer:
             # net(...)[3] indexes the VALUE head — COUPLING -> ppo_agent/agent.py: relies on
             # ActorCritic.forward returning (dir, size, ptr, value) with value at index 3.
             last_value = 0.0 if float(b["done"][-1]) > 0.5 else float(self.agent.net(self._obs.unsqueeze(0))[3])
+        # Optional VecNormalize-style return scaling (TrainConfig.normalize_rewards). Keeps returns
+        # ~O(1) so the value loss stays stable at any reward weight; OFF -> raw rewards (unchanged).
+        rewards = self._normalize_rewards(b["reward"], b["done"]) if self.cfg.normalize_rewards else b["reward"]
         # COUPLING -> trainer/gae.py: positional args (rewards, values, dones, last_value);
         # b keys come from RolloutBuffer.get(). compute_gae returns (adv, ret) in this order.
-        adv, ret = compute_gae(b["reward"], b["value_old"], b["done"], last_value)
+        adv, ret = compute_gae(rewards, b["value_old"], b["done"], last_value)
 
         for g in self.opt.param_groups:
             g["lr"] = dials.lr
@@ -204,3 +277,20 @@ class Trainer:
 #   C: Repeated patient PPO steps under the M4 physics + masks turn exploration into a
 #      brain that hits target without breaching - and every brain is saved for the
 #      promotion gate, so only pass-rate improvements survive.
+# [2026-06-21] Optional VecNormalize-style RETURN normalization (TrainConfig.normalize_rewards).
+#   I: The operator wants the reward terms scaled so PnL is a meaningful number AND the run is stable.
+#      Advantages are already per-minibatch normalized (loss.py), but the VALUE loss is NOT — so a large
+#      reward scale (e.g. a big net_pnl_weight, or the 5.0 day-end events) balloons value_loss and
+#      whipsaws the policy (observed: value_loss -> ~1.0, entropy crash/recover ~upd 1750/2750).
+#   R: Operator decision 2026-06-21 ("MAKE IT NORMALIZED", priority: pass consistently > +2.5% w/o
+#      breaching trailing DD > everything else). Standard fix: scale rewards by the running std of the
+#      discounted return so returns stay ~O(1) at any weight; preserve all RELATIVE ratios so E8 holds.
+#   A: Added RunningMeanStd + Trainer._normalize_rewards (discounted-return accumulator -> RMS -> divide
+#      -> clamp +/-10), gated by TrainConfig.normalize_rewards (default False = unchanged baseline; the
+#      notebook turns it ON). GAMMA imported from gae so the accumulator uses the SAME locked discount.
+#      registry._NAME_ORDER/_SHORT gained "normalize_rewards"/"rewnorm" so a normalized run is named +
+#      reproduced. gamma/lambda, the GAE math, masks, sizing, wall, and the reward layer keys are all
+#      UNCHANGED. With normalization on, the absolute reward scale is irrelevant to learning (only term
+#      ratios are), so net_pnl_weight returns to 1.0 and the anti-breach pain/event signals stay audible.
+#   C: The run is numerically stable at any operator weighting, so the policy can be driven toward
+#      "+2.5% without breaching the trailing DD, consistently" without the value head detonating.

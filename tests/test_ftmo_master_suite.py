@@ -1451,6 +1451,38 @@ def test_trainer_runs_and_checkpoints():
     assert path.exists()
 
 
+def test_running_mean_std_matches_numpy():
+    """RunningMeanStd (the reward normalizer's scale tracker) matches numpy mean/std on a chunked stream."""
+    from quantra.learning_system.trainer.trainer import RunningMeanStd
+    rng = np.random.default_rng(0)
+    data = rng.normal(50.0, 17.0, 4000)
+    rms = RunningMeanStd()
+    for i in range(0, len(data), 131):                 # fed in uneven chunks
+        rms.update(data[i:i + 131])
+    assert abs(rms.mean - data.mean()) < 0.1
+    assert abs(rms.std - data.std()) < 0.1
+
+
+def test_reward_normalization_keeps_value_loss_bounded():
+    """A large net_pnl_weight blows up the (unnormalized) value loss; return normalization
+    (TrainConfig.normalize_rewards) keeps it ~O(1) and finite — the stability fix that lets the
+    operator scale the reward freely. Default OFF is unchanged (the integration test above runs off)."""
+    data = {"EURUSD": _sym(T=600, atr=1e-4, drift=1e-5)}
+    big = cfg.RewardConfig(net_pnl_weight=10000.0)
+
+    def _max_vloss(normalize: bool) -> float:
+        env = TradingEnv(data, reward_cfg=big, risk_cfg=RiskConfig(max_per_trade_risk_frac=0.2))
+        tr = Trainer(env, train_cfg=TrainConfig(rollout_size=128, minibatch=32, seed=0,
+                                                normalize_rewards=normalize))
+        return max(h["value_loss"] for h in tr.train(n_updates=6))
+
+    off = _max_vloss(False)
+    on = _max_vloss(True)
+    assert np.isfinite(on)            # never NaN/inf with normalization
+    assert on < off                   # normalization shrinks the blowup
+    assert on < 10.0                  # ...to an O(1)-ish scale (off is orders larger)
+
+
 # =============================================================================
 # SECTION L — TELEMETRYLOGGER (versioned data contract, round-trip) (M9)
 # FTMO link: no telemetry -> no diagnosis. A breach/pass-day must be fully

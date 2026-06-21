@@ -50,7 +50,7 @@ _NAME_ORDER: Tuple[str, ...] = (
     "drawdown_pain_weight", "drawdown_pain_steepness", "trade_quality_weight", "failed_day_penalty",
     # TrainConfig knobs (config.build_overrides_dict diffs these too) — kept LAST so the "perspective"
     # knobs (phase/wheels/challenge/reward) lead the name and optimization details trail it.
-    "rollout_size", "minibatch", "value_coef", "g8_lookahead", "seed",
+    "rollout_size", "minibatch", "value_coef", "g8_lookahead", "seed", "normalize_rewards",
 )
 _SHORT: Dict[str, str] = {
     "training_wheels": "wheels", "daily_target_pct": "tgt", "daily_risk_pct": "risk",
@@ -59,7 +59,7 @@ _SHORT: Dict[str, str] = {
     "drawdown_pain_weight": "pain", "drawdown_pain_steepness": "paink", "trade_quality_weight": "tradeq",
     "failed_day_penalty": "failday",
     "rollout_size": "roll", "minibatch": "mb", "value_coef": "vcoef", "g8_lookahead": "g8look",
-    "seed": "seed",
+    "seed": "seed", "normalize_rewards": "rewnorm",
 }
 
 
