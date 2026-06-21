@@ -87,6 +87,22 @@ We had (pre-normalization): breaches 8/8 → 6/8 over 1000→2000 updates, win ~
    the next lever is the **`DRAWDOWN_PAIN_WEIGHT`** (the "without breaching trailing DD" term) —
    raise it so protecting the peak is learned. Don't touch locked items.
 
+## PARKED / IN-FLIGHT IDEAS (not yet built)
+- **Expert Signal Layer (Idea B) — DESIGN DOC WRITTEN, build greenlit but not started.**
+  See [`docs/EXPERT_SIGNAL_DESIGN.md`](EXPERT_SIGNAL_DESIGN.md). Turn the operator's STRAT
+  portfolio (the strategies PDF) into a small block of **soft observation features**
+  (`expert_long/short`, `regime_bias`, `confidence`, `trend_strength`, `volatility_ok`,
+  `session_ok`, soft `do_not_trade`). Scope this round: **STRAT-001…006** (market-based;
+  news/COT/opening-bell deferred — need external data). Key facts: the `law` block already
+  encodes ~80% of it, so the engine is mostly a **vote aggregator** over existing signals;
+  it's **action-independent → precomputed** in the FeatureBuilder; 🔴 `do_not_trade` stays a
+  FEATURE never a mask (the CCI-gate lesson); adding the block changes `STATE_DIM` →
+  **forces a fresh retrain** (operator accepted). Operator chose "doc only for now".
+- **Behavioral Cloning (Idea A) — PARKED.** Auto-generate `(obs, direction)` demos by
+  replaying the rules through the env, warm-start the direction head before PPO (class-weight
+  to avoid always-HOLD), behind a `BC_WARMSTART_EPOCHS` knob. Bigger lever for the
+  cold-start "no common sense" problem; revisit after the expert-feature layer.
+
 ## Known mechanics worth remembering
 - **The 4% wall is TRAILING from the intraday peak** (`peak_equity − 4%×account`, peak resets
   each midnight). So a green day can still BREACH by giving back >4% from its high (this is why
